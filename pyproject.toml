@@ -42,6 +42,10 @@ select = [
     "I",   # isort
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+asyncio_mode = "auto"
+
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
