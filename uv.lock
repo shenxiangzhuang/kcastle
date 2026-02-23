@@ -4,34 +4,34 @@ requires-python = ">=3.10.11"
 
 [manifest]
 members = [
-    "k-agent-core",
-    "k-ai",
-    "k-coding-agent",
+    "kagent",
+    "kai",
+    "kcode",
 ]
 
 [[package]]
-name = "k-agent-core"
+name = "kagent"
 version = "0.1.0"
-source = { editable = "packages/k-agent-core" }
+source = { editable = "packages/kagent" }
 dependencies = [
-    { name = "k-ai" },
+    { name = "kai" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "k-ai", editable = "packages/k-ai" }]
+requires-dist = [{ name = "kai", editable = "packages/kai" }]
 
 [[package]]
-name = "k-ai"
+name = "kai"
 version = "0.1.0"
-source = { editable = "packages/k-ai" }
+source = { editable = "packages/kai" }
 
 [[package]]
-name = "k-coding-agent"
+name = "kcode"
 version = "0.1.0"
-source = { editable = "packages/k-coding-agent" }
+source = { editable = "packages/kcode" }
 dependencies = [
-    { name = "k-agent-core" },
+    { name = "kagent" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "k-agent-core", editable = "packages/k-agent-core" }]
+requires-dist = [{ name = "kagent", editable = "packages/kagent" }]
