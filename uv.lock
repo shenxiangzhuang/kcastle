@@ -1,0 +1,37 @@
+version = 1
+revision = 3
+requires-python = ">=3.10.11"
+
+[manifest]
+members = [
+    "k-agent-core",
+    "k-ai",
+    "k-coding-agent",
+]
+
+[[package]]
+name = "k-agent-core"
+version = "0.1.0"
+source = { editable = "packages/k-agent-core" }
+dependencies = [
+    { name = "k-ai" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "k-ai", editable = "packages/k-ai" }]
+
+[[package]]
+name = "k-ai"
+version = "0.1.0"
+source = { editable = "packages/k-ai" }
+
+[[package]]
+name = "k-coding-agent"
+version = "0.1.0"
+source = { editable = "packages/k-coding-agent" }
+dependencies = [
+    { name = "k-agent-core" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "k-agent-core", editable = "packages/k-agent-core" }]
