@@ -1,0 +1,6 @@
+[submodule "references/kimi-cli"]
+	path = references/kimi-cli
+	url = git@github.com:MoonshotAI/kimi-cli.git
+[submodule "references/pi-mono"]
+	path = references/pi-mono
+	url = git@github.com:badlogic/pi-mono.git

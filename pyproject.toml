@@ -1,2 +1,49 @@
+[project]
+name = "k"
+version = "0.1.0"
+description = "The k agent framework"
+readme = "README.md"
+requires-python = ">=3.12"
+
+[dependency-groups]
+dev = [
+    "kai",
+    "kagent",
+    "kcode",
+    "pyright>=1.1.407",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.14.10",
+]
+
 [tool.uv.workspace]
 members = ["packages/*"]
+
+[tool.uv.sources]
+kai = { workspace = true }
+kagent = { workspace = true }
+kcode = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # Pyflakes
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "I",   # isort
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+include = [
+    "packages/*/src/**/*.py",
+    "packages/*/tests/**/*.py",
+]
