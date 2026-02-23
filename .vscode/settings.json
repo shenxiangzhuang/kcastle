@@ -1,7 +1,4 @@
 {
-    "search.exclude": {
-        "references": true
-    },
     "typescript.validate.enable": false,
     "javascript.validate.enable": false,
 }
