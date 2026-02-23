@@ -1,19 +1,14 @@
 [project]
-name = "k-agent-core"
+name = "kai"
 version = "0.1.0"
-description = "Core agent framework for the k agent framework"
+description = "AI provider abstractions for the k agent framework"
 readme = "README.md"
 authors = [
     { name = "Xiangzhuang Shen", email = "datahonor@gmail.com" }
 ]
 requires-python = ">=3.10.11"
-dependencies = [
-    "k-ai",
-]
+dependencies = []
 
 [build-system]
 requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
-
-[tool.uv.sources]
-k-ai = { workspace = true }
