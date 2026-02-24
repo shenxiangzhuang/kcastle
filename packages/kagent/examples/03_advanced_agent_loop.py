@@ -1,4 +1,4 @@
-"""Example 04 — agent_loop (Level 1)
+"""Example 03 — Advanced: agent_loop (Level 1)
 
 Use agent_loop() when you need more control than Agent provides
 but don't want to manage the step-by-step loop yourself.
@@ -12,7 +12,7 @@ Demonstrates:
 
 Run:
     export DEEPSEEK_API_KEY=sk-...
-    uv run python examples/04_agent_loop.py
+    uv run python examples/03_advanced_agent_loop.py
 """
 
 import asyncio
@@ -105,6 +105,8 @@ async def main() -> None:
 
             case AgentError(error=err):
                 print(f"[error] {err}")
+            case _:
+                pass
 
     # state.messages now contains the full conversation.
     print(f"\nConversation history ({len(state.messages)} messages):")

@@ -1,4 +1,4 @@
-"""Example 05 — agent_step (Level 0)
+"""Example 04 — Advanced: agent_step (Level 0)
 
 agent_step() is the lowest-level primitive: one LLM call + tool execution.
 You build the Context, call agent_step(), and handle state yourself.
@@ -14,7 +14,7 @@ step and why a loop is required.
 
 Run:
     export DEEPSEEK_API_KEY=sk-...
-    uv run python examples/05_agent_step.py
+    uv run python examples/04_advanced_agent_step.py
 """
 
 import asyncio

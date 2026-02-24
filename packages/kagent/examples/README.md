@@ -1,6 +1,6 @@
 # kagent examples
 
-Five self-contained scripts that cover the full three-level API.
+Four self-contained scripts that cover the full three-level API.
 Read them in order — each builds on the concepts of the previous one.
 
 ## Prerequisites
@@ -15,17 +15,16 @@ uv sync
 
 | File | Level | What it shows |
 |------|-------|---------------|
-| [`01_quickstart.py`](01_quickstart.py) | 2 — `Agent` | Simplest possible agent: one question, one answer |
-| [`02_tools.py`](02_tools.py) | 2 — `Agent` | Define typed tools, observe the full event stream |
-| [`03_multi_turn.py`](03_multi_turn.py) | 2 — `Agent` | Persistent history across turns; `steer()` and `abort()` |
-| [`04_agent_loop.py`](04_agent_loop.py) | 1 — `agent_loop` | Custom `build_context`, `should_continue`, `on_tool_result` |
-| [`05_agent_step.py`](05_agent_step.py) | 0 — `agent_step` | Single-step primitive; you own the loop and state |
+| [`01_quickstart.py`](01_quickstart.py) | 2 — `Agent` | Create an agent with tools, one-shot `complete()` |
+| [`02_multi_tool_agent.py`](02_multi_tool_agent.py) | 2 — `Agent` | Non-streaming & streaming, multi-tool, multi-turn, steer/abort |
+| [`03_advanced_agent_loop.py`](03_advanced_agent_loop.py) | 1 — `agent_loop` | Custom `build_context`, `should_continue`, `on_tool_result` |
+| [`04_advanced_agent_step.py`](04_advanced_agent_step.py) | 0 — `agent_step` | Single-step primitive; you own the loop and state |
 
 ## Running
 
 ```bash
 uv run python packages/kagent/examples/01_quickstart.py
-uv run python packages/kagent/examples/02_tools.py
+uv run python packages/kagent/examples/02_multi_tool_agent.py
 # … and so on
 ```
 
