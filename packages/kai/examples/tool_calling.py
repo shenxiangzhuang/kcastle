@@ -1,7 +1,7 @@
 """Tool calling examples — complete and streaming with tools.
 
-kai provides declarative tool definitions only; execution logic belongs
-in the application layer (or in kagent for automated loops).
+Tools are subclasses of ``Tool`` with an ``execute()`` method.
+The same Tool object serves as both the LLM schema and the executor.
 
 Run:
     export DEEPSEEK_API_KEY=sk-...   # default
@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import sys
+from typing import Any
 
 from kai import (
     Context,
@@ -28,48 +29,71 @@ from kai import (
     Tool,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResult,
     complete,
     stream,
 )
 
 # ---------------------------------------------------------------------------
-# Tools & execution
+# Tools (subclass Tool and override execute())
 # ---------------------------------------------------------------------------
 
-TOOLS = [
-    Tool(
-        name="get_weather",
-        description="Get the current weather for a city.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "city": {"type": "string", "description": "City name"},
-            },
-            "required": ["city"],
+
+class GetWeather(Tool):
+    """Get the current weather for a city."""
+
+    name: str = "get_weather"
+    description: str = "Get the current weather for a city."
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "description": "City name"},
         },
-    ),
-    Tool(
-        name="calculate",
-        description="Evaluate a math expression.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "expression": {"type": "string", "description": "Math expression"},
-            },
-            "required": ["expression"],
-        },
-    ),
-]
+        "required": ["city"],
+    }
+
+    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        city = arguments["city"]
+        return ToolResult(output=f"The weather in {city} is 22°C and sunny.")
 
 
-def execute_tool(name: str, arguments: str) -> str:
-    """Simulate tool execution (replace with real logic)."""
+class Calculate(Tool):
+    """Evaluate a math expression."""
+
+    name: str = "calculate"
+    description: str = "Evaluate a math expression."
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "expression": {"type": "string", "description": "Math expression"},
+        },
+        "required": ["expression"],
+    }
+
+    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        result = str(eval(arguments["expression"]))  # noqa: S307
+        return ToolResult(output=result)
+
+
+TOOLS: list[Tool] = [GetWeather(), Calculate()]
+
+
+def find_tool(name: str) -> Tool | None:
+    """Find a tool by name."""
+    for tool in TOOLS:
+        if tool.name == name:
+            return tool
+    return None
+
+
+async def execute_tool_call(name: str, arguments: str) -> str:
+    """Parse arguments and execute a tool."""
+    tool = find_tool(name)
+    if tool is None:
+        return f"Unknown tool: {name}"
     args = json.loads(arguments)
-    if name == "get_weather":
-        return f"The weather in {args['city']} is 22°C and sunny."
-    if name == "calculate":
-        return str(eval(args["expression"]))  # noqa: S307
-    return f"Unknown tool: {name}"
+    result = await tool.execute(call_id="", arguments=args)
+    return result.output
 
 
 def make_provider() -> OpenAICompletions:
@@ -105,7 +129,7 @@ async def example_complete() -> None:
     if response.tool_calls:
         for tc in response.tool_calls:
             print(f"  Tool call: {tc.name}({tc.arguments})")
-            result = execute_tool(tc.name, tc.arguments)
+            result = await execute_tool_call(tc.name, tc.arguments)
             print(f"  Result:    {result}")
             messages.append(Message.tool_result(tc.id, result))
 
@@ -149,7 +173,7 @@ async def example_stream() -> None:
             case ToolCallStartEvent(name=name):
                 print(f"  [Tool call: {name}]")
             case ToolCallEndEvent(tool_call=tc):
-                result = execute_tool(tc.name, tc.arguments)
+                result = await execute_tool_call(tc.name, tc.arguments)
                 print(f"  [Result:    {result}]")
                 tool_results.append(Message.tool_result(tc.id, result))
             case DoneEvent(message=assistant_msg):

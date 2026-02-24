@@ -39,6 +39,7 @@ from kai import (
     ToolCallDeltaEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    ToolResult,
     stream,
 )
 
@@ -48,37 +49,16 @@ console = Console()
 # Tool definitions — locally executable, no network required
 # ---------------------------------------------------------------------------
 
-TOOLS = [
-    Tool(
-        name="get_system_info",
-        description="Get current operating system information (OS name, version, architecture).",
-        parameters={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="get_python_version",
-        description="Get the Python interpreter version and executable path.",
-        parameters={"type": "object", "properties": {}},
-    ),
-    Tool(
-        name="get_env_variable",
-        description="Read the value of an environment variable.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Environment variable name"},
-            },
-            "required": ["name"],
-        },
-    ),
-]
+class GetSystemInfo(Tool):
+    """Get current operating system information."""
 
+    name: str = "get_system_info"
+    description: str = "Get current operating system information (OS name, version, architecture)."
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
 
-def execute_tool(name: str, arguments: str) -> str:
-    """Execute a tool locally and return a result string."""
-    args: dict[str, Any] = json.loads(arguments) if arguments.strip() else {}
-    match name:
-        case "get_system_info":
-            return json.dumps(
+    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            output=json.dumps(
                 {
                     "system": platform.system(),
                     "release": platform.release(),
@@ -86,22 +66,68 @@ def execute_tool(name: str, arguments: str) -> str:
                     "platform": platform.platform(),
                 }
             )
-        case "get_python_version":
-            return json.dumps(
+        )
+
+
+class GetPythonVersion(Tool):
+    """Get the Python interpreter version and executable path."""
+
+    name: str = "get_python_version"
+    description: str = "Get the Python interpreter version and executable path."
+    parameters: dict[str, Any] = {"type": "object", "properties": {}}
+
+    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            output=json.dumps(
                 {
                     "version": sys.version,
                     "executable": sys.executable,
                     "implementation": platform.python_implementation(),
                 }
             )
-        case "get_env_variable":
-            var_name = args.get("name", "")
-            value = os.environ.get(var_name)
-            if value is None:
-                return json.dumps({"error": f"Variable '{var_name}' is not set"})
-            return json.dumps({"name": var_name, "value": value})
-        case _:
-            return json.dumps({"error": f"Unknown tool: {name}"})
+        )
+
+
+class GetEnvVariable(Tool):
+    """Read the value of an environment variable."""
+
+    name: str = "get_env_variable"
+    description: str = "Read the value of an environment variable."
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Environment variable name"},
+        },
+        "required": ["name"],
+    }
+
+    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+        var_name = arguments.get("name", "")
+        value = os.environ.get(var_name)
+        if value is None:
+            return ToolResult.error(f"Variable '{var_name}' is not set")
+        return ToolResult(output=json.dumps({"name": var_name, "value": value}))
+
+
+TOOLS: list[Tool] = [GetSystemInfo(), GetPythonVersion(), GetEnvVariable()]
+
+
+def find_tool(name: str) -> Tool | None:
+    """Find a tool by name."""
+    for tool in TOOLS:
+        if tool.name == name:
+            return tool
+    return None
+
+
+async def execute_tool_call(name: str, arguments: str) -> str:
+    """Parse arguments and execute a tool."""
+    tool = find_tool(name)
+    if tool is None:
+        return json.dumps({"error": f"Unknown tool: {name}"})
+    args: dict[str, Any] = json.loads(arguments) if arguments.strip() else {}
+    result = await tool.execute(call_id="", arguments=args)
+    return result.output
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +187,7 @@ async def stream_round(
             case ToolCallDeltaEvent():
                 pass
             case ToolCallEndEvent(tool_call=tc):
-                result = execute_tool(tc.name, tc.arguments)
+                result = await execute_tool_call(tc.name, tc.arguments)
                 args_short = tc.arguments[:80] + ("..." if len(tc.arguments) > 80 else "")
                 console.print(f"({args_short})")
                 result_short = result[:120] + ("..." if len(result) > 120 else "")

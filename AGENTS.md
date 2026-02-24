@@ -15,6 +15,12 @@ Or run tools directly with `uv run`:
 - `uv run pyright`
 - `uv run pytest`
 
+
+## PoC stage
+
+We are in PoC stage now, the break changes are acceptable, and we will iterate fast. The main goal is to build a clean and solid foundation for the agent framework, so we can easily build on top of it and add more features in the future. We will focus on the LLM abstraction layer(kai) and the core agent runtime(kagent) first, and then we can add the sandbox environment and the coding agent CLI later.
+
+
 ## Project overview
 
 K is a Python monorepo for building AI agents. It provides a unified LLM abstraction layer,
