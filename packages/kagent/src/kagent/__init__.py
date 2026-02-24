@@ -23,6 +23,7 @@ from kagent.agent import Agent
 
 # Events
 from kagent.event import (
+    AgentAbort,
     AgentEnd,
     AgentError,
     AgentEvent,
@@ -37,7 +38,6 @@ from kagent.event import (
 # Level 1: Multi-turn loop
 from kagent.loop import (
     BuildContextFn,
-    OnToolResultFn,
     ShouldContinueFn,
     agent_loop,
 )
@@ -46,7 +46,7 @@ from kagent.loop import (
 from kagent.state import AgentState
 
 # Level 0: Single-turn primitive
-from kagent.step import agent_step
+from kagent.step import OnToolResultFn, agent_step
 
 __all__ = [
     # Levels
@@ -62,6 +62,7 @@ __all__ = [
     "AgentEvent",
     "AgentStart",
     "AgentEnd",
+    "AgentAbort",
     "AgentError",
     "TurnStart",
     "TurnEnd",

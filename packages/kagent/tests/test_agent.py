@@ -12,7 +12,7 @@ from conftest import (
 from kai import Message, ToolResult
 
 from kagent.agent import Agent
-from kagent.event import AgentStart, TurnEnd
+from kagent.event import AgentAbort, AgentEnd, AgentEvent, AgentStart, TurnEnd
 
 
 class TestAgentRun:
@@ -150,3 +150,72 @@ class TestAgentCallbacks:
         await agent.complete("go")
         # The tool result should have been intercepted
         assert agent.state.messages[2].role == "tool"
+
+
+class TestAgentAbort:
+    @pytest.mark.asyncio
+    async def test_abort_emits_agent_abort_and_agent_end(self) -> None:
+        """abort() should emit AgentAbort followed by AgentEnd, never silently exit."""
+        echo = make_echo_tool()
+        provider = MockProvider(
+            [
+                # Turn 1: tool call — agent will loop
+                tool_call_chunks("c1", "echo", '{"message": "hi"}'),
+                # Turn 2: another tool call — but abort fires before this
+                tool_call_chunks("c2", "echo", '{"message": "bye"}'),
+                text_chunks("Done"),
+            ]
+        )
+        agent = Agent(provider=provider, tools=[echo])
+
+        events: list[AgentEvent] = []
+        async for event in agent.run("go"):
+            events.append(event)
+            # Abort after the first turn ends
+            if isinstance(event, TurnEnd):
+                agent.abort()
+
+        # Should have AgentAbort followed by AgentEnd
+        abort_events = [e for e in events if isinstance(e, AgentAbort)]
+        end_events = [e for e in events if isinstance(e, AgentEnd)]
+        assert len(abort_events) == 1, "Expected exactly one AgentAbort event"
+        assert len(end_events) == 1, "Expected exactly one AgentEnd event"
+
+        # AgentAbort should come before AgentEnd
+        abort_idx = events.index(abort_events[0])
+        end_idx = events.index(end_events[0])
+        assert abort_idx < end_idx, "AgentAbort should precede AgentEnd"
+
+        # Both should carry the current messages
+        assert len(abort_events[0].messages) > 0
+        assert len(end_events[0].messages) > 0
+
+    @pytest.mark.asyncio
+    async def test_abort_before_run_is_noop(self) -> None:
+        """abort() before run starts should be a no-op."""
+        provider = MockProvider([text_chunks("Hi")])
+        agent = Agent(provider=provider)
+
+        # abort before run — should not crash
+        agent.abort()
+
+        msg = await agent.complete("Hello")
+        assert msg.extract_text() == "Hi"
+
+    @pytest.mark.asyncio
+    async def test_abort_stops_agent_running_flag(self) -> None:
+        """After abort, is_running should be False."""
+        provider = MockProvider(
+            [
+                tool_call_chunks("c1", "echo", '{"message": "hi"}'),
+                text_chunks("Done"),
+            ]
+        )
+        echo = make_echo_tool()
+        agent = Agent(provider=provider, tools=[echo])
+
+        async for event in agent.run("go"):
+            if isinstance(event, TurnEnd):
+                agent.abort()
+
+        assert agent.is_running is False

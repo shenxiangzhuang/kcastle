@@ -7,33 +7,25 @@ Middleware base class.
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from kai import Context, DoneEvent, ErrorEvent, Message, Provider, Tool, ToolResult, stream
+from kai import Context, Message, Provider
 
 from kagent.event import (
     AgentEnd,
     AgentError,
     AgentEvent,
     AgentStart,
-    StreamChunk,
-    ToolExecEnd,
-    ToolExecStart,
     TurnEnd,
-    TurnStart,
 )
 from kagent.state import AgentState
+from kagent.step import OnToolResultFn, agent_step
 
 # --- Callback type aliases ---
 
 type BuildContextFn = Callable[[AgentState], Awaitable[Context]]
 """Build a ``kai.Context`` from the current agent state.
 The SINGLE POINT where all context customization happens."""
-
-type OnToolResultFn = Callable[[str, str, ToolResult], Awaitable[ToolResult]]
-"""Called after tool execution. Receives ``(call_id, tool_name, result)``.
-Return (possibly modified) result."""
 
 type ShouldContinueFn = Callable[[AgentState, Message], Awaitable[bool]]
 """After each turn, decide whether to continue looping.
@@ -49,14 +41,6 @@ def _default_build_context(state: AgentState) -> Context:
     )
 
 
-def _find_tool(name: str, tools: list[Tool]) -> Tool | None:
-    """Find a tool by name."""
-    for tool in tools:
-        if tool.name == name:
-            return tool
-    return None
-
-
 async def agent_loop(
     *,
     provider: Provider,
@@ -68,7 +52,7 @@ async def agent_loop(
 ) -> AsyncIterator[AgentEvent]:
     """Run a multi-turn agent loop.
 
-    Repeatedly calls the LLM and executes tool calls until the model stops
+    Repeatedly calls ``agent_step()`` and manages state until the model stops
     requesting tools, a callback halts the loop, or ``max_turns`` is reached.
 
     The ``state.messages`` list is mutated in-place — assistant messages and
@@ -107,97 +91,34 @@ async def agent_loop(
         else:
             context = _default_build_context(state)
 
-        yield TurnStart()
-
-        # Stream LLM response
+        # Delegate to agent_step — all LLM streaming + tool execution happens there
         assistant_msg: Message | None = None
-        async for stream_event in await stream(provider, context):
-            yield StreamChunk(event=stream_event)
+        async for event in agent_step(
+            provider=provider,
+            context=context,
+            tools=state.tools,
+            on_tool_result=on_tool_result,
+        ):
+            # Intercept TurnEnd to update state
+            if isinstance(event, TurnEnd):
+                assistant_msg = event.message
+                state.messages.append(event.message)
+                for tool_msg in event.tool_results:
+                    state.messages.append(tool_msg)
 
-            match stream_event:
-                case DoneEvent(message=msg):
-                    assistant_msg = msg
-                case ErrorEvent(error=err):
-                    yield AgentError(error=err)
-                    yield AgentEnd(messages=state.messages)
-                    return
-                case _:
-                    pass
+            # Intercept AgentError to terminate
+            if isinstance(event, AgentError):
+                yield event
+                yield AgentEnd(messages=state.messages)
+                return
+
+            yield event
 
         if assistant_msg is None:
-            yield AgentError(error=RuntimeError("Stream ended without DoneEvent or ErrorEvent"))
+            # Should not happen — AgentError should have been yielded
             yield AgentEnd(messages=state.messages)
             return
 
-        # Append assistant message to state
-        state.messages.append(assistant_msg)
-
-        # Execute tool calls
-        tool_result_messages: list[Message] = []
-        if assistant_msg.tool_calls:
-            for tool_call in assistant_msg.tool_calls:
-                tool = _find_tool(tool_call.name, state.tools)
-
-                try:
-                    arguments: dict[str, object] = json.loads(tool_call.arguments)
-                except json.JSONDecodeError as e:
-                    arguments = {}
-                    result = ToolResult.error(f"Invalid JSON arguments: {e}")
-                    yield ToolExecStart(
-                        call_id=tool_call.id,
-                        tool_name=tool_call.name,
-                        arguments=arguments,
-                    )
-
-                    if on_tool_result is not None:
-                        result = await on_tool_result(tool_call.id, tool_call.name, result)
-
-                    yield ToolExecEnd(
-                        call_id=tool_call.id,
-                        tool_name=tool_call.name,
-                        result=result,
-                        is_error=True,
-                    )
-                    tool_msg = Message.tool_result(tool_call.id, result.output, is_error=True)
-                    state.messages.append(tool_msg)
-                    tool_result_messages.append(tool_msg)
-                    continue
-
-                yield ToolExecStart(
-                    call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    arguments=arguments,
-                )
-
-                if tool is None:
-                    result = ToolResult.error(f"Tool not found: {tool_call.name}")
-                else:
-                    try:
-                        result = await tool.execute(
-                            call_id=tool_call.id,
-                            arguments=arguments,
-                        )
-                    except Exception as e:
-                        result = ToolResult.error(str(e))
-
-                # on_tool_result interception
-                if on_tool_result is not None:
-                    result = await on_tool_result(tool_call.id, tool_call.name, result)
-
-                yield ToolExecEnd(
-                    call_id=tool_call.id,
-                    tool_name=tool_call.name,
-                    result=result,
-                    is_error=result.is_error,
-                )
-
-                tool_msg = Message.tool_result(
-                    tool_call.id, result.output, is_error=result.is_error
-                )
-                state.messages.append(tool_msg)
-                tool_result_messages.append(tool_msg)
-
-        yield TurnEnd(message=assistant_msg, tool_results=tool_result_messages)
         turn_count += 1
 
         # Decide whether to continue

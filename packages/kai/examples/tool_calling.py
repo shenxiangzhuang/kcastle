@@ -1,7 +1,8 @@
 """Tool calling examples — complete and streaming with tools.
 
-Tools are subclasses of ``Tool`` with an ``execute()`` method.
-The same Tool object serves as both the LLM schema and the executor.
+Tools are subclasses of ``Tool`` with an inner ``Params(BaseModel)`` class
+and an ``execute(params)`` method. JSON Schema is auto-generated from the
+Pydantic model, keeping tool definitions typed and DRY.
 
 Run:
     export DEEPSEEK_API_KEY=sk-...   # default
@@ -11,11 +12,14 @@ Run:
     uv run python examples/tool_calling.py stream     # stream only
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import sys
-from typing import Any
+
+from pydantic import BaseModel, Field
 
 from kai import (
     Context,
@@ -44,17 +48,12 @@ class GetWeather(Tool):
 
     name: str = "get_weather"
     description: str = "Get the current weather for a city."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "city": {"type": "string", "description": "City name"},
-        },
-        "required": ["city"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        city = arguments["city"]
-        return ToolResult(output=f"The weather in {city} is 22°C and sunny.")
+    class Params(BaseModel):
+        city: str = Field(description="City name")
+
+    async def execute(self, params: GetWeather.Params) -> ToolResult:
+        return ToolResult(output=f"The weather in {params.city} is 22°C and sunny.")
 
 
 class Calculate(Tool):
@@ -62,37 +61,28 @@ class Calculate(Tool):
 
     name: str = "calculate"
     description: str = "Evaluate a math expression."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "expression": {"type": "string", "description": "Math expression"},
-        },
-        "required": ["expression"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        result = str(eval(arguments["expression"]))  # noqa: S307
+    class Params(BaseModel):
+        expression: str = Field(description="Math expression")
+
+    async def execute(self, params: Calculate.Params) -> ToolResult:
+        result = str(eval(params.expression))  # noqa: S307
         return ToolResult(output=result)
 
 
 TOOLS: list[Tool] = [GetWeather(), Calculate()]
 
 
-def find_tool(name: str) -> Tool | None:
-    """Find a tool by name."""
-    for tool in TOOLS:
-        if tool.name == name:
-            return tool
-    return None
+TOOL_MAP: dict[str, Tool] = {t.name: t for t in TOOLS}
 
 
 async def execute_tool_call(name: str, arguments: str) -> str:
     """Parse arguments and execute a tool."""
-    tool = find_tool(name)
+    tool = TOOL_MAP.get(name)
     if tool is None:
         return f"Unknown tool: {name}"
     args = json.loads(arguments)
-    result = await tool.execute(call_id="", arguments=args)
+    result = await tool.execute(args)
     return result.output
 
 

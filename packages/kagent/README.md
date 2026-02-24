@@ -7,7 +7,7 @@ Core agent runtime for the K agent framework — a context-first, three-level ag
 1. **Context-first** — Context construction is a single, explicit point (`build_context`). You control exactly what goes to the LLM.
 2. **Three levels** — `agent_step()` → `agent_loop()` → `Agent`. Pick the level that fits.
 3. **No framework concepts** — Callbacks are plain function parameters. No Hooks, no Middleware.
-4. **Unified tools** — Uses `kai.Tool` directly. Subclass and override `execute()` to make executable tools.
+4. **Unified tools** — Uses `kai.Tool` directly. Define inner `Params(BaseModel)` for typed, auto-schema tools.
 5. **kai-native** — Uses `kai.Message`, `kai.Context`, `kai.Provider`, `kai.StreamEvent` directly.
 
 ## Architecture
@@ -40,26 +40,25 @@ Core agent runtime for the K agent framework — a context-first, three-level ag
 
 ### Define a Tool
 
-Subclass `kai.Tool` and override `execute()`:
+Subclass `kai.Tool`, define inner `Params(BaseModel)`, and override `execute()`:
 
 ```python
-from typing import Any
+from pydantic import BaseModel, Field
 from kai import Tool, ToolResult
 
 
 class GetWeather(Tool):
     name: str = "get_weather"
     description: str = "Get weather for a location."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {"location": {"type": "string"}},
-        "required": ["location"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        location = arguments["location"]
-        return ToolResult(output=f"Sunny in {location}")
+    class Params(BaseModel):
+        location: str = Field(description="City name")
+
+    async def execute(self, params: GetWeather.Params) -> ToolResult:
+        return ToolResult(output=f"Sunny in {params.location}")
 ```
+
+JSON Schema is auto-generated from the `Params` model — no manual `parameters` dict needed.
 
 ### Level 2: Agent (recommended)
 

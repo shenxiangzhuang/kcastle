@@ -86,6 +86,17 @@ class AgentEnd:
     type: Literal["agent_end"] = "agent_end"
 
 
+# --- Abort ---
+
+
+@dataclass(frozen=True, slots=True)
+class AgentAbort:
+    """The agent loop was aborted by the user."""
+
+    messages: list[Message]
+    type: Literal["agent_abort"] = "agent_abort"
+
+
 # --- Error ---
 
 
@@ -100,6 +111,7 @@ class AgentError:
 type AgentEvent = (
     AgentStart
     | AgentEnd
+    | AgentAbort
     | TurnStart
     | TurnEnd
     | StreamChunk

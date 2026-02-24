@@ -8,9 +8,11 @@ over what goes to the LLM. No state management, no loop, no continuation.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from kai import Context, DoneEvent, ErrorEvent, Message, Provider, Tool, ToolResult, stream
+from kai.tool._tool import get_params_class
+from pydantic import ValidationError
 
 from kagent.event import (
     AgentError,
@@ -22,13 +24,31 @@ from kagent.event import (
     TurnStart,
 )
 
+type OnToolResultFn = Callable[[str, str, ToolResult], Awaitable[ToolResult]]
+"""Called after tool execution. Receives ``(call_id, tool_name, result)``.
+Return (possibly modified) result."""
 
-def _find_tool(name: str, tools: list[Tool]) -> Tool | None:
-    """Find a tool by name."""
-    for tool in tools:
-        if tool.name == name:
-            return tool
-    return None
+
+def _build_tool_map(tools: list[Tool]) -> dict[str, Tool]:
+    """Build a name → tool lookup dict."""
+    return {tool.name: tool for tool in tools}
+
+
+async def _execute_tool(tool: Tool, arguments: dict[str, object]) -> ToolResult:
+    """Validate arguments and execute a tool.
+
+    If the tool defines an inner ``Params(BaseModel)`` class, arguments
+    are validated through Pydantic before calling ``execute(params)``.
+    Otherwise, the raw arguments dict is passed directly.
+    """
+    params_cls = get_params_class(type(tool))
+    if params_cls is not None:
+        try:
+            params = params_cls.model_validate(arguments)
+        except ValidationError as e:
+            return ToolResult.error(f"Invalid arguments: {e}")
+        return await tool.execute(params)
+    return await tool.execute(arguments)
 
 
 async def agent_step(
@@ -36,6 +56,7 @@ async def agent_step(
     provider: Provider,
     context: Context,
     tools: list[Tool],
+    on_tool_result: OnToolResultFn | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute a single LLM turn: one LLM call + tool execution.
 
@@ -46,6 +67,7 @@ async def agent_step(
         provider: The kai LLM provider.
         context: The complete LLM context (system + messages + tool schemas).
         tools: Executable tools for dispatching tool calls from the LLM response.
+        on_tool_result: Optional callback to intercept/modify tool results.
 
     Yields:
         ``TurnStart`` → ``StreamChunk``… → ``ToolExecStart/End``… → ``TurnEnd``
@@ -83,11 +105,11 @@ async def agent_step(
         return
 
     # Execute tool calls (if any)
+    tool_map = _build_tool_map(tools)
     tool_result_messages: list[Message] = []
     if assistant_msg.tool_calls:
         for tool_call in assistant_msg.tool_calls:
-            tool = _find_tool(tool_call.name, tools)
-
+            # Parse JSON arguments
             try:
                 arguments: dict[str, object] = json.loads(tool_call.arguments)
             except json.JSONDecodeError as e:
@@ -98,14 +120,18 @@ async def agent_step(
                     tool_name=tool_call.name,
                     arguments=arguments,
                 )
+
+                if on_tool_result is not None:
+                    result = await on_tool_result(tool_call.id, tool_call.name, result)
+
                 yield ToolExecEnd(
                     call_id=tool_call.id,
                     tool_name=tool_call.name,
                     result=result,
-                    is_error=True,
+                    is_error=result.is_error,
                 )
                 tool_result_messages.append(
-                    Message.tool_result(tool_call.id, result.output, is_error=True)
+                    Message.tool_result(tool_call.id, result.output, is_error=result.is_error)
                 )
                 continue
 
@@ -115,16 +141,19 @@ async def agent_step(
                 arguments=arguments,
             )
 
+            # Look up and execute tool
+            tool = tool_map.get(tool_call.name)
             if tool is None:
                 result = ToolResult.error(f"Tool not found: {tool_call.name}")
             else:
                 try:
-                    result = await tool.execute(
-                        call_id=tool_call.id,
-                        arguments=arguments,
-                    )
+                    result = await _execute_tool(tool, arguments)
                 except Exception as e:
                     result = ToolResult.error(str(e))
+
+            # on_tool_result interception
+            if on_tool_result is not None:
+                result = await on_tool_result(tool_call.id, tool_call.name, result)
 
             yield ToolExecEnd(
                 call_id=tool_call.id,

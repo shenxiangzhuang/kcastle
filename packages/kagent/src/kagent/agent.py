@@ -12,14 +12,14 @@ from collections.abc import AsyncIterator
 
 from kai import Message, Provider, Tool
 
-from kagent.event import AgentEvent, TurnEnd
+from kagent.event import AgentAbort, AgentEnd, AgentEvent, TurnEnd
 from kagent.loop import (
     BuildContextFn,
-    OnToolResultFn,
     ShouldContinueFn,
     agent_loop,
 )
 from kagent.state import AgentState
+from kagent.step import OnToolResultFn
 
 
 class Agent:
@@ -169,6 +169,8 @@ class Agent:
                     max_turns=self._max_turns,
                 ):
                     if self._abort_event.is_set():
+                        yield AgentAbort(messages=list(self._state.messages))
+                        yield AgentEnd(messages=list(self._state.messages))
                         return
                     yield event
 

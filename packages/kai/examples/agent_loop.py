@@ -10,13 +10,15 @@ Run:
     uv run python examples/agent_loop.py
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import os
 import platform
 import sys
-from typing import Any
 
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -49,14 +51,14 @@ console = Console()
 # Tool definitions — locally executable, no network required
 # ---------------------------------------------------------------------------
 
+
 class GetSystemInfo(Tool):
     """Get current operating system information."""
 
     name: str = "get_system_info"
     description: str = "Get current operating system information (OS name, version, architecture)."
-    parameters: dict[str, Any] = {"type": "object", "properties": {}}
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(self, params: object) -> ToolResult:
         return ToolResult(
             output=json.dumps(
                 {
@@ -74,9 +76,8 @@ class GetPythonVersion(Tool):
 
     name: str = "get_python_version"
     description: str = "Get the Python interpreter version and executable path."
-    parameters: dict[str, Any] = {"type": "object", "properties": {}}
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(self, params: object) -> ToolResult:
         return ToolResult(
             output=json.dumps(
                 {
@@ -93,40 +94,30 @@ class GetEnvVariable(Tool):
 
     name: str = "get_env_variable"
     description: str = "Read the value of an environment variable."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string", "description": "Environment variable name"},
-        },
-        "required": ["name"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        var_name = arguments.get("name", "")
-        value = os.environ.get(var_name)
+    class Params(BaseModel):
+        name: str = Field(description="Environment variable name")
+
+    async def execute(self, params: GetEnvVariable.Params) -> ToolResult:
+        value = os.environ.get(params.name)
         if value is None:
-            return ToolResult.error(f"Variable '{var_name}' is not set")
-        return ToolResult(output=json.dumps({"name": var_name, "value": value}))
+            return ToolResult.error(f"Variable '{params.name}' is not set")
+        return ToolResult(output=json.dumps({"name": params.name, "value": value}))
 
 
 TOOLS: list[Tool] = [GetSystemInfo(), GetPythonVersion(), GetEnvVariable()]
 
 
-def find_tool(name: str) -> Tool | None:
-    """Find a tool by name."""
-    for tool in TOOLS:
-        if tool.name == name:
-            return tool
-    return None
+TOOL_MAP: dict[str, Tool] = {t.name: t for t in TOOLS}
 
 
 async def execute_tool_call(name: str, arguments: str) -> str:
     """Parse arguments and execute a tool."""
-    tool = find_tool(name)
+    tool = TOOL_MAP.get(name)
     if tool is None:
         return json.dumps({"error": f"Unknown tool: {name}"})
-    args: dict[str, Any] = json.loads(arguments) if arguments.strip() else {}
-    result = await tool.execute(call_id="", arguments=args)
+    args: dict[str, object] = json.loads(arguments) if arguments.strip() else {}
+    result = await tool.execute(args)
     return result.output
 
 

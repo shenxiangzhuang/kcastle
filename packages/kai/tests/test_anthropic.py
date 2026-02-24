@@ -214,6 +214,83 @@ class TestMessageSerialization:
         assert block["tool_use_id"] == "tc1"
         assert block["content"] == "result"
 
+    async def test_multiple_tool_results_merged_into_one_message(self) -> None:
+        """Regression: consecutive tool-result messages must be merged into a
+        single user message with multiple tool_result blocks.
+
+        The Anthropic API rejects separate user messages for each tool result
+        with: "tool_use ids were found without tool_result blocks immediately
+        after".  Before the fix, each Message.tool_result() produced its own
+        MessageParam, triggering that 400 error.
+        """
+        ctx = _ctx(
+            Message(role="user", content="What's the weather in Tokyo and Paris?"),
+            Message(
+                role="assistant",
+                content="I'll check both.",
+                tool_calls=[
+                    ToolCall(id="tc1", name="get_weather", arguments='{"city":"Tokyo"}'),
+                    ToolCall(id="tc2", name="get_weather", arguments='{"city":"Paris"}'),
+                ],
+            ),
+            Message.tool_result("tc1", "Sunny, 22°C in Tokyo"),
+            Message.tool_result("tc2", "Cloudy, 15°C in Paris"),
+        )
+        _, kw = await _stream_raw(context=ctx)
+        msgs = kw["messages"]
+
+        # Must be exactly 3 messages: user, assistant, one merged tool-result message.
+        # Before the fix this was 4 (two separate user messages for the tool results).
+        assert len(msgs) == 3, (
+            f"Expected 3 messages (user + assistant + merged tool results), got {len(msgs)}. "
+            "Multiple tool results must be merged into a single user message."
+        )
+
+        merged = msgs[2]
+        assert merged["role"] == "user"
+        blocks = merged["content"]
+
+        # Both tool results must live in the same message.
+        assert len(blocks) == 2
+        assert all(b["type"] == "tool_result" for b in blocks)
+
+        by_id = {b["tool_use_id"]: b for b in blocks}
+        assert by_id["tc1"]["content"] == "Sunny, 22°C in Tokyo"
+        assert by_id["tc2"]["content"] == "Cloudy, 15°C in Paris"
+
+    async def test_tool_results_between_turns_not_merged(self) -> None:
+        """Tool results from different assistant turns must NOT be merged together.
+
+        Each assistant message's tool results belong to a separate user message.
+        """
+        ctx = _ctx(
+            Message(role="user", content="Hi"),
+            # Turn 1: one tool call + result
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id="tc1", name="fn", arguments="{}")],
+            ),
+            Message.tool_result("tc1", "result-1"),
+            # Turn 2: another tool call + result
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=[ToolCall(id="tc2", name="fn", arguments="{}")],
+            ),
+            Message.tool_result("tc2", "result-2"),
+        )
+        _, kw = await _stream_raw(context=ctx)
+        msgs = kw["messages"]
+
+        # user, assistant-1, tool-results-1, assistant-2, tool-results-2
+        assert len(msgs) == 5
+
+        tool_msg_1 = msgs[2]
+        tool_msg_2 = msgs[4]
+        assert tool_msg_1["content"][0]["tool_use_id"] == "tc1"
+        assert tool_msg_2["content"][0]["tool_use_id"] == "tc2"
+
     async def test_assistant_text(self) -> None:
         ctx = _ctx(
             Message(role="user", content="Hi"),
