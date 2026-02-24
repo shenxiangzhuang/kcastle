@@ -8,6 +8,7 @@ from typing import Any
 from kai import Context, Tool, ToolResult
 from kai.chunk import Chunk, TextChunk, ToolCallDelta, ToolCallEnd, ToolCallStart, UsageChunk
 from kai.usage import TokenUsage
+from pydantic import BaseModel, Field
 
 
 class MockProvider:
@@ -68,14 +69,12 @@ class EchoTool(Tool):
 
     name: str = "echo"
     description: str = "Echo a message."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
-        return ToolResult(output=f"echo: {arguments['message']}")
+    class Params(BaseModel):
+        message: str = Field(description="The message to echo")
+
+    async def execute(self, params: EchoTool.Params) -> ToolResult:
+        return ToolResult(output=f"echo: {params.message}")
 
 
 class FailingTool(Tool):
@@ -83,13 +82,11 @@ class FailingTool(Tool):
 
     name: str = "failing_tool"
     description: str = "A tool that fails."
-    parameters: dict[str, Any] = {
-        "type": "object",
-        "properties": {"input": {"type": "string"}},
-        "required": ["input"],
-    }
 
-    async def execute(self, *, call_id: str, arguments: dict[str, Any]) -> ToolResult:
+    class Params(BaseModel):
+        input: str = Field(description="Input value")
+
+    async def execute(self, params: FailingTool.Params) -> ToolResult:
         raise ValueError("Tool execution failed!")
 
 

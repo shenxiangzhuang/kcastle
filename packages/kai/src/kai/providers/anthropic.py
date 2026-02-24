@@ -127,11 +127,38 @@ class Anthropic:
 
 
 def _build_messages(context: Context) -> list[MessageParam]:
-    """Convert Context messages to Anthropic format."""
-    messages: list[MessageParam] = []
-    for msg in context.messages:
-        messages.append(_convert_message(msg))
-    return messages
+    """Convert Context messages to Anthropic format.
+
+    Consecutive tool-result messages are merged into a single ``user`` message
+    with multiple ``tool_result`` blocks. The Anthropic API requires that all
+    ``tool_result`` blocks for a given assistant turn appear together in one
+    message; sending them as separate messages causes a 400 error.
+    """
+    result: list[MessageParam] = []
+    msgs = context.messages
+    i = 0
+    while i < len(msgs):
+        msg = msgs[i]
+        if msg.role == "tool":
+            # Collect all consecutive tool-result messages into one user message.
+            tool_blocks: list[ContentBlockParam] = []
+            while i < len(msgs) and msgs[i].role == "tool":
+                tm = msgs[i]
+                if tm.tool_call_id is None:
+                    raise ProviderError("Tool result message missing tool_call_id.")
+                tool_blocks.append(
+                    ToolResultBlockParam(
+                        type="tool_result",
+                        tool_use_id=tm.tool_call_id,
+                        content=tm.extract_text(),
+                    )
+                )
+                i += 1
+            result.append(MessageParam(role="user", content=tool_blocks))
+        else:
+            result.append(_convert_message(msg))
+            i += 1
+    return result
 
 
 def _convert_message(message: Message) -> MessageParam:

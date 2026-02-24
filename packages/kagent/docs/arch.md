@@ -88,16 +88,20 @@ async for stream_event in kai.stream(provider, context):
     if ErrorEvent: yield AgentError → return
 
 # Execute tool calls (if any)
+tool_map = {tool.name: tool for tool in tools}
 tool_results = []
 for tool_call in assistant_msg.tool_calls:
-    tool = find_tool(tool_call.name, tools)
+    tool = tool_map.get(tool_call.name)
     args = json.loads(tool_call.arguments)
     yield ToolExecStart(call_id=..., tool_name=..., arguments=args)
 
     try:
-        result = await tool.execute(call_id=..., arguments=args)
+        result = await _execute_tool(tool, args)  # Pydantic validation + execute(params)
     except Exception as e:
         result = ToolResult.error(str(e))
+
+    if on_tool_result:
+        result = await on_tool_result(call_id, tool_name, result)
 
     yield ToolExecEnd(call_id=..., tool_name=..., result=result, is_error=result.is_error)
     tool_results.append(Message.tool_result(tool_call.id, result.output, is_error=result.is_error))
