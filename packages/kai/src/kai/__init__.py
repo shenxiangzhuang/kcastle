@@ -59,7 +59,7 @@ from kai.providers.openai import OpenAICompletions, OpenAIResponses
 from kai.stream import complete, stream
 
 # Tool definition
-from kai.tool import Tool
+from kai.tool import Tool, ToolResult
 
 # Token usage
 from kai.usage import TokenUsage
@@ -78,6 +78,7 @@ __all__ = [
     "Context",
     # Tool
     "Tool",
+    "ToolResult",
     # Events
     "StreamEvent",
     "StartEvent",
