@@ -1,6 +1,6 @@
 # kagent examples
 
-Four self-contained scripts that cover the full three-level API.
+Four self-contained scripts (plus one for context builders) that cover the full three-level API.
 Read them in order — each builds on the concepts of the previous one.
 
 ## Prerequisites
@@ -17,8 +17,9 @@ uv sync
 |------|-------|---------------|
 | [`01_quickstart.py`](01_quickstart.py) | 2 — `Agent` | Create an agent with tools, one-shot `complete()` |
 | [`02_multi_tool_agent.py`](02_multi_tool_agent.py) | 2 — `Agent` | Non-streaming & streaming, multi-tool, multi-turn, steer/abort |
-| [`03_advanced_agent_loop.py`](03_advanced_agent_loop.py) | 1 — `agent_loop` | Custom `build_context`, `should_continue`, `on_tool_result` |
+| [`03_advanced_agent_loop.py`](03_advanced_agent_loop.py) | 1 — `agent_loop` | Custom `context_builder`, `should_continue`, `on_tool_result` |
 | [`04_advanced_agent_step.py`](04_advanced_agent_step.py) | 0 — `agent_step` | Single-step primitive; you own the loop and state |
+| [`05_context_builders.py`](05_context_builders.py) | 1–2 | Built-in context builders: sliding window, compaction, adaptive |
 
 ## Running
 

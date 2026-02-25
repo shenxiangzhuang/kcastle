@@ -4,7 +4,7 @@ Core agent runtime for the K agent framework — a context-first, three-level ag
 
 ## Key Principles
 
-1. **Context-first** — Context construction is a single, explicit point (`build_context`). You control exactly what goes to the LLM.
+1. **Context-first** — Context construction is managed by ``ContextBuilder`` — a protocol with built-in implementations for common patterns. You control exactly what goes to the LLM.
 2. **Three levels** — `agent_step()` → `agent_loop()` → `Agent`. Pick the level that fits.
 3. **No framework concepts** — Callbacks are plain function parameters. No Hooks, no Middleware.
 4. **Unified tools** — Uses `kai.Tool` directly. Define inner `Params(BaseModel)` for typed, auto-schema tools.
@@ -33,7 +33,7 @@ Core agent runtime for the K agent framework — a context-first, three-level ag
 | Level | Function | Context control | Use case |
 |-------|----------|-----------------|----------|
 | 0 | `agent_step()` | Caller builds `kai.Context` | Full control, custom loops |
-| 1 | `agent_loop()` | `build_context` callback | Standard multi-turn agent |
+| 1 | `agent_loop()` | `context_builder` param | Standard multi-turn agent |
 | 2 | `Agent` | Auto-managed + callbacks | Stateful SDK, interactive apps |
 
 ## Quick Start
@@ -109,17 +109,28 @@ async for event in agent_loop(provider=my_provider, state=state):
 # state.messages is mutated in-place with the full conversation
 ```
 
-**Context customization** via `build_context`:
+**Context customization** via `context_builder`:
 
 ```python
-async def build_ctx(state: AgentState) -> Context:
-    return Context(
-        system=f"{state.system}\nTime: {datetime.now()}",
-        messages=state.messages[-20:],  # keep last 20
-        tools=state.tools,
-    )
+from kagent import SlidingWindowBuilder
 
-async for event in agent_loop(provider=p, state=state, build_context=build_ctx):
+# Built-in: sliding window
+async for event in agent_loop(
+    provider=p, state=state,
+    context_builder=SlidingWindowBuilder(window_size=20),
+):
+    ...
+
+# Custom: implement the ContextBuilder protocol
+class MyBuilder:
+    async def build(self, state: AgentState) -> Context:
+        return Context(
+            system=f"{state.system}\nTime: {datetime.now()}",
+            messages=state.messages[-20:],
+            tools=state.tools,
+        )
+
+async for event in agent_loop(provider=p, state=state, context_builder=MyBuilder()):
     ...
 ```
 
@@ -147,7 +158,7 @@ All callbacks are plain `async` functions passed as kwargs — same at Level 1 a
 
 | Callback | Signature | Purpose |
 |----------|-----------|---------|
-| `build_context` | `(AgentState) -> Context` | Control what goes to the LLM |
+| `context_builder` | `ContextBuilder` protocol | Control what goes to the LLM |
 | `on_tool_result` | `(call_id, tool_name, ToolResult) -> ToolResult` | Intercept/modify tool results |
 | `should_continue` | `(AgentState, Message) -> bool` | Custom loop termination |
 

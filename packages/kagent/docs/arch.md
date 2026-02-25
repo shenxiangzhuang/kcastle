@@ -8,14 +8,27 @@ Detailed architecture documentation for kagent. For quick start and overview, se
 Mutable state ──► Immutable snapshot ──► LLM call
 (AgentState)       (kai.Context)          (kai.stream)
      │                  ▲
-     │    build_context │
+     │  ContextBuilder  │
      └──────────────────┘
-        (single point)
+          .build()
 ```
 
-Context is built in **one place**: the `build_context` callback (or the auto-default).
-This is the single point where all context customization happens — compaction, pruning,
-system prompt injection, custom message type conversion, tool filtering.
+Context is built by a **`ContextBuilder`** — a protocol with a single method:
+`async def build(self, state: AgentState) -> Context`. This is the single point
+where all context customization happens — compaction, pruning, system prompt
+injection, tool filtering.
+
+### Built-in Builders
+
+| Builder | Description |
+|---------|-------------|
+| `DefaultBuilder` | Pass-through — sends all messages (implicit default) |
+| `SlidingWindowBuilder` | Keeps first message + last N messages |
+| `CompactingBuilder` | Summarizes older messages via LLM call |
+| `AdaptiveBuilder` | Delegates to a named builder; switchable at runtime |
+
+`ContextSwitchTool` (created via `AdaptiveBuilder.create_tool()`) lets the
+agent itself choose its context strategy at runtime.
 
 ## Module Layout
 
@@ -23,6 +36,7 @@ system prompt injection, custom message type conversion, tool filtering.
 kagent/
 ├── __init__.py          # Public API re-exports
 ├── py.typed             # PEP 561 typed marker
+├── context.py           # ContextBuilder protocol + built-in implementations
 ├── event.py             # AgentEvent — lifecycle event discriminated union
 ├── state.py             # AgentState dataclass
 ├── step.py              # agent_step() — single-turn primitive
@@ -118,10 +132,7 @@ yield AgentStart
 
 for turn_count in range(max_turns):
     # === Single context construction point ===
-    if build_context:
-        context = await build_context(state)
-    else:
-        context = Context(system=state.system, messages=state.messages, tools=state.tools)
+    context = await context_builder.build(state)  # ContextBuilder protocol
 
     # Delegate to agent_step
     async for event in agent_step(provider=provider, context=context, tools=state.tools):
@@ -146,10 +157,11 @@ for turn_count in range(max_turns):
 yield AgentEnd(messages=state.messages)
 ```
 
-## Callback Type Aliases
+## Callback / Extension Points
 
 ```python
-type BuildContextFn = Callable[[AgentState], Awaitable[Context]]
+class ContextBuilder(Protocol):
+    async def build(self, state: AgentState) -> Context: ...
 """Build a kai.Context from the current agent state.
 The SINGLE POINT where all context customization happens."""
 
@@ -162,30 +174,53 @@ type ShouldContinueFn = Callable[[AgentState, Message], Awaitable[bool]]
 Receives (state, assistant_message). Return False to stop."""
 ```
 
-## build_context Examples
+## ContextBuilder Examples
+
+Built-in builders cover common patterns:
 
 ```python
-# Simple: dynamic system prompt
-async def build_ctx(state: AgentState) -> Context:
-    system = f"{state.system}\nTime: {datetime.now()}"
-    return Context(system=system, messages=state.messages, tools=state.tools)
+from kagent import (
+    DefaultBuilder,
+    SlidingWindowBuilder,
+    CompactingBuilder,
+    AdaptiveBuilder,
+)
 
-# Medium: keep last N messages
-async def build_ctx(state: AgentState) -> Context:
-    return Context(system=state.system, messages=state.messages[-20:], tools=state.tools)
+# Pass-through (default when no builder specified)
+builder = DefaultBuilder()
 
-# Advanced: LLM-based compaction
-async def build_ctx(state: AgentState) -> Context:
-    msgs = state.messages
-    if estimate_tokens(msgs) > 100_000:
-        summary = await summarize(msgs[:50])
-        msgs = [Message(role="user", content=summary)] + msgs[50:]
-    return Context(system=state.system, messages=msgs, tools=state.tools)
+# Keep first message + last 20
+builder = SlidingWindowBuilder(window_size=20)
 
-# Advanced: tool filtering per turn
-async def build_ctx(state: AgentState) -> Context:
-    active_tools = select_tools(state)
-    return Context(system=state.system, messages=state.messages, tools=active_tools)
+# Summarize older messages via LLM when conversation exceeds 30 messages
+builder = CompactingBuilder(provider, threshold=30, max_preserved=6)
+
+# Agent-controlled switching between strategies
+adaptive = AdaptiveBuilder(
+    builders={
+        "full": DefaultBuilder(),
+        "window": SlidingWindowBuilder(window_size=20),
+        "compact": CompactingBuilder(provider, threshold=30),
+    },
+    default="full",
+)
+agent = Agent(provider=p, context_builder=adaptive, tools=[adaptive.create_tool()])
+```
+
+Custom builders implement the protocol (structural typing — no inheritance required):
+
+```python
+# Dynamic system prompt
+class DynamicSystemBuilder:
+    async def build(self, state: AgentState) -> Context:
+        system = f"{state.system}\nTime: {datetime.now()}"
+        return Context(system=system, messages=state.messages, tools=state.tools)
+
+# Tool filtering per turn
+class ToolFilterBuilder:
+    async def build(self, state: AgentState) -> Context:
+        active_tools = select_tools(state)
+        return Context(system=state.system, messages=state.messages, tools=active_tools)
 ```
 
 ## Level 2: Agent Design Notes
@@ -206,7 +241,7 @@ async def build_ctx(state: AgentState) -> Context:
 | State | `AgentState` interface | `Context` + `Runtime` | `AgentState` dataclass |
 | Extensibility | Config callbacks (kwargs) | Wire + Approval + ContextVar | Callbacks (kwargs) |
 | Streaming | `EventStream` push-based | Wire SPMC broadcast | `AsyncIterator` pull-based |
-| Context build | `transformContext` + `convertToLlm` | Compaction in loop | `build_context` single point |
+| Context build | `transformContext` + `convertToLlm` | Compaction in loop | `ContextBuilder` protocol |
 | Message types | `Message` + `CustomAgentMessages` | `Message` | `kai.Message` directly |
 | SDK API | `prompt()` + subscribe | N/A | `run()` + `complete()` |
 
@@ -215,10 +250,9 @@ async def build_ctx(state: AgentState) -> Context:
 These belong in application layers (`kcode`, etc.):
 
 - **Persistence** — Session saving, JSONL, checkpoints.
-- **Compaction** — via `build_context` callback.
 - **Approval UI** — via `on_tool_result` callback.
 - **Specific tools** — File, shell, web tools.
 - **UI/rendering** — Terminal UI, wire protocol.
 - **Agent specs** — YAML/config-driven agent definitions.
-- **Retry logic** — In provider wrapper or `build_context`.
+- **Retry logic** — In provider wrapper or custom `ContextBuilder`.
 - **Sub-agents** — Implemented as a tool.

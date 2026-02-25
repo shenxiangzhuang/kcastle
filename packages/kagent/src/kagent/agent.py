@@ -12,9 +12,9 @@ from collections.abc import AsyncIterator
 
 from kai import Message, Provider, Tool
 
+from kagent.context import ContextBuilder
 from kagent.event import AgentAbort, AgentEnd, AgentEvent, TurnEnd
 from kagent.loop import (
-    BuildContextFn,
     ShouldContinueFn,
     agent_loop,
 )
@@ -57,7 +57,7 @@ class Agent:
         provider: Provider,
         system: str | None = None,
         tools: list[Tool] | None = None,
-        build_context: BuildContextFn | None = None,
+        context_builder: ContextBuilder | None = None,
         on_tool_result: OnToolResultFn | None = None,
         should_continue: ShouldContinueFn | None = None,
         max_turns: int = 100,
@@ -68,7 +68,7 @@ class Agent:
         are used. These are the same callbacks as ``agent_loop()`` — no wrapper types.
         """
         self._provider = provider
-        self._build_context = build_context
+        self._context_builder = context_builder
         self._on_tool_result = on_tool_result
         self._should_continue = should_continue
         self._max_turns = max_turns
@@ -163,7 +163,7 @@ class Agent:
                 async for event in agent_loop(
                     provider=self._provider,
                     state=self._state,
-                    build_context=self._build_context,
+                    context_builder=self._context_builder,
                     on_tool_result=self._on_tool_result,
                     should_continue=self._wrap_should_continue(),
                     max_turns=self._max_turns,

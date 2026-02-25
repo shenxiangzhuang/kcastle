@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from kai import Context, Message, Provider
+from kai import Message, Provider
 
+from kagent.context import ContextBuilder, DefaultBuilder
 from kagent.event import (
     AgentEnd,
     AgentError,
@@ -23,29 +24,16 @@ from kagent.step import OnToolResultFn, agent_step
 
 # --- Callback type aliases ---
 
-type BuildContextFn = Callable[[AgentState], Awaitable[Context]]
-"""Build a ``kai.Context`` from the current agent state.
-The SINGLE POINT where all context customization happens."""
-
 type ShouldContinueFn = Callable[[AgentState, Message], Awaitable[bool]]
 """After each turn, decide whether to continue looping.
 Receives ``(state, assistant_message)``. Return ``False`` to stop."""
-
-
-def _default_build_context(state: AgentState) -> Context:
-    """Build a Context from state using the default strategy."""
-    return Context(
-        system=state.system,
-        messages=state.messages,
-        tools=state.tools,
-    )
 
 
 async def agent_loop(
     *,
     provider: Provider,
     state: AgentState,
-    build_context: BuildContextFn | None = None,
+    context_builder: ContextBuilder | None = None,
     on_tool_result: OnToolResultFn | None = None,
     should_continue: ShouldContinueFn | None = None,
     max_turns: int = 100,
@@ -61,7 +49,8 @@ async def agent_loop(
     Args:
         provider: The kai LLM provider.
         state: Mutable agent state (system, messages, tools).
-        build_context: Custom context builder. If ``None``, auto-builds from state.
+        context_builder: Controls how ``AgentState`` becomes ``kai.Context``.
+            If ``None``, uses ``DefaultBuilder()`` (pass-through).
         on_tool_result: Intercept tool results. If ``None``, results pass through.
         should_continue: Custom continuation logic. If ``None``, continues while tool_calls.
         max_turns: Safety limit. ``0`` = unlimited.
@@ -83,13 +72,12 @@ async def agent_loop(
     """
     yield AgentStart()
 
+    builder = context_builder or DefaultBuilder()
+
     turn_count = 0
     while max_turns == 0 or turn_count < max_turns:
         # === Single context construction point ===
-        if build_context is not None:
-            context = await build_context(state)
-        else:
-            context = _default_build_context(state)
+        context = await builder.build(state)
 
         # Delegate to agent_step — all LLM streaming + tool execution happens there
         assistant_msg: Message | None = None

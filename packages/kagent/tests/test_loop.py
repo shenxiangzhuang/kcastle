@@ -107,18 +107,19 @@ class TestAgentLoopMaxTurns:
 
 class TestAgentLoopCallbacks:
     @pytest.mark.asyncio
-    async def test_build_context_callback(self) -> None:
-        """The build_context callback controls what goes to the LLM."""
+    async def test_context_builder(self) -> None:
+        """A ContextBuilder controls what goes to the LLM."""
         captured_contexts: list[Context] = []
 
-        async def custom_build(state: AgentState) -> Context:
-            ctx = Context(
-                system="Custom system!",
-                messages=state.messages[-1:],  # Only last message
-                tools=list(state.tools),
-            )
-            captured_contexts.append(ctx)
-            return ctx
+        class CustomBuilder:
+            async def build(self, state: AgentState) -> Context:
+                ctx = Context(
+                    system="Custom system!",
+                    messages=state.messages[-1:],  # Only last message
+                    tools=list(state.tools),
+                )
+                captured_contexts.append(ctx)
+                return ctx
 
         provider = MockProvider([text_chunks("Ok")])
         state = AgentState(
@@ -129,7 +130,12 @@ class TestAgentLoopCallbacks:
             ],
         )
 
-        [e async for e in agent_loop(provider=provider, state=state, build_context=custom_build)]
+        [
+            e
+            async for e in agent_loop(
+                provider=provider, state=state, context_builder=CustomBuilder()
+            )
+        ]
 
         assert len(captured_contexts) == 1
         assert captured_contexts[0].system == "Custom system!"
