@@ -81,13 +81,16 @@ QUESTION = "What's the weather in Tokyo? Also, compute 42 * 58."
 
 
 async def main() -> None:
-    # Configure root logger — all kai.* and kagent.* messages will appear.
-    # Use DEBUG to see everything; INFO for a summary-level view.
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(name)-16s %(levelname)-5s %(message)s",
-        datefmt="%H:%M:%S",
+    # Only configure kai.* and kagent.* loggers — third-party libs stay silent.
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)-16s %(levelname)-5s %(message)s", datefmt="%H:%M:%S")
     )
+
+    for name in ("kai", "kagent"):
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
 
     agent = Agent(
         provider=make_provider(),
