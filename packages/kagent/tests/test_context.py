@@ -16,6 +16,24 @@ from kagent.context import (
     SlidingWindowBuilder,
 )
 from kagent.state import AgentState
+from kagent.trace import Trace, TraceEntry
+
+
+def _state_with_msgs(
+    *messages: Message,
+    system: str | None = None,
+) -> AgentState:
+    """Create an AgentState with the given messages in the trace."""
+    trace = Trace()
+    for msg in messages:
+        if msg.role == "user":
+            trace.append(TraceEntry.user(msg))
+        elif msg.role == "assistant":
+            trace.append(TraceEntry.assistant(msg))
+        elif msg.role == "tool":
+            trace.append(TraceEntry.tool_result(msg))
+    return AgentState(system=system, trace=trace)
+
 
 # ---------------------------------------------------------------------------
 # DefaultBuilder
@@ -25,9 +43,9 @@ from kagent.state import AgentState
 class TestDefaultBuilder:
     @pytest.mark.asyncio
     async def test_pass_through(self) -> None:
-        state = AgentState(
+        state = _state_with_msgs(
+            Message(role="user", content="Hi"),
             system="Hello",
-            messages=[Message(role="user", content="Hi")],
         )
         builder = DefaultBuilder()
         ctx = await builder.build(state)
@@ -50,12 +68,10 @@ class TestDefaultBuilder:
 class TestSlidingWindowBuilder:
     @pytest.mark.asyncio
     async def test_no_truncation_when_within_window(self) -> None:
-        state = AgentState(
+        state = _state_with_msgs(
+            Message(role="user", content="a"),
+            Message(role="assistant", content="b"),
             system="sys",
-            messages=[
-                Message(role="user", content="a"),
-                Message(role="assistant", content="b"),
-            ],
         )
         builder = SlidingWindowBuilder(window_size=10)
         ctx = await builder.build(state)
@@ -69,7 +85,7 @@ class TestSlidingWindowBuilder:
             msgs.append(Message(role="user", content=f"msg-{i}"))
             msgs.append(Message(role="assistant", content=f"reply-{i}"))
 
-        state = AgentState(messages=msgs)
+        state = _state_with_msgs(*msgs)
         builder = SlidingWindowBuilder(window_size=4)
         ctx = await builder.build(state)
 
@@ -81,12 +97,10 @@ class TestSlidingWindowBuilder:
     @pytest.mark.asyncio
     async def test_first_message_not_duplicated(self) -> None:
         """When the first message is already in the tail, don't prepend it."""
-        state = AgentState(
-            messages=[
-                Message(role="user", content="a"),
-                Message(role="assistant", content="b"),
-                Message(role="user", content="c"),
-            ],
+        state = _state_with_msgs(
+            Message(role="user", content="a"),
+            Message(role="assistant", content="b"),
+            Message(role="user", content="c"),
         )
         builder = SlidingWindowBuilder(window_size=5)
         ctx = await builder.build(state)
@@ -114,7 +128,7 @@ class TestSlidingWindowBuilder:
             Message(role="tool", content="result-2", tool_call_id="tc-2"),
             Message(role="assistant", content="done"),
         ]
-        state = AgentState(messages=msgs)
+        state = _state_with_msgs(*msgs)
         builder = SlidingWindowBuilder(window_size=3)
         ctx = await builder.build(state)
 
@@ -143,9 +157,9 @@ class TestCompactingBuilder:
     async def test_no_compaction_below_threshold(self) -> None:
         provider = MockProvider([])
         builder = CompactingBuilder(provider, threshold=10, max_preserved=4)
-        state = AgentState(
+        state = _state_with_msgs(
+            *(Message(role="user", content=f"msg-{i}") for i in range(5)),
             system="sys",
-            messages=[Message(role="user", content=f"msg-{i}") for i in range(5)],
         )
         ctx = await builder.build(state)
 
@@ -158,8 +172,10 @@ class TestCompactingBuilder:
         summary_provider = MockProvider([text_chunks("Summary of old messages.")])
         builder = CompactingBuilder(summary_provider, threshold=5, max_preserved=2)
 
-        msgs = [Message(role="user", content=f"msg-{i}") for i in range(8)]
-        state = AgentState(system="sys", messages=msgs)
+        state = _state_with_msgs(
+            *(Message(role="user", content=f"msg-{i}") for i in range(8)),
+            system="sys",
+        )
         ctx = await builder.build(state)
 
         # summary message + last 2 preserved
@@ -179,8 +195,9 @@ class TestCompactingBuilder:
         )
         builder = CompactingBuilder(summary_provider, threshold=3, max_preserved=2)
 
-        msgs = [Message(role="user", content=f"msg-{i}") for i in range(5)]
-        state = AgentState(messages=msgs)
+        state = _state_with_msgs(
+            *(Message(role="user", content=f"msg-{i}") for i in range(5)),
+        )
 
         # First call — triggers summarization
         ctx1 = await builder.build(state)
@@ -221,8 +238,8 @@ class TestAdaptiveBuilder:
             },
             default="full",
         )
-        state = AgentState(
-            messages=[Message(role="user", content=f"msg-{i}") for i in range(10)],
+        state = _state_with_msgs(
+            *(Message(role="user", content=f"msg-{i}") for i in range(10)),
         )
 
         # Default is "full" — all messages

@@ -20,6 +20,8 @@ from kagent.loop import (
 )
 from kagent.state import AgentState
 from kagent.step import OnToolResultFn
+from kagent.trace.entry import TraceEntry
+from kagent.trace.trace import Trace
 
 
 class Agent:
@@ -57,6 +59,7 @@ class Agent:
         provider: Provider,
         system: str | None = None,
         tools: list[Tool] | None = None,
+        trace: Trace | None = None,
         context_builder: ContextBuilder | None = None,
         on_tool_result: OnToolResultFn | None = None,
         should_continue: ShouldContinueFn | None = None,
@@ -66,6 +69,8 @@ class Agent:
 
         All callback parameters are optional. If not provided, sensible defaults
         are used. These are the same callbacks as ``agent_loop()`` — no wrapper types.
+
+        Pass an existing ``trace`` to resume a previous session.
         """
         self._provider = provider
         self._context_builder = context_builder
@@ -74,7 +79,7 @@ class Agent:
         self._max_turns = max_turns
         self._state = AgentState(
             system=system,
-            messages=[],
+            trace=trace or Trace(),
             tools=list(tools) if tools else [],
         )
         self._running = False
@@ -99,9 +104,10 @@ class Agent:
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run the agent with streaming events (pull-based).
 
-        Appends a user message, runs the loop, yields all events.
+        Records a user message in the trace, then runs the loop.
         """
-        self._state.messages.append(Message(role="user", content=user_input))
+        msg = Message(role="user", content=user_input)
+        self._state.trace.append(TraceEntry.user(msg))
         async for event in self._run_loop():
             yield event
 
@@ -177,7 +183,7 @@ class Agent:
                 # After the loop ends, check for follow-ups
                 if self._follow_up_queue:
                     follow_up = self._follow_up_queue.pop(0)
-                    self._state.messages.append(follow_up)
+                    self._state.trace.append(TraceEntry.user(follow_up))
                 else:
                     break
         finally:
@@ -196,7 +202,7 @@ class Agent:
             # Check steering — inject queued steering messages
             if self._steer_queue:
                 steer_msg = self._steer_queue.pop(0)
-                state.messages.append(steer_msg)
+                state.trace.append(TraceEntry.user(steer_msg))
                 return True  # Continue looping with the steering message
 
             # Delegate to user callback if provided

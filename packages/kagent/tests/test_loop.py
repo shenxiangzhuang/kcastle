@@ -19,16 +19,25 @@ from kagent.event import (
 )
 from kagent.loop import agent_loop
 from kagent.state import AgentState
+from kagent.trace import Trace, TraceEntry
+
+
+def _state_with_user_msg(
+    msg: str = "Hi",
+    system: str | None = None,
+    **kwargs: object,
+) -> AgentState:
+    """Create an AgentState with a single user message in the trace."""
+    trace = Trace()
+    trace.append(TraceEntry.user(Message(role="user", content=msg)))
+    return AgentState(system=system, trace=trace, **kwargs)  # type: ignore[arg-type]
 
 
 class TestAgentLoopTextOnly:
     @pytest.mark.asyncio
     async def test_single_turn_text(self) -> None:
         provider = MockProvider([text_chunks("Hello!")])
-        state = AgentState(
-            system="You are helpful.",
-            messages=[Message(role="user", content="Hi")],
-        )
+        state = _state_with_user_msg("Hi", system="You are helpful.")
 
         events = [e async for e in agent_loop(provider=provider, state=state)]
 
@@ -39,7 +48,7 @@ class TestAgentLoopTextOnly:
         assert len(turn_ends) == 1
         assert turn_ends[0].message.extract_text() == "Hello!"
 
-        # State should be mutated
+        # State should have trace entries
         assert len(state.messages) == 2  # user + assistant
         assert state.messages[1].role == "assistant"
 
@@ -56,11 +65,7 @@ class TestAgentLoopWithTools:
                 text_chunks("Done!"),
             ]
         )
-        state = AgentState(
-            system="Use tools.",
-            messages=[Message(role="user", content="echo something")],
-            tools=[echo],
-        )
+        state = _state_with_user_msg("echo something", system="Use tools.", tools=[echo])
 
         events = [e async for e in agent_loop(provider=provider, state=state)]
 
@@ -94,10 +99,7 @@ class TestAgentLoopMaxTurns:
                 tool_call_chunks("c3", "echo", '{"message": "3"}'),
             ]
         )
-        state = AgentState(
-            messages=[Message(role="user", content="go")],
-            tools=[echo],
-        )
+        state = _state_with_user_msg("go", tools=[echo])
 
         events = [e async for e in agent_loop(provider=provider, state=state, max_turns=2)]
 
@@ -122,13 +124,10 @@ class TestAgentLoopCallbacks:
                 return ctx
 
         provider = MockProvider([text_chunks("Ok")])
-        state = AgentState(
-            system="Original system",
-            messages=[
-                Message(role="user", content="old"),
-                Message(role="user", content="new"),
-            ],
-        )
+        trace = Trace()
+        trace.append(TraceEntry.user(Message(role="user", content="old")))
+        trace.append(TraceEntry.user(Message(role="user", content="new")))
+        state = AgentState(system="Original system", trace=trace)
 
         [
             e
@@ -156,10 +155,7 @@ class TestAgentLoopCallbacks:
                 text_chunks("Ok"),
             ]
         )
-        state = AgentState(
-            messages=[Message(role="user", content="go")],
-            tools=[echo],
-        )
+        state = _state_with_user_msg("go", tools=[echo])
 
         events = [
             e
@@ -183,10 +179,7 @@ class TestAgentLoopCallbacks:
                 tool_call_chunks("c1", "echo", '{"message": "hi"}'),
             ]
         )
-        state = AgentState(
-            messages=[Message(role="user", content="go")],
-            tools=[echo],
-        )
+        state = _state_with_user_msg("go", tools=[echo])
 
         events = [
             e async for e in agent_loop(provider=provider, state=state, should_continue=stop_always)

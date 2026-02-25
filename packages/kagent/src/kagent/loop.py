@@ -1,13 +1,16 @@
 """Level 1: Multi-turn agent loop.
 
-``agent_loop()`` wraps ``agent_step()`` with automatic message management
-and loop control. Callbacks are **plain kwargs** — no Hooks class, no
-Middleware base class.
+``agent_loop()`` wraps ``agent_step()`` with automatic trace management
+and loop control.  Each turn's assistant message and tool results are
+recorded as ``TraceEntry`` objects in ``state.trace``.
+
+Callbacks are **plain kwargs** — no Hooks class, no Middleware base class.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
+from uuid import uuid4
 
 from kai import Message, Provider
 
@@ -21,6 +24,7 @@ from kagent.event import (
 )
 from kagent.state import AgentState
 from kagent.step import OnToolResultFn, agent_step
+from kagent.trace.entry import TraceEntry
 
 # --- Callback type aliases ---
 
@@ -43,12 +47,12 @@ async def agent_loop(
     Repeatedly calls ``agent_step()`` and manages state until the model stops
     requesting tools, a callback halts the loop, or ``max_turns`` is reached.
 
-    The ``state.messages`` list is mutated in-place — assistant messages and
-    tool results are appended after each turn.
+    Each turn's assistant message and tool results are recorded as
+    ``TraceEntry`` objects in ``state.trace``.
 
     Args:
         provider: The kai LLM provider.
-        state: Mutable agent state (system, messages, tools).
+        state: Mutable agent state (system, trace, tools).
         context_builder: Controls how ``AgentState`` becomes ``kai.Context``.
             If ``None``, uses ``DefaultBuilder()`` (pass-through).
         on_tool_result: Intercept tool results. If ``None``, results pass through.
@@ -60,11 +64,8 @@ async def agent_loop(
 
     Example::
 
-        state = AgentState(
-            system="You are helpful.",
-            messages=[Message(role="user", content="Hello!")],
-            tools=[my_tool],
-        )
+        state = AgentState(system="You are helpful.")
+        state.trace.append(TraceEntry.user(Message(role="user", content="Hello!")))
         async for event in agent_loop(provider=provider, state=state):
             match event:
                 case TurnEnd(message=msg):
@@ -73,6 +74,7 @@ async def agent_loop(
     yield AgentStart()
 
     builder = context_builder or DefaultBuilder()
+    run_id = uuid4().hex[:8]
 
     turn_count = 0
     while max_turns == 0 or turn_count < max_turns:
@@ -87,12 +89,25 @@ async def agent_loop(
             tools=state.tools,
             on_tool_result=on_tool_result,
         ):
-            # Intercept TurnEnd to update state
+            # Intercept TurnEnd to record in trace
             if isinstance(event, TurnEnd):
                 assistant_msg = event.message
-                state.messages.append(event.message)
+                state.trace.append(
+                    TraceEntry.assistant(
+                        event.message,
+                        run_id=run_id,
+                        turn_index=turn_count,
+                        usage=event.message.usage,
+                    )
+                )
                 for tool_msg in event.tool_results:
-                    state.messages.append(tool_msg)
+                    state.trace.append(
+                        TraceEntry.tool_result(
+                            tool_msg,
+                            run_id=run_id,
+                            turn_index=turn_count,
+                        )
+                    )
 
             # Intercept AgentError to terminate
             if isinstance(event, AgentError):

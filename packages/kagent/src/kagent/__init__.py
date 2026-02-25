@@ -57,6 +57,18 @@ from kagent.state import AgentState
 # Level 0: Single-turn primitive
 from kagent.step import OnToolResultFn, agent_step
 
+# Trace
+from kagent.trace import (
+    InMemoryTraceStore,
+    JsonlTraceStore,
+    Trace,
+    TraceEntry,
+    TraceKind,
+    TraceManager,
+    TraceMeta,
+    TraceStore,
+)
+
 __all__ = [
     # Levels
     "agent_step",
@@ -88,4 +100,13 @@ __all__ = [
     # Callback types
     "OnToolResultFn",
     "ShouldContinueFn",
+    # Trace
+    "Trace",
+    "TraceEntry",
+    "TraceKind",
+    "TraceMeta",
+    "TraceManager",
+    "TraceStore",
+    "InMemoryTraceStore",
+    "JsonlTraceStore",
 ]
