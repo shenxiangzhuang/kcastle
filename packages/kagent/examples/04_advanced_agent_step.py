@@ -101,6 +101,9 @@ async def run_step(
             case AgentError(error=err):
                 raise RuntimeError(f"Agent error: {err}") from err
 
+            case _:
+                pass
+
     assert assistant_msg is not None
     return assistant_msg, tool_results
 

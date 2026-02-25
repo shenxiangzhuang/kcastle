@@ -8,7 +8,7 @@ Demonstrates:
     (inject dynamic system info, trim history, swap tools, etc.)
   - should_continue: custom loop termination beyond "stop when no tool_calls"
   - on_tool_result: intercept / log / modify results before they return to the LLM
-  - State is mutated in-place; inspect state.messages after the run.
+  - State is mutated in-place; inspect state.trace after the run.
 
 Run:
     export DEEPSEEK_API_KEY=sk-...
@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from kai import Anthropic, Context, Message, Tool, ToolResult
 from pydantic import BaseModel
 
-from kagent import AgentError, AgentState, TurnEnd, agent_loop
+from kagent import AgentError, AgentState, Trace, TraceEntry, TurnEnd, agent_loop
 
 
 def make_provider() -> Anthropic:
@@ -87,9 +87,11 @@ async def should_continue(state: AgentState, assistant_msg: Message) -> bool:
 
 async def main() -> None:
     # You own the state — create it and seed the first user message.
+    trace = Trace(name="agent-loop-demo")
+    trace.append(TraceEntry.user(Message(role="user", content="What time is it right now?")))
     state = AgentState(
         system="You are a concise assistant.",
-        messages=[Message(role="user", content="What time is it right now?")],
+        trace=trace,
         tools=[GetTime()],
     )
 
@@ -110,7 +112,7 @@ async def main() -> None:
             case _:
                 pass
 
-    # state.messages now contains the full conversation.
+    # state.trace now contains the full execution trace.
     print(f"\nConversation history ({len(state.messages)} messages):")
     for msg in state.messages:
         print(f"  [{msg.role}] {str(msg.content)[:80]}")
