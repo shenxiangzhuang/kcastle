@@ -21,6 +21,16 @@ from kai import Tool, ToolResult
 
 from kagent.agent import Agent
 
+# Context builders
+from kagent.context import (
+    AdaptiveBuilder,
+    CompactingBuilder,
+    ContextBuilder,
+    ContextSwitchTool,
+    DefaultBuilder,
+    SlidingWindowBuilder,
+)
+
 # Events
 from kagent.event import (
     AgentAbort,
@@ -37,7 +47,6 @@ from kagent.event import (
 
 # Level 1: Multi-turn loop
 from kagent.loop import (
-    BuildContextFn,
     ShouldContinueFn,
     agent_loop,
 )
@@ -58,6 +67,13 @@ __all__ = [
     # Tools
     "Tool",
     "ToolResult",
+    # Context builders
+    "ContextBuilder",
+    "DefaultBuilder",
+    "SlidingWindowBuilder",
+    "CompactingBuilder",
+    "AdaptiveBuilder",
+    "ContextSwitchTool",
     # Events
     "AgentEvent",
     "AgentStart",
@@ -70,7 +86,6 @@ __all__ = [
     "ToolExecStart",
     "ToolExecEnd",
     # Callback types
-    "BuildContextFn",
     "OnToolResultFn",
     "ShouldContinueFn",
 ]

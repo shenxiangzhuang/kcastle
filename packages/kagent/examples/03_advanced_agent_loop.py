@@ -4,7 +4,7 @@ Use agent_loop() when you need more control than Agent provides
 but don't want to manage the step-by-step loop yourself.
 
 Demonstrates:
-  - build_context: the single hook for controlling what reaches the LLM
+  - context_builder: the ContextBuilder protocol for controlling what reaches the LLM
     (inject dynamic system info, trim history, swap tools, etc.)
   - should_continue: custom loop termination beyond "stop when no tool_calls"
   - on_tool_result: intercept / log / modify results before they return to the LLM
@@ -57,14 +57,16 @@ class GetTime(Tool):
 # ---------------------------------------------------------------------------
 
 
-async def build_context(state: AgentState) -> Context:
+class DateInjectingBuilder:
     """Inject the current date into the system prompt and keep only recent history."""
-    today = datetime.now(tz=UTC).strftime("%A, %B %d %Y")
-    return Context(
-        system=f"{state.system}\nToday is {today}.",
-        messages=state.messages[-20:],  # sliding window — avoids unbounded growth
-        tools=state.tools,
-    )
+
+    async def build(self, state: AgentState) -> Context:
+        today = datetime.now(tz=UTC).strftime("%A, %B %d %Y")
+        return Context(
+            system=f"{state.system}\nToday is {today}.",
+            messages=state.messages[-20:],  # sliding window
+            tools=state.tools,
+        )
 
 
 async def on_tool_result(call_id: str, tool_name: str, result: ToolResult) -> ToolResult:
@@ -95,7 +97,7 @@ async def main() -> None:
     async for event in agent_loop(
         provider=make_provider(),
         state=state,
-        build_context=build_context,
+        context_builder=DateInjectingBuilder(),
         on_tool_result=on_tool_result,
         should_continue=should_continue,
     ):
