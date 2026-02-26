@@ -21,6 +21,7 @@ from kai.chunk import (
 )
 from kai.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 from kai.providers.openai import OpenAICompletions
+from kai.providers.openai._completions import _extract_reasoning_text  # pyright: ignore[reportPrivateUsage]
 
 # --- Helpers ---
 
@@ -404,3 +405,85 @@ class TestStreamConversion:
         assert len(u) == 1
         assert u[0].usage.input_tokens == 10
         assert u[0].usage.output_tokens == 5
+
+
+# --- Reasoning extraction ---
+
+
+class TestExtractReasoningText:
+    """Tests for ``_extract_reasoning_text`` — extracting thinking content from delta."""
+
+    def test_reasoning_content_field(self) -> None:
+        class _Delta:
+            reasoning_content = "thinking hard"
+
+        assert _extract_reasoning_text(_Delta()) == "thinking hard"
+
+    def test_reasoning_field(self) -> None:
+        class _Delta:
+            reasoning = "hmm"
+
+        assert _extract_reasoning_text(_Delta()) == "hmm"
+
+    def test_reasoning_text_field(self) -> None:
+        class _Delta:
+            reasoning_text = "let me see"
+
+        assert _extract_reasoning_text(_Delta()) == "let me see"
+
+    def test_first_nonempty_field_wins(self) -> None:
+        """When multiple fields are present, the first non-empty one wins."""
+        class _Delta:
+            reasoning_content = "first"
+            reasoning = "second"
+
+        assert _extract_reasoning_text(_Delta()) == "first"
+
+    def test_skips_empty_fields(self) -> None:
+        class _Delta:
+            reasoning_content = ""
+            reasoning = "fallback"
+
+        assert _extract_reasoning_text(_Delta()) == "fallback"
+
+    def test_reasoning_details_minimax(self) -> None:
+        """MiniMax-style reasoning_details with type=reasoning.text."""
+        class _Delta:
+            reasoning_details = [
+                {"type": "reasoning.text", "id": "r1", "text": "let me think about this"}
+            ]
+
+        assert _extract_reasoning_text(_Delta()) == "let me think about this"
+
+    def test_reasoning_details_ignores_non_text_types(self) -> None:
+        class _Delta:
+            reasoning_details = [
+                {"type": "reasoning.encrypted", "id": "r1", "data": "..."}
+            ]
+
+        assert _extract_reasoning_text(_Delta()) is None
+
+    def test_no_reasoning_fields(self) -> None:
+        class _Delta:
+            content = "just text"
+
+        assert _extract_reasoning_text(_Delta()) is None
+
+    def test_reasoning_details_multiple_items(self) -> None:
+        class _Delta:
+            reasoning_details = [
+                {"type": "reasoning.text", "id": "r1", "text": "part1"},
+                {"type": "reasoning.text", "id": "r2", "text": "part2"},
+            ]
+
+        assert _extract_reasoning_text(_Delta()) == "part1part2"
+
+    def test_scalar_field_takes_priority_over_details(self) -> None:
+        """Scalar reasoning fields are checked before reasoning_details."""
+        class _Delta:
+            reasoning_content = "scalar"
+            reasoning_details = [
+                {"type": "reasoning.text", "id": "r1", "text": "from details"}
+            ]
+
+        assert _extract_reasoning_text(_Delta()) == "scalar"

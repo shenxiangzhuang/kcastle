@@ -180,6 +180,52 @@ def _convert_content_for_openai(
     return parts if parts else ""
 
 
+# --- Reasoning field detection ---------------------------------------------------
+
+# Fields that various OpenAI-compatible providers use for thinking/reasoning
+# content on ``delta``.  We probe them in order and use the first non-empty
+# one to avoid duplication (some providers populate multiple fields with
+# identical content).
+_REASONING_FIELDS = ("reasoning_content", "reasoning", "reasoning_text")
+
+
+def _extract_reasoning_text(delta: object) -> str | None:
+    """Extract reasoning/thinking text from a chat completion delta.
+
+    Supports three mechanisms used by different providers:
+
+    1. **Scalar fields** — ``reasoning_content`` (DeepSeek, llama.cpp),
+       ``reasoning`` or ``reasoning_text`` (other OpenAI-compatible APIs).
+    2. **``reasoning_details``** — An array of detail objects used by MiniMax.
+       Items with ``type == "reasoning.text"`` carry a ``text`` field
+       containing the thinking fragment.
+
+    Returns the extracted text, or *None* if no reasoning content was found.
+    """
+    # 1. Scalar reasoning fields
+    for field in _REASONING_FIELDS:
+        value = getattr(delta, field, None)
+        if value and isinstance(value, str):
+            return value
+
+    # 2. reasoning_details array (MiniMax)
+    details = getattr(delta, "reasoning_details", None)
+    if details and isinstance(details, list):
+        parts: list[str] = []
+        for item in details:  # pyright: ignore[reportUnknownVariableType]
+            if not isinstance(item, dict):
+                continue
+            item_dict = cast(dict[str, Any], item)
+            if item_dict.get("type") == "reasoning.text":
+                text = item_dict.get("text")
+                if text and isinstance(text, str):
+                    parts.append(text)
+        if parts:
+            return "".join(parts)
+
+    return None
+
+
 # --- Stream Conversion ---
 
 
@@ -193,7 +239,9 @@ async def _convert_stream(
     the previous one is closed with ``ToolCallEnd`` before starting the next.
     After the stream ends the last active tool call is closed as well.
 
-    This mirrors the approach used by pi-mono's openai-completions provider.
+    Reasoning/thinking content is extracted via :func:`_extract_reasoning_text`
+    which supports multiple field conventions used by different providers
+    (``reasoning_content``, ``reasoning``, ``reasoning_details``, etc.).
     """
     current_tool_id: str | None = None
 
@@ -221,10 +269,10 @@ async def _convert_stream(
 
         delta = chunk.choices[0].delta
 
-        # Reasoning/thinking content (for models like o1, deepseek-r1, etc.)
-        reasoning_content = getattr(delta, "reasoning_content", None)
-        if reasoning_content and isinstance(reasoning_content, str):
-            yield ThinkChunk(text=reasoning_content)
+        # Reasoning/thinking content (DeepSeek, MiniMax, llama.cpp, …)
+        reasoning = _extract_reasoning_text(delta)
+        if reasoning:
+            yield ThinkChunk(text=reasoning)
 
         # Text content
         if delta.content:

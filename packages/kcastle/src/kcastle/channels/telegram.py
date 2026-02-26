@@ -21,8 +21,6 @@ from kagent import (
     AgentError,
     AgentEvent,
     StreamChunk,
-    ToolExecEnd,
-    ToolExecStart,
 )
 from kai import TextDeltaEvent
 
@@ -41,18 +39,18 @@ def _session_id_for_chat(chat_type: str, chat_id: int, user_id: int | None) -> s
 
 
 def _render_events_to_text(events: list[AgentEvent]) -> str:
-    """Render collected agent events to a single Markdown text."""
+    """Render collected agent events to a single Markdown text.
+
+    Only the final assistant text is included; tool-execution
+    indicators are omitted so that the Telegram user sees only
+    the final reply.
+    """
     parts: list[str] = []
     for event in events:
         match event:
             case StreamChunk(event=stream_event):
                 if isinstance(stream_event, TextDeltaEvent):
                     parts.append(stream_event.delta)
-            case ToolExecStart(tool_name=name):
-                parts.append(f"\n⚙ _{name}_")
-            case ToolExecEnd(tool_name=name, is_error=is_err, duration_ms=dur):
-                status = "✗" if is_err else "✓"
-                parts.append(f" {status} ({dur:.0f}ms)\n")
             case AgentError(error=err):
                 parts.append(f"\n❌ Error: {err}")
             case _:
