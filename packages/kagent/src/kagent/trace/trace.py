@@ -11,11 +11,14 @@ It is the single source of truth for an agent session's execution history.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from uuid import uuid4
 
 from kai import Message
 
 from kagent.trace.entry import TraceEntry, TraceKind
+
+type OnAppendCallback = Callable[[str, TraceEntry], None]
 
 
 class Trace:
@@ -37,6 +40,17 @@ class Trace:
         self._created_at = time.time()
         self._entries: list[TraceEntry] = []
         self._next_id: int = 1
+        self._on_append: OnAppendCallback | None = None
+
+    # --- Callback ---
+
+    def set_on_append(self, callback: OnAppendCallback | None) -> None:
+        """Install a callback invoked after every ``append()``.
+
+        The callback receives ``(trace_id, stored_entry)``.
+        Used by ``TraceManager`` to persist entries incrementally.
+        """
+        self._on_append = callback
 
     # --- Identity ---
 
@@ -76,6 +90,8 @@ class Trace:
         )
         self._next_id += 1
         self._entries.append(stored)
+        if self._on_append is not None:
+            self._on_append(self._id, stored)
         return stored
 
     @property

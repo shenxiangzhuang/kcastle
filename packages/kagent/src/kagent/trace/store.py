@@ -113,7 +113,7 @@ class JsonlTraceStore:
     def create(self, trace_id: str, name: str, created_at: float) -> None:
         path = self._path(trace_id)
         header = {"type": "header", "id": trace_id, "name": name, "created_at": created_at}
-        path.write_text(json.dumps(header) + "\n", encoding="utf-8")
+        path.write_text(json.dumps(header, ensure_ascii=False) + "\n", encoding="utf-8")
 
     def append(self, trace_id: str, entry: TraceEntry) -> None:
         path = self._path(trace_id)

@@ -86,7 +86,7 @@ class Agent:
         self._max_turns = max_turns
         self._state = AgentState(
             system=system,
-            trace=trace or Trace(),
+            trace=trace if trace is not None else Trace(),
             tools=list(tools) if tools else [],
         )
         self._running = False

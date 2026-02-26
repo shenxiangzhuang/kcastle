@@ -48,17 +48,25 @@ class TraceManager:
     def create(self, name: str = "") -> Trace:
         """Create a new trace and register it.
 
-        If a store is configured, the trace header is persisted immediately.
+        If a store is configured, the trace header is persisted immediately,
+        and an on-append callback is installed so that ``trace.append()``
+        persists each entry automatically.
         """
         trace = Trace(name=name)
         self._traces[trace.id] = trace
         if self._store is not None:
             self._store.create(trace.id, trace.name, trace.created_at)
+            self._install_callback(trace)
         return trace
 
     def register(self, trace: Trace) -> None:
-        """Register an externally-created trace (no store write)."""
+        """Register an externally-created trace (no store write).
+
+        If a store is configured, installs the persistence callback.
+        """
         self._traces[trace.id] = trace
+        if self._store is not None:
+            self._install_callback(trace)
 
     def get(self, trace_id: str) -> Trace:
         """Get a trace by ID.  Raises ``KeyError`` if not found."""
@@ -84,6 +92,7 @@ class TraceManager:
             entries=entries,
         )
         self._traces[trace.id] = trace
+        self._install_callback(trace)
         return trace
 
     def list_traces(self) -> list[str]:
@@ -93,19 +102,25 @@ class TraceManager:
         """
         return sorted(self._traces.keys())
 
+    # --- Internal ---
+
+    def _install_callback(self, trace: Trace) -> None:
+        """Install an on-append callback that persists entries to the store."""
+        store = self._store
+        assert store is not None
+        trace.set_on_append(lambda trace_id, entry: store.append(trace_id, entry))
+
     # --- Entry operations ---
 
     def append(self, trace_id: str, entry: TraceEntry) -> TraceEntry:
         """Append an entry to the specified trace.
 
-        If a store is configured, the entry is also persisted.
+        If a store is configured, the entry is also persisted via the
+        on-append callback installed on the trace.
         Returns the stored entry with its assigned ID.
         """
         trace = self._traces[trace_id]
-        stored = trace.append(entry)
-        if self._store is not None:
-            self._store.append(trace_id, stored)
-        return stored
+        return trace.append(entry)
 
     def reset(self, trace_id: str) -> None:
         """Clear all entries in the specified trace."""

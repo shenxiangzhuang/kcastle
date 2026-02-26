@@ -104,7 +104,7 @@ class TraceMeta:
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
-        return json.dumps(self.to_dict())
+        return json.dumps(self.to_dict(), ensure_ascii=False)
 
     @classmethod
     def from_json(cls, s: str) -> TraceMeta:
@@ -173,7 +173,7 @@ class TraceEntry:
 
     def to_json(self) -> str:
         """Serialize to a JSON string."""
-        return json.dumps(self.to_dict())
+        return json.dumps(self.to_dict(), ensure_ascii=False)
 
     @classmethod
     def from_json(cls, s: str) -> TraceEntry:
