@@ -18,13 +18,13 @@ Or run tools directly with `uv run`:
 
 ## PoC stage
 
-We are in PoC stage now, the break changes are acceptable, and we will iterate fast. The main goal is to build a clean and solid foundation for the agent framework, so we can easily build on top of it and add more features in the future. We will focus on the LLM abstraction layer(kai) and the core agent runtime(kagent) first, and then we can add the sandbox environment and the coding agent CLI later.
+We are in PoC stage now, the break changes are acceptable, and we will iterate fast. The main goal is to build a clean and solid foundation for the agent framework, so we can easily build on top of it and add more features in the future. We will focus on the LLM abstraction layer(kai) and the core agent runtime(kagent) first, and then build the agent application(kcastle) on top.
 
 
 ## Project overview
 
 K is a Python monorepo for building AI agents. It provides a unified LLM abstraction layer,
-a core agent runtime, a sandbox environment, and a coding agent CLI.
+a core agent runtime, and an agent application with multi-endpoint support.
 
 ## Tech stack
 
@@ -41,20 +41,17 @@ a core agent runtime, a sandbox environment, and a coding agent CLI.
 |---------|--------|-------------|
 | **[kai](packages/kai)** | `import kai` | Unified multi-provider LLM API |
 | **[kagent](packages/kagent)** | `import kagent` | Agent runtime with tool calling and state management |
-| **[kcastle](packages/kcastle)** | `import kcastle` | Sandbox environment for secure agent execution |
-| **[kcode](packages/kcode)** | `import kcode` | Interactive coding agent CLI |
+| **[kcastle](packages/kcastle)** | `import kcastle` | Agent application with multi-endpoint support |
 
 ### Dependency chain
 
 ```
-kcode ──► kagent ──► kai
-kcastle ─┘
+kcastle ──► kagent ──► kai
 ```
 
 - `kai` is the foundation: LLM provider abstractions, no internal deps.
 - `kagent` builds on `kai`: agent runtime, tool calling, state management.
-- `kcastle` builds on `kagent`: sandbox/isolation for agent execution.
-- `kcode` builds on `kagent`: the end-user coding agent CLI.
+- `kcastle` builds on `kagent`: agent application with multi-endpoint support (CLI, Telegram, Discord).
 
 ## Repo structure
 
@@ -64,8 +61,7 @@ k/
 ├── packages/
 │   ├── kai/src/kai/            # LLM abstraction layer
 │   ├── kagent/src/kagent/      # core agent framework
-│   ├── kcastle/src/kcastle/    # sandbox environment
-│   └── kcode/src/kcode/        # coding agent CLI
+│   └── kcastle/src/kcastle/    # agent application
 └── references/                 # local-only reference projects (gitignored)
 ```
 

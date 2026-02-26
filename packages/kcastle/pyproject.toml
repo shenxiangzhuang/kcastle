@@ -1,7 +1,7 @@
 [project]
 name = "kcastle"
 version = "0.1.0"
-description = "Open sandbox environment for the k agent framework"
+description = "Agent application with multi-endpoint support for the k agent framework"
 readme = "README.md"
 authors = [
     { name = "Xiangzhuang Shen", email = "datahonor@gmail.com" }

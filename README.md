@@ -8,8 +8,7 @@ Tools for building AI agents in Python.
 |---------|-------------|
 | **[kai](packages/kai)** | Unified multi-provider LLM API |
 | **[kagent](packages/kagent)** | Agent runtime with tool calling and state management |
-| **[kcastle](packages/kcastle)** | Sandbox environment for secure agent execution |
-| **[kcode](packages/kcode)** | Interactive coding agent CLI |
+| **[kcastle](packages/kcastle)** | Agent application with multi-endpoint support |
 
 ## Development
 

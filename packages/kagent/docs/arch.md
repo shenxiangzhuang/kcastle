@@ -229,6 +229,65 @@ class ToolFilterBuilder:
 - **`run()` + `complete()`** — mirrors `kai.stream()` + `kai.complete()`. `run()` for streaming, `complete()` for scripting.
 - **Steering and follow-up** are Agent-level features (not loop-level). They require statefulness (queues, current-run awareness).
 
+## Event Broadcast (SPMC)
+
+The `Agent` supports an optional **SPMC (single-producer, multiple-consumer) event broadcast**
+for scenarios where multiple consumers need to observe the same agent run — e.g. a terminal UI
+and a log recorder, or multiple endpoint adapters in an application like kcastle.
+
+### Design
+
+```
+                      ┌─► Subscriber A (terminal renderer)
+agent.run("...") ───► │
+  (produces events)   ├─► Subscriber B (log recorder)
+                      │
+                      └─► Subscriber C (telegram adapter)
+```
+
+- **`EventBus`** — a lightweight in-process fan-out. Each `subscribe()` creates an
+  independent async iterator. `publish()` delivers to all active subscribers.
+- **Pull-based API preserved** — `run()` still returns `AsyncIterator[AgentEvent]`.
+  The EventBus is an *additional* output path, not a replacement.
+- **No cross-process concerns** — EventBus is in-process only. Cross-process delivery
+  (e.g. to a Telegram bot in another process) is the application layer's responsibility.
+
+### Usage
+
+```python
+# Simple usage — unchanged, no EventBus needed
+async for event in agent.run("hello"):
+    print(event)
+
+# Multi-consumer — subscribe before or during a run
+sub1 = agent.subscribe()  # independent async iterator
+sub2 = agent.subscribe()  # another consumer
+
+async def consumer(sub: Subscription):
+    async for event in sub:
+        ...  # each subscriber gets ALL events
+
+task1 = asyncio.create_task(consumer(sub1))
+task2 = asyncio.create_task(consumer(sub2))
+
+# run() also publishes to all subscribers
+async for event in agent.run("hello"):
+    pass  # direct consumer still works
+
+# Clean up
+sub1.close()
+sub2.close()
+```
+
+### What EventBus is NOT
+
+- **Not an inbox / command channel** — commands go through `run()`, `steer()`, `abort()`
+  method calls directly. No message queue for inbound commands.
+- **Not cross-process** — application layers (kcastle) handle serialization, transport,
+  and remote delivery.
+- **Not mandatory** — if no one calls `subscribe()`, no EventBus overhead. The `run()`
+  async iterator works exactly as before.
+
 ## Design Comparison
 
 | Aspect | pi-agent-core | kimi-cli (soul) | **kagent** |
@@ -240,14 +299,14 @@ class ToolFilterBuilder:
 | Events | `AgentEvent` union | `WireMessage` via Wire | `AgentEvent` union |
 | State | `AgentState` interface | `Context` + `Runtime` | `AgentState` dataclass |
 | Extensibility | Config callbacks (kwargs) | Wire + Approval + ContextVar | Callbacks (kwargs) |
-| Streaming | `EventStream` push-based | Wire SPMC broadcast | `AsyncIterator` pull-based |
+| Streaming | `EventStream` push-based | Wire SPMC broadcast | `AsyncIterator` pull-based + optional SPMC `EventBus` |
 | Context build | `transformContext` + `convertToLlm` | Compaction in loop | `ContextBuilder` protocol |
 | Message types | `Message` + `CustomAgentMessages` | `Message` | `kai.Message` directly |
 | SDK API | `prompt()` + subscribe | N/A | `run()` + `complete()` |
 
 ## What's NOT in kagent (by design)
 
-These belong in application layers (`kcode`, etc.):
+These belong in application layers (`kcastle`, etc.):
 
 - **Persistence** — Session saving, JSONL, checkpoints.
 - **Approval UI** — via `on_tool_result` callback.
