@@ -17,10 +17,12 @@ Example — custom hooks::
         def on_agent_start(self, *, run_id, model, provider):
             print(f"Agent started: {model}")
 
-        def on_tool_end(self, *, run_id, turn_index, call_id, tool_name,
-                        result, duration_ms, is_error):
+        def on_tool_end(
+            self, *, run_id, turn_index, call_id, tool_name, result, duration_ms, is_error
+        ):
             if is_error:
                 send_alert(f"Tool {tool_name} failed!")
+
 
     agent = Agent(provider=p, hooks=MyHooks())
 """
@@ -133,6 +135,7 @@ class LoggingHooks(Hooks):
     Example::
 
         import logging
+
         logging.basicConfig(level=logging.INFO)
 
         agent = Agent(provider=p, hooks=LoggingHooks())

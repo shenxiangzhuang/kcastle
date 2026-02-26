@@ -260,9 +260,7 @@ class TestAgentErrorPropagation:
         from kai.usage import TokenUsage
 
         # A provider that returns only a usage chunk (no text, no tool call).
-        provider = MockProvider(
-            [[UsageChunk(usage=TokenUsage(input_tokens=0, output_tokens=0))]]
-        )
+        provider = MockProvider([[UsageChunk(usage=TokenUsage(input_tokens=0, output_tokens=0))]])
         agent = Agent(provider=provider, system="test")
 
         with pytest.raises(RuntimeError, match="Agent loop failed"):

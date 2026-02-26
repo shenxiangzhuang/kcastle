@@ -105,9 +105,7 @@ class OTelHooks(Hooks):
     def _tool_key(run_id: str, turn_index: int, call_id: str) -> str:
         return f"{run_id}:{turn_index}:{call_id}"
 
-    def _start_child_span(
-        self, name: str, parent: Any, attributes: dict[str, Any]
-    ) -> Any:
+    def _start_child_span(self, name: str, parent: Any, attributes: dict[str, Any]) -> Any:
         """Start a span as a child of *parent* (or root if None)."""
         ctx = self._otel_trace.set_span_in_context(parent) if parent else None
         return self._tracer.start_span(name, context=ctx, attributes=attributes)
