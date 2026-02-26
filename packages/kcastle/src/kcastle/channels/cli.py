@@ -1,0 +1,225 @@
+"""CLI channel — interactive terminal using prompt_toolkit.
+
+Usage::
+
+    $ k                    # New session (auto-generated ID)
+    $ k -C                 # Continue most recently active session
+    $ k -S <id>            # Resume specific session by ID
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from typing import TYPE_CHECKING
+
+from kagent import (
+    AgentEnd,
+    AgentError,
+    AgentEvent,
+    AgentStart,
+    StreamChunk,
+    ToolExecEnd,
+    ToolExecStart,
+    TurnEnd,
+    TurnStart,
+)
+from kai import TextDeltaEvent
+
+from kcastle.session.session import Session
+
+if TYPE_CHECKING:
+    from kcastle.castle import Castle
+
+_log = logging.getLogger("kcastle.channels.cli")
+
+# ---------------------------------------------------------------------------
+# Rendering helpers
+# ---------------------------------------------------------------------------
+
+
+def _render_event(event: AgentEvent) -> None:
+    """Render a single AgentEvent to the terminal."""
+    match event:
+        case AgentStart():
+            pass  # silent
+        case TurnStart():
+            pass  # silent
+        case StreamChunk(event=stream_event):
+            if isinstance(stream_event, TextDeltaEvent):
+                sys.stdout.write(stream_event.delta)
+                sys.stdout.flush()
+        case ToolExecStart(tool_name=name, arguments=args):
+            _args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+            print(f"\n⚙ {name}({_args_str})", flush=True)
+        case ToolExecEnd(tool_name=name, is_error=is_err, duration_ms=dur):
+            status = "✗" if is_err else "✓"
+            print(f"  {status} {name} ({dur:.0f}ms)", flush=True)
+        case TurnEnd():
+            print(flush=True)  # newline after streamed text
+        case AgentError(error=err):
+            print(f"\n✗ Error: {err}", file=sys.stderr, flush=True)
+        case AgentEnd():
+            pass  # silent
+        case _:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Session commands
+# ---------------------------------------------------------------------------
+
+_COMMANDS = {
+    "/session list": "List all sessions",
+    "/session new": "Create a new session",
+    "/session switch": "Switch to a session by ID",
+    "/help": "Show available commands",
+    "/quit": "Exit the CLI",
+}
+
+
+async def _handle_command(line: str, castle: Castle, session: Session) -> Session | None:
+    """Handle a slash command.  Returns new session if switched, None otherwise."""
+    parts = line.strip().split()
+    cmd = " ".join(parts[:2]) if len(parts) >= 2 else parts[0]
+
+    if cmd == "/help":
+        print("\nAvailable commands:")
+        for c, desc in _COMMANDS.items():
+            print(f"  {c:20s}  {desc}")
+        print()
+        return None
+
+    if cmd == "/quit":
+        return None  # Caller checks line == "/quit"
+
+    if cmd == "/session":
+        if len(parts) < 2:
+            print("Usage: /session <list|new|switch>")
+            return None
+
+        sub = parts[1]
+        manager = castle.session_manager
+
+        if sub == "list":
+            sessions = manager.list()
+            if not sessions:
+                print("  (no sessions)")
+            else:
+                for s in sessions:
+                    marker = " *" if s.id == session.id else ""
+                    name_str = f"  {s.name}" if s.name else ""
+                    print(f"  {s.id}{name_str}{marker}")
+            print()
+            return None
+
+        if sub == "new":
+            name = " ".join(parts[2:]) if len(parts) > 2 else ""
+            sid = parts[2] if len(parts) > 2 and not name.startswith('"') else None
+            new_session = manager.create(session_id=sid, name=name)
+            print(f'Created session "{new_session.id}"')
+            return new_session
+
+        if sub == "switch":
+            if len(parts) < 3:
+                print("Usage: /session switch <id>")
+                return None
+            target_id = parts[2]
+            try:
+                new_session = manager.get_or_create(target_id)
+                print(f'Switched to session "{target_id}"')
+                return new_session
+            except Exception as e:
+                print(f"Error: {e}")
+                return None
+
+    print(f"Unknown command: {line}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# CLIChannel
+# ---------------------------------------------------------------------------
+
+
+class CLIChannel:
+    """Interactive CLI channel using stdin/stdout.
+
+    For PoC we use plain ``input()`` in an executor.
+    ``prompt_toolkit`` can be added later for richer features.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str | None = None,
+        continue_latest: bool = False,
+    ) -> None:
+        self._session_id = session_id
+        self._continue_latest = continue_latest
+        self._castle: Castle | None = None
+        self._running = False
+
+    @property
+    def name(self) -> str:
+        return "cli"
+
+    async def start(self, castle: Castle) -> None:
+        """Start the interactive CLI loop."""
+        self._castle = castle
+        self._running = True
+        manager = castle.session_manager
+
+        # Resolve initial session
+        if self._session_id:
+            session = manager.get_or_create(self._session_id)
+            print(f'Resumed session "{session.id}"')
+        elif self._continue_latest:
+            session = manager.latest()
+            if session is None:
+                session = manager.create()
+                print(f'No previous session. Created "{session.id}"')
+            else:
+                print(f'Continuing session "{session.id}"')
+        else:
+            session = manager.create()
+            print(f'New session "{session.id}"')
+
+        print("Type /help for commands, /quit to exit.\n")
+
+        loop = asyncio.get_event_loop()
+
+        while self._running:
+            try:
+                line = await loop.run_in_executor(None, lambda: input("k> "))
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            if line == "/quit":
+                break
+
+            if line.startswith("/"):
+                new_session = await _handle_command(line, castle, session)
+                if new_session is not None:
+                    session = new_session
+                continue
+
+            # Regular user input → run agent
+            try:
+                async for event in session.run(line):
+                    _render_event(event)
+            except Exception as e:
+                print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
+
+        # Cleanup
+        manager.suspend(session.id)
+
+    async def stop(self) -> None:
+        """Stop the CLI channel."""
+        self._running = False
