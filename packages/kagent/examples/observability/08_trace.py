@@ -14,9 +14,7 @@ Trace tree structure:
 
 Prerequisites:
     uv add kagent[otel]           # install OTel dependencies
-    docker run -d --name jaeger \\
-      -p 16686:16686 -p 4317:4317 \\
-      jaegertracing/all-in-one:1.64
+    docker run -d --name jaeger -p 16686:16686 -p 4317:4317 jaegertracing/all-in-one:1.64.0
 
 Run:
     export DEEPSEEK_API_KEY=...
