@@ -111,7 +111,7 @@ async def test_create_skill_tool_rejects_project_target(tmp_path: Path) -> None:
 
 def test_builtin_skills_are_discoverable() -> None:
     package_root = Path(__file__).resolve().parents[1] / "src" / "kcastle"
-    builtin_dir = package_root / "builtin_skills"
+    builtin_dir = package_root / "skills"
     manager = SkillManager(
         user_skills_dir=Path("/tmp/none-user"),
         project_skills_dir=Path("/tmp/none-project"),

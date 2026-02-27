@@ -274,7 +274,7 @@ class Castle:
         skill_manager = SkillManager(
             user_skills_dir=config.skills_dir,
             project_skills_dir=project_skills,
-            builtin_skills_dir=Path(__file__).resolve().parent / "builtin_skills",
+            builtin_skills_dir=Path(__file__).resolve().parent / "skills",
         )
         skill_manager.discover()
 
