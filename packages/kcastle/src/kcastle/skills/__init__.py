@@ -1,7 +1,8 @@
 """kcastle.skills — Skill management for kcastle.
 
 Discover, search, load, create, and update skills across three layers:
-builtin, user (``~/.kcastle/skills``), and project (``<root>/.skills``).
+builtin (``kcastle/skills``), user (``~/.kcastle/skills``), and
+project (``<root>/.skills``).
 """
 
 from kcastle.skills.loader import LoadedSkill, SkillLoader
