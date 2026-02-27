@@ -19,7 +19,7 @@ class _SkillTool(Tool):
 
 
 class ListSkillsTool(_SkillTool):
-    name: str = "skills.list"
+    name: str = "skills_list"
     description: str = "List discovered skills across builtin, user, and project layers."
 
     class Params(BaseModel):

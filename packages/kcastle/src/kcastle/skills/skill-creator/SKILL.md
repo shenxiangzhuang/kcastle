@@ -9,9 +9,12 @@ Use this skill when the user asks to create, modify, optimize, or evaluate a ski
 
 ## Operating rules
 
-- Discover candidate skills via `skills.list`; perform edits via file tools (`write_file`, `edit_file`).
+- Discover candidate skills via `skills_list`; perform edits via file tools (`write_file`, `edit_file`).
 - Keep responses concise; avoid dumping long file contents unless explicitly requested.
 - Every skill must be `<skill-id>/SKILL.md` with valid frontmatter (`name`, `description`).
+- Agent-created skills must be managed under `~/.kcastle/skills`.
+- Use one folder per skill: `~/.kcastle/skills/<skill-id>/SKILL.md`.
+- A skill folder may also include `scripts/` for reusable helper scripts.
 - Use lowercase-hyphen IDs only (`^[a-z0-9-]{1,64}$`).
 - New or updated skills should be prepared as file edits and confirmed with the user before write.
 - Treat project scope (`.skills`) as user-managed unless user explicitly asks for direct edits.
@@ -56,6 +59,13 @@ The body should usually contain:
 - Edge cases / fallback behavior
 
 Keep SKILL.md focused and operational. If content grows too large, split details into referenced companion files.
+
+Recommended skill layout:
+
+- `<skill-id>/SKILL.md` (required)
+- `<skill-id>/scripts/` (optional, executable helpers)
+
+If `scripts/` is present, reference script names and expected inputs/outputs in SKILL.md so execution is predictable.
 
 ### 4) Create lightweight eval prompts
 

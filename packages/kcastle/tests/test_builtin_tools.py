@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -29,7 +31,7 @@ async def test_builtin_toolset_contains_core_and_skill_tools(tmp_path: Path) -> 
     assert "write_file" in names
     assert "edit_file" in names
     assert "run_bash" in names
-    assert "skills.list" in names
+    assert "skills_list" in names
 
 
 @pytest.mark.asyncio
@@ -64,6 +66,37 @@ async def test_core_file_tools_roundtrip(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_core_file_tools_allow_user_skill_dir_with_tilde(
+    tmp_path: Path,
+) -> None:
+    manager = SkillManager(
+        user_skills_dir=tmp_path / "user",
+        project_skills_dir=tmp_path / "project",
+    )
+    manager.discover()
+
+    tools = _tool_map(create_builtin_tools(workspace=tmp_path / "workspace", skill_manager=manager))
+    write_tool = tools["write_file"]
+    read_tool = tools["read_file"]
+
+    skill_id = f"kcastle-test-{uuid.uuid4().hex[:8]}"
+    target = f"~/.kcastle/skills/{skill_id}/SKILL.md"
+    content = "---\nname: demo-skill\ndescription: demo\n---\n"
+
+    try:
+        write_result = await write_tool.execute(
+            cast(Any, write_tool).Params(path=target, content=content)
+        )
+        assert not write_result.is_error
+
+        read_result = await read_tool.execute(cast(Any, read_tool).Params(path=target))
+        assert not read_result.is_error
+        assert "name: demo-skill" in read_result.output
+    finally:
+        shutil.rmtree(Path.home() / ".kcastle" / "skills" / skill_id, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_skills_list_tool_lists_discovered_skills(tmp_path: Path) -> None:
     user_dir = tmp_path / "user"
     skill_dir = user_dir / "demo-skill"
@@ -80,7 +113,7 @@ async def test_skills_list_tool_lists_discovered_skills(tmp_path: Path) -> None:
     manager.discover()
 
     tools = _tool_map(create_builtin_tools(workspace=tmp_path, skill_manager=manager))
-    list_tool = tools["skills.list"]
+    list_tool = tools["skills_list"]
 
     result = await list_tool.execute(cast(Any, list_tool).Params(query="demo", max_results=10))
     assert not result.is_error

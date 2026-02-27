@@ -212,8 +212,7 @@ class CLIChannel:
 
             # Regular user input → run agent
             try:
-                prepared_input = castle.prepare_user_input(line)
-                async for event in session.run(prepared_input):
+                async for event in session.run(line):
                     _render_event(event)
             except Exception as e:
                 print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)

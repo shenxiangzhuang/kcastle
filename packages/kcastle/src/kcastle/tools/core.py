@@ -30,23 +30,35 @@ def _safe_text(path: Path) -> str:
 
 class _WorkspaceTool(Tool):
     _workspace: Path = PrivateAttr()
+    _user_skills_dir: Path = PrivateAttr()
 
     @classmethod
     def for_workspace(cls, workspace: Path) -> _WorkspaceTool:
         tool = cls.model_construct()
         tool._workspace = workspace.resolve()
+        tool._user_skills_dir = (Path.home() / ".kcastle" / "skills").resolve(strict=False)
         return tool
 
     def _resolve(self, user_path: str) -> Path:
-        candidate = Path(user_path)
+        candidate = Path(user_path).expanduser()
         absolute = (
             candidate.resolve(strict=False)
             if candidate.is_absolute()
             else (self._workspace / candidate).resolve(strict=False)
         )
-        if not absolute.is_relative_to(self._workspace):
+
+        is_workspace_path = absolute.is_relative_to(self._workspace)
+        is_user_skill_path = absolute.is_relative_to(self._user_skills_dir)
+        if not is_workspace_path and not is_user_skill_path:
             raise ValueError(f"Path escapes workspace: {user_path}")
         return absolute
+
+    def _display_path(self, absolute: Path) -> str:
+        if absolute.is_relative_to(self._workspace):
+            return absolute.relative_to(self._workspace).as_posix()
+        if absolute.is_relative_to(self._user_skills_dir):
+            return f"~/.kcastle/skills/{absolute.relative_to(self._user_skills_dir).as_posix()}"
+        return absolute.as_posix()
 
 
 class ReadFileTool(_WorkspaceTool):
@@ -144,8 +156,8 @@ class ListDirTool(_WorkspaceTool):
             entries = sorted(base.rglob("*")) if params.recursive else sorted(base.iterdir())
             out: list[str] = []
             for item in entries[: params.max_entries]:
-                rel = item.relative_to(self._workspace).as_posix()
-                out.append(f"{rel}/" if item.is_dir() else rel)
+                shown = self._display_path(item)
+                out.append(f"{shown}/" if item.is_dir() else shown)
             return ToolResult(output="\n".join(out) if out else "(empty)")
         except Exception as e:
             return ToolResult.error(str(e))
@@ -167,8 +179,8 @@ class FindFilesTool(_WorkspaceTool):
                 return ToolResult.error(f"Not a directory: {params.path}")
             results: list[str] = []
             for item in base.glob(params.pattern):
-                rel = item.relative_to(self._workspace).as_posix()
-                results.append(f"{rel}/" if item.is_dir() else rel)
+                shown = self._display_path(item)
+                results.append(f"{shown}/" if item.is_dir() else shown)
                 if len(results) >= params.max_results:
                     break
             return ToolResult(output="\n".join(results) if results else "(no matches)")
@@ -205,8 +217,8 @@ class GrepTool(_WorkspaceTool):
                 for line_no, line in enumerate(text.splitlines(), start=1):
                     ok = bool(needle.search(line)) if needle else params.query in line
                     if ok:
-                        rel = file_path.relative_to(self._workspace).as_posix()
-                        matches.append(f"{rel}:{line_no}: {line}")
+                        shown = self._display_path(file_path)
+                        matches.append(f"{shown}:{line_no}: {line}")
                         if len(matches) >= params.max_results:
                             return ToolResult(output="\n".join(matches))
             return ToolResult(output="\n".join(matches) if matches else "(no matches)")

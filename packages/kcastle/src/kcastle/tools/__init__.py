@@ -16,7 +16,7 @@ def create_builtin_tools(*, workspace: Path, skill_manager: SkillManager) -> lis
 
     Includes:
     - Core coding tools (file/search/bash)
-    - Skill discovery tools (skills.list)
+    - Skill discovery tools (skills_list)
     """
     tools: list[Tool] = []
     tools.extend(create_core_tools(workspace=workspace))

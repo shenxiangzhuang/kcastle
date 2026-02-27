@@ -435,6 +435,7 @@ class TestExtractReasoningText:
 
     def test_first_nonempty_field_wins(self) -> None:
         """When multiple fields are present, the first non-empty one wins."""
+
         class _Delta:
             reasoning_content = "first"
             reasoning = "second"
@@ -450,6 +451,7 @@ class TestExtractReasoningText:
 
     def test_reasoning_details_minimax(self) -> None:
         """MiniMax-style reasoning_details with type=reasoning.text."""
+
         class _Delta:
             reasoning_details = [
                 {"type": "reasoning.text", "id": "r1", "text": "let me think about this"}
@@ -459,9 +461,7 @@ class TestExtractReasoningText:
 
     def test_reasoning_details_ignores_non_text_types(self) -> None:
         class _Delta:
-            reasoning_details = [
-                {"type": "reasoning.encrypted", "id": "r1", "data": "..."}
-            ]
+            reasoning_details = [{"type": "reasoning.encrypted", "id": "r1", "data": "..."}]
 
         assert _extract_reasoning_text(_Delta()) is None
 
@@ -482,12 +482,9 @@ class TestExtractReasoningText:
 
     def test_scalar_field_takes_priority_over_details(self) -> None:
         """Scalar reasoning fields are checked before reasoning_details."""
+
         class _Delta:
             reasoning_content = "scalar"
-            reasoning_details = [
-                {"type": "reasoning.text", "id": "r1", "text": "from details"}
-            ]
+            reasoning_details = [{"type": "reasoning.text", "id": "r1", "text": "from details"}]
 
         assert _extract_reasoning_text(_Delta()) == "scalar"
-
-
