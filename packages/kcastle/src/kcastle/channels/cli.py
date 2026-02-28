@@ -142,7 +142,6 @@ class CLIChannel:
     ) -> None:
         self._session_id = session_id
         self._continue_latest = continue_latest
-        self._castle: Castle | None = None
         self._running = False
 
     @property
@@ -151,7 +150,6 @@ class CLIChannel:
 
     async def start(self, castle: Castle) -> None:
         """Start the interactive CLI loop."""
-        self._castle = castle
         self._running = True
         manager = castle.session_manager
 
@@ -194,7 +192,8 @@ class CLIChannel:
                 continue
 
             try:
-                async for event in session.run(line):
+                user_input = castle.prepare_user_input(line)
+                async for event in session.run(user_input):
                     _render_event(event)
             except Exception as e:
                 print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)

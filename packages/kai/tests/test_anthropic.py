@@ -25,8 +25,6 @@ from kai.chunk import (
 from kai.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 from kai.providers.anthropic import Anthropic
 
-# --- Helpers ---
-
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:
     return Context(system=system, messages=list(messages))
@@ -75,9 +73,6 @@ async def _stream_raw(
 
     output = [c async for c in provider.stream_raw(context)]
     return output, captured
-
-
-# --- Event factories ---
 
 
 def _msg_start(
@@ -145,9 +140,6 @@ def _msg_delta(*, output_tokens: int = 0) -> MessageDeltaEvent:
             "usage": {"output_tokens": output_tokens},
         }
     )
-
-
-# --- Message serialization ---
 
 
 class TestMessageSerialization:
@@ -362,9 +354,6 @@ class TestMessageSerialization:
         blocks = kw["messages"][1]["content"]
         think = [b for b in blocks if b.get("type") == "thinking"]
         assert len(think) == 0
-
-
-# --- Stream conversion ---
 
 
 class TestStreamConversion:

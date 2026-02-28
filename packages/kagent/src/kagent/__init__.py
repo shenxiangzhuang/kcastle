@@ -18,9 +18,6 @@ Example::
 import logging as _logging
 
 # Level 2: Stateful agent SDK
-# Tools (re-exported from kai for convenience)
-from kai import Tool, ToolResult
-
 from kagent.agent import Agent
 
 # Context builders
@@ -64,13 +61,9 @@ from kagent.step import OnToolResultFn, agent_step
 
 # Trace
 from kagent.trace import (
-    InMemoryTraceStore,
-    JsonlTraceStore,
     Trace,
     TraceEntry,
-    TraceKind,
     TraceManager,
-    TraceMeta,
     TraceStore,
 )
 
@@ -81,9 +74,6 @@ __all__ = [
     "Agent",
     # State
     "AgentState",
-    # Tools
-    "Tool",
-    "ToolResult",
     # Context builders
     "ContextBuilder",
     "DefaultBuilder",
@@ -112,12 +102,8 @@ __all__ = [
     # Trace
     "Trace",
     "TraceEntry",
-    "TraceKind",
-    "TraceMeta",
     "TraceManager",
     "TraceStore",
-    "InMemoryTraceStore",
-    "JsonlTraceStore",
 ]
 
 _logging.getLogger("kagent").addHandler(_logging.NullHandler())

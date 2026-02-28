@@ -15,8 +15,6 @@ from pydantic import BaseModel, field_serializer, field_validator
 from kai.tool import Tool
 from kai.usage import TokenUsage
 
-# --- Content Parts ---
-
 
 class TextPart(BaseModel, frozen=True):
     """A text content block."""
@@ -48,9 +46,6 @@ type ContentPart = TextPart | ThinkPart | ImagePart
 """Union of all content part types."""
 
 
-# --- Tool Call ---
-
-
 class ToolCall(BaseModel, frozen=True):
     """A tool/function call requested by the assistant."""
 
@@ -60,9 +55,6 @@ class ToolCall(BaseModel, frozen=True):
     """Name of the tool to invoke."""
     arguments: str
     """Arguments as a JSON string."""
-
-
-# --- Message ---
 
 
 class Message(BaseModel):
@@ -159,9 +151,6 @@ class Message(BaseModel):
         if isinstance(content, str) and is_error:
             content = f"Error: {content}"
         return Message(role="tool", content=content, tool_call_id=tool_call_id)
-
-
-# --- Context ---
 
 
 class Context(BaseModel):

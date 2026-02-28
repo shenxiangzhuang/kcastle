@@ -105,9 +105,6 @@ class OpenAICompletions:
             raise convert_error(e) from e
 
 
-# --- Message Conversion ---
-
-
 def _build_messages(context: Context) -> list[ChatCompletionMessageParam]:
     """Convert a Context into OpenAI message format."""
     messages: list[ChatCompletionMessageParam] = []
@@ -185,8 +182,6 @@ def _convert_content_for_openai(
     return parts if parts else ""
 
 
-# --- Reasoning helpers ---------------------------------------------------------------
-
 # Fields that various OpenAI-compatible providers use for thinking/reasoning
 # content on ``delta``.  We probe them in order and use the first non-empty
 # one to avoid duplication (some providers populate multiple fields with
@@ -229,9 +224,6 @@ def _extract_reasoning_text(delta: object) -> str | None:
             return "".join(parts)
 
     return None
-
-
-# --- Stream Conversion ---
 
 
 async def _convert_stream(

@@ -106,9 +106,6 @@ class OpenAIResponses:
             raise convert_error(e) from e
 
 
-# --- Input Conversion ---
-
-
 def _build_input(context: Context) -> ResponseInputParam:
     """Convert a Context into Responses API input format."""
     items: list[ResponseInputItemParam] = []
@@ -198,9 +195,6 @@ def _convert_content_for_responses(
                 }
             )
     return parts if parts else ""
-
-
-# --- Stream Conversion ---
 
 
 async def _convert_stream(

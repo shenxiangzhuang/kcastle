@@ -25,8 +25,6 @@ from kai.providers.openai._completions import (
     _extract_reasoning_text as _extract_reasoning_text,  # pyright: ignore[reportPrivateUsage]
 )
 
-# --- Helpers ---
-
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:
     """Build a Context from messages."""
@@ -110,9 +108,6 @@ async def _stream_raw(
 
     output = [c async for c in provider.stream_raw(context)]
     return output, captured
-
-
-# --- Message serialization ---
 
 
 class TestMessageSerialization:
@@ -244,9 +239,6 @@ class TestMessageSerialization:
         ctx = _ctx(Message(role="user", content=[]))
         _, kw = await _stream_raw([], ctx)
         assert kw["messages"][0]["content"] == ""
-
-
-# --- Stream conversion ---
 
 
 class TestStreamConversion:
@@ -407,9 +399,6 @@ class TestStreamConversion:
         assert len(u) == 1
         assert u[0].usage.input_tokens == 10
         assert u[0].usage.output_tokens == 5
-
-
-# --- Reasoning extraction ---
 
 
 class TestExtractReasoningText:

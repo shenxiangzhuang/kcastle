@@ -21,26 +21,13 @@ from typing import Any
 from kai import Message
 from kai.usage import TokenUsage
 
-# ---------------------------------------------------------------------------
-# TraceKind
-# ---------------------------------------------------------------------------
-
 
 class TraceKind(StrEnum):
     """Discriminator for trace entry types."""
 
     USER = "user"
     ASSISTANT = "assistant"
-    SYSTEM = "system"
-    TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
-    ANCHOR = "anchor"
-    EVENT = "event"
-
-
-# ---------------------------------------------------------------------------
-# TraceMeta
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,8 +61,6 @@ class TraceMeta:
             usage=self.usage,
         )
 
-    # --- Serialization ---
-
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict.  Omits default/None fields."""
         d: dict[str, Any] = {}
@@ -102,20 +87,6 @@ class TraceMeta:
             usage=usage,
         )
 
-    def to_json(self) -> str:
-        """Serialize to a JSON string."""
-        return json.dumps(self.to_dict(), ensure_ascii=False)
-
-    @classmethod
-    def from_json(cls, s: str) -> TraceMeta:
-        """Deserialize from a JSON string."""
-        return cls.from_dict(json.loads(s))
-
-
-# ---------------------------------------------------------------------------
-# TraceEntry
-# ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class TraceEntry:
@@ -139,8 +110,6 @@ class TraceEntry:
 
     meta: TraceMeta = field(default_factory=TraceMeta)
     """Cross-cutting metadata (timing, run info, usage)."""
-
-    # --- Serialization ---
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict."""
@@ -180,8 +149,6 @@ class TraceEntry:
         """Deserialize from a JSON string."""
         return cls.from_dict(json.loads(s))
 
-    # --- Factory classmethods ---
-
     @classmethod
     def user(cls, message: Message, **meta_kw: Any) -> TraceEntry:
         """Create a user message entry."""
@@ -193,46 +160,6 @@ class TraceEntry:
         return cls(id=0, kind=TraceKind.ASSISTANT, message=message, meta=TraceMeta(**meta_kw))
 
     @classmethod
-    def system(cls, content: str, **meta_kw: Any) -> TraceEntry:
-        """Create a system prompt entry."""
-        msg = Message(role="user", content=f"[System] {content}")
-        return cls(
-            id=0,
-            kind=TraceKind.SYSTEM,
-            message=msg,
-            data={"content": content},
-            meta=TraceMeta(**meta_kw),
-        )
-
-    @classmethod
-    def tool_call(cls, calls: list[dict[str, Any]], **meta_kw: Any) -> TraceEntry:
-        """Create a tool call entry (records the raw call data)."""
-        return cls(
-            id=0,
-            kind=TraceKind.TOOL_CALL,
-            data={"calls": calls},
-            meta=TraceMeta(**meta_kw),
-        )
-
-    @classmethod
     def tool_result(cls, message: Message, **meta_kw: Any) -> TraceEntry:
         """Create a tool result entry."""
         return cls(id=0, kind=TraceKind.TOOL_RESULT, message=message, meta=TraceMeta(**meta_kw))
-
-    @classmethod
-    def anchor(cls, name: str, **meta_kw: Any) -> TraceEntry:
-        """Create an anchor (context boundary marker)."""
-        return cls(
-            id=0,
-            kind=TraceKind.ANCHOR,
-            data={"name": name},
-            meta=TraceMeta(**meta_kw),
-        )
-
-    @classmethod
-    def event(cls, name: str, data: dict[str, Any] | None = None, **meta_kw: Any) -> TraceEntry:
-        """Create a lifecycle event entry."""
-        payload: dict[str, Any] = {"name": name}
-        if data is not None:
-            payload["data"] = data
-        return cls(id=0, kind=TraceKind.EVENT, data=payload, meta=TraceMeta(**meta_kw))

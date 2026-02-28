@@ -12,8 +12,6 @@ from kai.chunk import Chunk
 from kai.message import Context, ImagePart, Message, TextPart, ToolCall
 from kai.providers.openai import OpenAIResponses
 
-# --- Helpers ---
-
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:
     return Context(system=system, messages=list(messages))
@@ -46,9 +44,6 @@ async def _stream_raw(
 
     output = [c async for c in provider.stream_raw(context)]
     return output, captured
-
-
-# --- Message serialization ---
 
 
 class TestMessageSerialization:

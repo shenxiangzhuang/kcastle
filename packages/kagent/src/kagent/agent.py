@@ -94,8 +94,6 @@ class Agent:
         self._steer_queue: list[Message] = []
         self._follow_up_queue: list[Message] = []
 
-    # --- State ---
-
     @property
     def state(self) -> AgentState:
         """The mutable agent state. Read or modify directly."""
@@ -105,8 +103,6 @@ class Agent:
     def is_running(self) -> bool:
         """Whether the agent is currently executing."""
         return self._running
-
-    # --- Primary API ---
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run the agent with streaming events (pull-based).
@@ -142,8 +138,6 @@ class Agent:
             raise RuntimeError("Agent loop ended without producing an assistant message")
         return last_assistant
 
-    # --- Interactive control ---
-
     def steer(self, message: Message) -> None:
         """Interrupt the current run with a message.
 
@@ -165,8 +159,6 @@ class Agent:
         """Cancel the current run."""
         if self._abort_event is not None:
             self._abort_event.set()
-
-    # --- Internal ---
 
     async def _run_loop(self) -> AsyncIterator[AgentEvent]:
         """Run the agent loop with steering and follow-up support."""

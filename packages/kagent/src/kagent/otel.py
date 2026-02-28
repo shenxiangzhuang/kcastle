@@ -106,11 +106,8 @@ class OTelHooks(Hooks):
         return f"{run_id}:{turn_index}:{call_id}"
 
     def _start_child_span(self, name: str, parent: Any, attributes: dict[str, Any]) -> Any:
-        """Start a span as a child of *parent* (or root if None)."""
         ctx = self._otel_trace.set_span_in_context(parent) if parent else None
         return self._tracer.start_span(name, context=ctx, attributes=attributes)
-
-    # --- Agent lifecycle ---
 
     def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
         span = self._tracer.start_span(
@@ -141,8 +138,6 @@ class OTelHooks(Hooks):
             span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
             span.set_attribute("gen_ai.usage.total_tokens", usage.total_tokens)
         span.end()
-
-    # --- Turn lifecycle ---
 
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
         parent = self._agent_spans.get(run_id)
@@ -177,8 +172,6 @@ class OTelHooks(Hooks):
             span.set_attribute("gen_ai.usage.output_tokens", message.usage.output_tokens)
         span.end()
 
-    # --- LLM lifecycle ---
-
     def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
         key = self._turn_key(run_id, turn_index)
         parent = self._turn_spans.get(key)
@@ -208,8 +201,6 @@ class OTelHooks(Hooks):
             span.set_attribute("gen_ai.usage.input_tokens", message.usage.input_tokens)
             span.set_attribute("gen_ai.usage.output_tokens", message.usage.output_tokens)
         span.end()
-
-    # --- Tool lifecycle ---
 
     def on_tool_start(
         self,

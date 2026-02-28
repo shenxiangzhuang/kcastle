@@ -20,10 +20,6 @@ from typing import Any, Protocol
 
 from kagent.trace.entry import TraceEntry
 
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
-
 
 class TraceStore(Protocol):
     """Append-only trace storage interface."""
@@ -43,11 +39,6 @@ class TraceStore(Protocol):
     def list_traces(self) -> list[str]:
         """List all trace IDs in the store."""
         ...
-
-
-# ---------------------------------------------------------------------------
-# InMemoryTraceStore
-# ---------------------------------------------------------------------------
 
 
 class InMemoryTraceStore:
@@ -79,11 +70,6 @@ class InMemoryTraceStore:
 
     def list_traces(self) -> list[str]:
         return sorted(self._headers.keys())
-
-
-# ---------------------------------------------------------------------------
-# JsonlTraceStore
-# ---------------------------------------------------------------------------
 
 
 class JsonlTraceStore:

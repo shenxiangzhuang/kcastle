@@ -20,6 +20,8 @@ from kagent.trace.entry import TraceEntry, TraceKind
 
 type OnAppendCallback = Callable[[str, TraceEntry], None]
 
+_MESSAGE_KINDS = {TraceKind.USER, TraceKind.ASSISTANT, TraceKind.TOOL_RESULT}
+
 
 class Trace:
     """An append-only execution trace.  One per agent session.
@@ -42,8 +44,6 @@ class Trace:
         self._next_id: int = 1
         self._on_append: OnAppendCallback | None = None
 
-    # --- Callback ---
-
     def set_on_append(self, callback: OnAppendCallback | None) -> None:
         """Install a callback invoked after every ``append()``.
 
@@ -51,8 +51,6 @@ class Trace:
         Used by ``TraceManager`` to persist entries incrementally.
         """
         self._on_append = callback
-
-    # --- Identity ---
 
     @property
     def id(self) -> str:
@@ -68,8 +66,6 @@ class Trace:
     def created_at(self) -> float:
         """Unix timestamp when this trace was created."""
         return self._created_at
-
-    # --- Core operations ---
 
     def append(self, entry: TraceEntry) -> TraceEntry:
         """Append an entry, assigning an auto-increment ID and timestamp.
@@ -103,8 +99,6 @@ class Trace:
         """Number of entries in the trace."""
         return len(self._entries)
 
-    # --- Derived views ---
-
     def messages(self) -> list[Message]:
         """Extract ordered ``Message`` list from message-bearing entries.
 
@@ -112,26 +106,16 @@ class Trace:
         ``{USER, ASSISTANT, TOOL_RESULT}`` — the kinds that carry a
         ``kai.Message`` relevant to the LLM conversation.
         """
-        _message_kinds = {TraceKind.USER, TraceKind.ASSISTANT, TraceKind.TOOL_RESULT}
         result: list[Message] = []
         for entry in self._entries:
-            if entry.kind in _message_kinds and entry.message is not None:
+            if entry.kind in _MESSAGE_KINDS and entry.message is not None:
                 result.append(entry.message)
         return result
-
-    def by_kind(self, *kinds: TraceKind) -> list[TraceEntry]:
-        """Filter entries by one or more kinds."""
-        kind_set = set(kinds)
-        return [e for e in self._entries if e.kind in kind_set]
-
-    # --- Lifecycle ---
 
     def reset(self) -> None:
         """Clear all entries and reset the ID counter."""
         self._entries.clear()
         self._next_id = 1
-
-    # --- Reconstruction ---
 
     @classmethod
     def from_records(

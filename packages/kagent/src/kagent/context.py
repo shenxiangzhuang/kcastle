@@ -24,10 +24,6 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from kagent.state import AgentState
 
-# ---------------------------------------------------------------------------
-# Protocol
-# ---------------------------------------------------------------------------
-
 
 @runtime_checkable
 class ContextBuilder(Protocol):
@@ -50,11 +46,6 @@ class ContextBuilder(Protocol):
     async def build(self, state: AgentState) -> Context: ...
 
 
-# ---------------------------------------------------------------------------
-# DefaultBuilder
-# ---------------------------------------------------------------------------
-
-
 class DefaultBuilder:
     """Pass-through builder: sends all messages without modification.
 
@@ -72,11 +63,6 @@ class DefaultBuilder:
             messages=state.messages,
             tools=state.tools,
         )
-
-
-# ---------------------------------------------------------------------------
-# SlidingWindowBuilder
-# ---------------------------------------------------------------------------
 
 
 class SlidingWindowBuilder:
@@ -119,11 +105,6 @@ class SlidingWindowBuilder:
         selected = _drop_orphaned_tool_results(selected)
 
         return Context(system=state.system, messages=selected, tools=state.tools)
-
-
-# ---------------------------------------------------------------------------
-# CompactingBuilder
-# ---------------------------------------------------------------------------
 
 
 class CompactingBuilder:
@@ -217,11 +198,6 @@ class CompactingBuilder:
         )
         result = await complete(self._provider, ctx)
         return result.extract_text()
-
-
-# ---------------------------------------------------------------------------
-# AdaptiveBuilder + ContextSwitchTool
-# ---------------------------------------------------------------------------
 
 
 class AdaptiveBuilder:
@@ -335,11 +311,6 @@ class ContextSwitchTool(Tool):
             return ToolResult(output=f"Context strategy switched to '{params.strategy}'.")
         except KeyError as e:
             return ToolResult.error(str(e))
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _drop_orphaned_tool_results(messages: list[Message]) -> list[Message]:

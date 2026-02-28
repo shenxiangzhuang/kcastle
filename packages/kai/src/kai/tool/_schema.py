@@ -37,10 +37,8 @@ class _NoTitleJsonSchema(GenerateJsonSchema):
         json_schema.pop("title", None)
 
 
-# ---------------------------------------------------------------------------
 # Adapted from kosong (https://github.com/MoonshotAI/kimi-cli)
 # Copyright 2025 Moonshot AI — Apache License 2.0
-# ---------------------------------------------------------------------------
 
 
 def deref_json_schema(schema: JsonDict) -> JsonDict:

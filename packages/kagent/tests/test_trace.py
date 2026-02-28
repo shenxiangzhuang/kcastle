@@ -19,10 +19,6 @@ from kagent.trace import (
     TraceMeta,
 )
 
-# ---------------------------------------------------------------------------
-# TraceEntry
-# ---------------------------------------------------------------------------
-
 
 class TestTraceEntry:
     def test_user_factory(self) -> None:
@@ -41,19 +37,6 @@ class TestTraceEntry:
         assert entry.kind == TraceKind.ASSISTANT
         assert entry.meta.usage is usage
 
-    def test_system_factory(self) -> None:
-        entry = TraceEntry.system("Be helpful.")
-        assert entry.kind == TraceKind.SYSTEM
-        assert entry.data == {"content": "Be helpful."}
-        assert entry.message is not None
-
-    def test_tool_call_factory(self) -> None:
-        calls = [{"name": "echo", "arguments": '{"msg": "hi"}'}]
-        entry = TraceEntry.tool_call(calls)
-        assert entry.kind == TraceKind.TOOL_CALL
-        assert entry.data["calls"] == calls
-        assert entry.message is None
-
     def test_tool_result_factory(self) -> None:
         msg = Message(role="tool", content="result", tool_call_id="c1")
         entry = TraceEntry.tool_result(msg, turn_index=2)
@@ -61,26 +44,10 @@ class TestTraceEntry:
         assert entry.message is msg
         assert entry.meta.turn_index == 2
 
-    def test_anchor_factory(self) -> None:
-        entry = TraceEntry.anchor("checkpoint-1")
-        assert entry.kind == TraceKind.ANCHOR
-        assert entry.data == {"name": "checkpoint-1"}
-
-    def test_event_factory(self) -> None:
-        entry = TraceEntry.event("handoff", {"target": "agent-2"})
-        assert entry.kind == TraceKind.EVENT
-        assert entry.data["name"] == "handoff"
-        assert entry.data["data"]["target"] == "agent-2"
-
     def test_frozen(self) -> None:
         entry = TraceEntry.user(Message(role="user", content="hi"))
         with pytest.raises(AttributeError):
             entry.id = 99  # type: ignore[misc]
-
-
-# ---------------------------------------------------------------------------
-# TraceMeta serialization
-# ---------------------------------------------------------------------------
 
 
 class TestTraceMetaSerialization:
@@ -106,11 +73,6 @@ class TestTraceMetaSerialization:
         d = meta.to_dict()
         assert d["usage"]["input_tokens"] == 10
         assert d["usage"]["cache_write_tokens"] == 2
-
-
-# ---------------------------------------------------------------------------
-# TraceEntry serialization
-# ---------------------------------------------------------------------------
 
 
 class TestTraceEntrySerialization:
@@ -142,28 +104,17 @@ class TestTraceEntrySerialization:
         assert restored.meta.usage.input_tokens == 100
         assert restored.meta.usage.cache_read_tokens == 10
 
-    def test_anchor_roundtrip(self) -> None:
+    def test_data_roundtrip(self) -> None:
+        """Entries with arbitrary data survive serialization."""
         entry = TraceEntry(
             id=3,
-            kind=TraceKind.ANCHOR,
-            data={"name": "cp1"},
+            kind=TraceKind.USER,
+            data={"key": "value"},
             meta=TraceMeta(timestamp=3.0),
         )
         restored = TraceEntry.from_dict(entry.to_dict())
-        assert restored.kind == TraceKind.ANCHOR
-        assert restored.data["name"] == "cp1"
+        assert restored.data["key"] == "value"
         assert restored.message is None
-
-    def test_tool_call_roundtrip(self) -> None:
-        calls = [{"name": "echo", "arguments": '{"msg": "hi"}'}]
-        entry = TraceEntry(
-            id=4,
-            kind=TraceKind.TOOL_CALL,
-            data={"calls": calls},
-            meta=TraceMeta(timestamp=4.0),
-        )
-        restored = TraceEntry.from_dict(entry.to_dict())
-        assert restored.data["calls"] == calls
 
     def test_is_json_serializable(self) -> None:
         """to_dict() output can be passed through json.dumps/loads."""
@@ -177,11 +128,6 @@ class TestTraceEntrySerialization:
         restored = TraceEntry.from_dict(roundtripped)
         assert restored.message is not None
         assert restored.message.extract_text() == "hi"
-
-
-# ---------------------------------------------------------------------------
-# TraceMeta
-# ---------------------------------------------------------------------------
 
 
 class TestTraceMeta:
@@ -201,11 +147,6 @@ class TestTraceMeta:
         meta = TraceMeta(timestamp=42.0)
         same = meta.with_timestamp()
         assert same.timestamp == 42.0
-
-
-# ---------------------------------------------------------------------------
-# Trace
-# ---------------------------------------------------------------------------
 
 
 class TestTrace:
@@ -247,7 +188,6 @@ class TestTrace:
         trace = Trace()
         trace.append(TraceEntry.user(Message(role="user", content="hi")))
         trace.append(TraceEntry.assistant(Message(role="assistant", content="hello")))
-        trace.append(TraceEntry.anchor("mid"))  # anchor has no message
         trace.append(TraceEntry.tool_result(Message(role="tool", content="r", tool_call_id="c")))
 
         msgs = trace.messages()
@@ -255,18 +195,6 @@ class TestTrace:
         assert msgs[0].role == "user"
         assert msgs[1].role == "assistant"
         assert msgs[2].role == "tool"
-
-    def test_by_kind(self) -> None:
-        trace = Trace()
-        trace.append(TraceEntry.user(Message(role="user", content="hi")))
-        trace.append(TraceEntry.assistant(Message(role="assistant", content="ok")))
-        trace.append(TraceEntry.anchor("x"))
-
-        users = trace.by_kind(TraceKind.USER)
-        assert len(users) == 1
-
-        multi = trace.by_kind(TraceKind.USER, TraceKind.ANCHOR)
-        assert len(multi) == 2
 
     def test_reset(self) -> None:
         trace = Trace()
@@ -308,11 +236,6 @@ class TestTrace:
         assert e3.id == 3
 
 
-# ---------------------------------------------------------------------------
-# TraceManager
-# ---------------------------------------------------------------------------
-
-
 class TestTraceManager:
     def test_create_and_get(self) -> None:
         mgr = TraceManager()
@@ -328,26 +251,6 @@ class TestTraceManager:
         assert t1.id in ids
         assert t2.id in ids
 
-    def test_append(self) -> None:
-        mgr = TraceManager()
-        trace = mgr.create()
-        entry = TraceEntry.user(Message(role="user", content="hi"))
-        stored = mgr.append(trace.id, entry)
-        assert stored.id == 1
-        assert len(trace) == 1
-
-    def test_append_unknown_trace_raises(self) -> None:
-        mgr = TraceManager()
-        with pytest.raises(KeyError):
-            mgr.append("nonexistent", TraceEntry.user(Message(role="user", content="x")))
-
-    def test_reset(self) -> None:
-        mgr = TraceManager()
-        trace = mgr.create()
-        mgr.append(trace.id, TraceEntry.user(Message(role="user", content="hi")))
-        mgr.reset(trace.id)
-        assert len(trace) == 0
-
     def test_register(self) -> None:
         mgr = TraceManager()
         trace = Trace(name="external")
@@ -362,7 +265,7 @@ class TestTraceManager:
         assert trace.id in store.list_traces()
 
         entry = TraceEntry.user(Message(role="user", content="hi"))
-        mgr.append(trace.id, entry)
+        trace.append(entry)
 
         # Verify it was persisted
         header, entries = store.load(trace.id)
@@ -395,11 +298,6 @@ class TestTraceManager:
         mgr = TraceManager()
         with pytest.raises(RuntimeError, match="no TraceStore"):
             mgr.load("x")
-
-
-# ---------------------------------------------------------------------------
-# InMemoryTraceStore
-# ---------------------------------------------------------------------------
 
 
 class TestInMemoryTraceStore:
@@ -438,11 +336,6 @@ class TestInMemoryTraceStore:
         store.create("b", "b", 1.0)
         store.create("a", "a", 2.0)
         assert store.list_traces() == ["a", "b"]
-
-
-# ---------------------------------------------------------------------------
-# JsonlTraceStore
-# ---------------------------------------------------------------------------
 
 
 class TestJsonlTraceStore:
@@ -499,20 +392,20 @@ class TestJsonlTraceStore:
         assert entries[0].meta.usage.input_tokens == 100
         assert entries[0].meta.usage.cache_read_tokens == 10
 
-    def test_roundtrip_anchor(self, tmp_path: Path) -> None:
+    def test_roundtrip_with_data(self, tmp_path: Path) -> None:
         store = JsonlTraceStore(tmp_path)
         store.create("t1", "test", 1.0)
         entry = TraceEntry(
             id=1,
-            kind=TraceKind.ANCHOR,
-            data={"name": "checkpoint"},
+            kind=TraceKind.USER,
+            data={"key": "value"},
             meta=TraceMeta(timestamp=1.1),
         )
         store.append("t1", entry)
 
         _, entries = store.load("t1")
-        assert entries[0].kind == TraceKind.ANCHOR
-        assert entries[0].data["name"] == "checkpoint"
+        assert entries[0].kind == TraceKind.USER
+        assert entries[0].data["key"] == "value"
         assert entries[0].message is None
 
     def test_append_unknown_raises(self, tmp_path: Path) -> None:
@@ -556,9 +449,8 @@ class TestJsonlTraceStore:
         # Session 1: create and record
         mgr1 = TraceManager(store=store)
         trace1 = mgr1.create("resumable")
-        mgr1.append(trace1.id, TraceEntry.user(Message(role="user", content="start")))
-        mgr1.append(
-            trace1.id,
+        trace1.append(TraceEntry.user(Message(role="user", content="start")))
+        trace1.append(
             TraceEntry.assistant(Message(role="assistant", content="ack")),
         )
         trace_id = trace1.id
@@ -571,7 +463,7 @@ class TestJsonlTraceStore:
         assert trace2.messages()[1].extract_text() == "ack"
 
         # Continue appending
-        mgr2.append(trace_id, TraceEntry.user(Message(role="user", content="resume")))
+        trace2.append(TraceEntry.user(Message(role="user", content="resume")))
         assert len(trace2) == 3
 
         # Verify persisted

@@ -8,19 +8,17 @@ from pydantic import BaseModel, Field, PrivateAttr
 from kcastle.skills import SkillManager
 
 
-class _SkillTool(Tool):
+class ListSkillsTool(Tool):
+    name: str = "skills_list"
+    description: str = "List discovered skills across builtin, user, and project layers."
+
     _manager: SkillManager = PrivateAttr()
 
     @classmethod
-    def for_manager(cls, manager: SkillManager) -> _SkillTool:
+    def for_manager(cls, manager: SkillManager) -> ListSkillsTool:
         tool = cls.model_construct()
         tool._manager = manager
         return tool
-
-
-class ListSkillsTool(_SkillTool):
-    name: str = "skills_list"
-    description: str = "List discovered skills across builtin, user, and project layers."
 
     class Params(BaseModel):
         query: str = Field(default="", description="Optional search query.")

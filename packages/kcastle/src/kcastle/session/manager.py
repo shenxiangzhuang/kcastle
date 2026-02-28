@@ -8,16 +8,13 @@ no separate registry file.
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from kcastle.log import logger
-from kcastle.session.session import Session, SessionMeta
-
-_META_FILENAME = "meta.json"
+from kcastle.session.session import META_FILENAME, Session, SessionMeta
 
 type AgentFactory = Any  # Callable[[Trace], Agent]
 
@@ -30,7 +27,6 @@ class SessionInfo:
     name: str
     created_at: int
     last_active_at: int
-    session_dir: Path
 
 
 class SessionManager:
@@ -43,7 +39,6 @@ class SessionManager:
     - ``get()`` — from memory cache only
     - ``suspend()`` — drop from memory
     - ``list()`` — scan filesystem
-    - ``drop()`` — delete session directory
     - ``latest()`` — most recently active session
     """
 
@@ -91,7 +86,7 @@ class SessionManager:
             return self._sessions[session_id]
 
         session_dir = self._sessions_dir / session_id
-        if session_dir.is_dir() and (session_dir / _META_FILENAME).is_file():
+        if session_dir.is_dir() and (session_dir / META_FILENAME).is_file():
             return self.resume(session_id)
 
         return self.create(session_id=session_id, name=name)
@@ -102,7 +97,7 @@ class SessionManager:
             return self._sessions[session_id]
 
         session_dir = self._sessions_dir / session_id
-        if not (session_dir / _META_FILENAME).is_file():
+        if not (session_dir / META_FILENAME).is_file():
             raise KeyError(f"Session '{session_id}' not found on disk")
 
         session = Session.resume(
@@ -139,7 +134,7 @@ class SessionManager:
             return results
 
         for child in sorted(self._sessions_dir.iterdir()):
-            meta_path = child / _META_FILENAME
+            meta_path = child / META_FILENAME
             if not child.is_dir() or not meta_path.is_file():
                 continue
             try:
@@ -151,7 +146,6 @@ class SessionManager:
                         name=meta.name,
                         created_at=meta.created_at,
                         last_active_at=meta.last_active_at,
-                        session_dir=child,
                     )
                 )
             except Exception:
@@ -159,16 +153,6 @@ class SessionManager:
 
         results.sort(key=lambda s: s.last_active_at, reverse=True)
         return results
-
-    def drop(self, session_id: str) -> None:
-        """Delete a session directory permanently."""
-        self._sessions.pop(session_id, None)
-        session_dir = self._sessions_dir / session_id
-        if session_dir.is_dir():
-            shutil.rmtree(session_dir)
-            logger.info("Dropped session %s", session_id)
-        else:
-            raise KeyError(f"Session '{session_id}' not found")
 
     def latest(self) -> Session | None:
         """Resume the most recently active session.  Returns None if empty."""

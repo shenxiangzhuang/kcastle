@@ -9,8 +9,6 @@ from pydantic import BaseModel, Field
 
 from kai.tool import Tool, ToolResult
 
-# --- ToolResult ---
-
 
 class TestToolResult:
     def test_basic_result(self) -> None:
@@ -27,9 +25,6 @@ class TestToolResult:
         result = ToolResult(output="hello")
         with pytest.raises(AttributeError):
             result.is_error = True  # type: ignore[misc]
-
-
-# --- Tool (schema-only) ---
 
 
 def test_tool_creation_with_raw_parameters() -> None:
@@ -57,9 +52,6 @@ async def test_base_tool_execute_raises() -> None:
     tool = Tool(name="schema_only", description="desc")
     with pytest.raises(NotImplementedError, match="schema_only"):
         await tool.execute({})
-
-
-# --- Executable Tool with typed Params ---
 
 
 class EchoTool(Tool):

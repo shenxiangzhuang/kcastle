@@ -105,7 +105,6 @@ class Castle:
         self._session_manager = session_manager
         self._skill_manager = skill_manager
         self._channels: list[Channel] = channels
-        self._shutdown_event = asyncio.Event()
         self._provider = provider
         self._system_prompt = system_prompt
         self._skill_tools = skill_tools
@@ -190,24 +189,6 @@ class Castle:
         if session is None:
             raise KeyError(f"Session {session_id!r} is not loaded")
         session._agent._provider = provider  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
-
-    def _make_agent_factory(self) -> Any:  # noqa: ANN401
-        """Create an agent factory closure using current provider."""
-        provider = self._provider
-        system_prompt = self._system_prompt
-        skill_tools = self._skill_tools
-        max_turns = self._config.max_turns
-
-        def factory(trace: Trace) -> Agent:
-            return Agent(
-                provider=provider,  # type: ignore[arg-type]
-                system=system_prompt,
-                tools=skill_tools if skill_tools else None,
-                trace=trace,
-                max_turns=max_turns,
-            )
-
-        return factory
 
     def available_models(self) -> list[tuple[str, str]]:
         """Return ``(provider_name, model_id)`` pairs for all active models.
@@ -301,19 +282,20 @@ class Castle:
                 )
             )
 
-        def _init_factory(trace: Trace) -> Agent:
+        def agent_factory(trace: Trace) -> Agent:
             return Agent(
                 provider=provider,  # type: ignore[arg-type]
                 system=system_prompt,
+                tools=skill_tools if skill_tools else None,
                 trace=trace,
                 max_turns=config.max_turns,
             )
 
-        castle = cls(
+        return cls(
             config=config,
             session_manager=SessionManager(
                 sessions_dir=config.sessions_dir,
-                agent_factory=_init_factory,
+                agent_factory=agent_factory,
             ),
             skill_manager=skill_manager,
             channels=channels,
@@ -321,8 +303,6 @@ class Castle:
             system_prompt=system_prompt,
             skill_tools=skill_tools,
         )
-        castle._session_manager._agent_factory = castle._make_agent_factory()  # pyright: ignore[reportPrivateUsage]
-        return castle
 
     async def run(self) -> None:
         """Start all channels and wait until shutdown."""
@@ -367,7 +347,6 @@ class Castle:
     def _signal_handler(self) -> None:
         """Handle SIGINT/SIGTERM."""
         logger.info("Received shutdown signal")
-        self._shutdown_event.set()
         for task in asyncio.all_tasks():
             if task is not asyncio.current_task():
                 task.cancel()

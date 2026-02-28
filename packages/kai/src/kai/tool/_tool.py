@@ -1,4 +1,4 @@
-"""Unified tool definition.
+"""Unified tool definition and execution result.
 
 ``Tool`` is a single class that serves as both a declarative schema
 (name, description, parameters) and an executable tool (override ``execute()``).
@@ -12,15 +12,41 @@ a validated ``Params`` instance instead of a raw dict.
 
 Providers only read the schema fields; the ``execute()`` method is used
 exclusively by the agent runtime.
+
+``ToolResult`` holds the text output of a tool execution.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from pydantic import BaseModel
 
-from kai.tool._result import ToolResult
+
+@dataclass(frozen=True, slots=True)
+class ToolResult:
+    """Result of executing a tool.
+
+    The ``output`` field contains the tool's text output.
+    ``is_error`` indicates whether the execution failed.
+
+    Example::
+
+        result = ToolResult(output="The weather is sunny.")
+        error = ToolResult.error("Something went wrong")
+    """
+
+    output: str
+    """The text output of the tool execution."""
+
+    is_error: bool = False
+    """Whether this result represents an error."""
+
+    @staticmethod
+    def error(message: str) -> ToolResult:
+        """Create an error result."""
+        return ToolResult(output=message, is_error=True)
 
 
 class Tool(BaseModel):

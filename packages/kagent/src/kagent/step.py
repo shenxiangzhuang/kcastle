@@ -13,7 +13,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from kai import Context, DoneEvent, ErrorEvent, Message, Provider, Tool, ToolResult, stream
-from kai.tool._tool import get_params_class
+from kai.tool import get_params_class
 from pydantic import ValidationError
 
 from kagent.event import (

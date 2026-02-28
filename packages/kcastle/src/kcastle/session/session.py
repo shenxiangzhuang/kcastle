@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,7 @@ from kagent import Agent, AgentEvent, Trace, TraceManager
 from kcastle.log import logger
 from kcastle.session.store import SessionTraceStore
 
-_META_FILENAME = "meta.json"
+META_FILENAME = "meta.json"
 
 
 @dataclass(slots=True)
@@ -35,14 +35,7 @@ class SessionMeta:
     last_active_at_iso: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "created_at": self.created_at,
-            "created_at_iso": self.created_at_iso,
-            "last_active_at": self.last_active_at,
-            "last_active_at_iso": self.last_active_at_iso,
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> SessionMeta:
@@ -68,7 +61,7 @@ def _now_iso() -> str:
 
 def _save_meta(session_dir: Path, meta: SessionMeta) -> None:
     """Atomically write meta.json to the session directory."""
-    path = session_dir / _META_FILENAME
+    path = session_dir / META_FILENAME
     session_dir.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(meta.to_dict(), indent=2) + "\n", encoding="utf-8")
@@ -77,12 +70,9 @@ def _save_meta(session_dir: Path, meta: SessionMeta) -> None:
 
 def _load_meta(session_dir: Path) -> SessionMeta:
     """Read meta.json from a session directory."""
-    path = session_dir / _META_FILENAME
+    path = session_dir / META_FILENAME
     data = json.loads(path.read_text(encoding="utf-8"))
     return SessionMeta.from_dict(data)
-
-
-type AgentFactory = Any  # Callable[[Trace], Agent] — use Any to avoid Protocol overhead
 
 
 class Session:
@@ -136,10 +126,6 @@ class Session:
     def is_running(self) -> bool:
         return self._running
 
-    @property
-    def session_dir(self) -> Path:
-        return self._session_dir
-
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run the agent with user input, streaming events.
 
@@ -155,29 +141,6 @@ class Session:
         finally:
             self._running = False
             self._touch()
-
-    async def complete(self, user_input: str) -> str:
-        """Run the agent and return the final text response."""
-        from kai import Message
-
-        last_text = ""
-        async for event in self.run(user_input):
-            from kagent import TurnEnd
-
-            if isinstance(event, TurnEnd):
-                msg: Message = event.message
-                last_text = msg.extract_text()
-        return last_text
-
-    def steer(self, message: str) -> None:
-        """Inject a steering message into the running agent."""
-        from kai import Message
-
-        self._agent.steer(Message(role="user", content=message))
-
-    def abort(self) -> None:
-        """Abort the currently running agent."""
-        self._agent.abort()
 
     def suspend(self) -> None:
         """Suspend the session — drop agent from memory.

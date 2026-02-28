@@ -108,9 +108,6 @@ async def complete(
     raise EmptyResponseError("Stream ended without a done or error event.")
 
 
-# --- Internal State Machine ---
-
-
 class _StreamState:
     """Mutable state for the stream accumulation state machine.
 

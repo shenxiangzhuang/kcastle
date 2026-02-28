@@ -37,9 +37,6 @@ from anthropic.types import (
     ToolResultBlockParam,
     ToolUseBlockParam,
 )
-from anthropic.types import (
-    Message as AnthropicMessage,
-)
 
 from kai.chunk import (
     Chunk,
@@ -132,9 +129,6 @@ class Anthropic:
                 yield chunk
         except AnthropicError as e:
             raise _convert_error(e) from e
-
-
-# --- Message Conversion ---
 
 
 def _build_messages(context: Context) -> list[MessageParam]:
@@ -247,9 +241,6 @@ def _image_to_anthropic(part: ImagePart) -> ImageBlockParam:
     )
 
 
-# --- Tool Conversion ---
-
-
 def _build_tools(tools: Sequence[Tool]) -> list[ToolParam]:
     """Convert kai Tools to Anthropic tool format."""
     return [
@@ -262,11 +253,8 @@ def _build_tools(tools: Sequence[Tool]) -> list[ToolParam]:
     ]
 
 
-# --- Stream Conversion ---
-
-
 async def _convert_stream(
-    response: AnthropicMessage | AsyncStream[RawMessageStreamEvent],
+    response: AsyncStream[RawMessageStreamEvent],
 ) -> AsyncIterator[Chunk]:
     """Convert Anthropic stream events to kai Chunks."""
     input_tokens = 0
@@ -274,12 +262,6 @@ async def _convert_stream(
     cache_read = 0
     cache_write = 0
     active_tool = False
-
-    if isinstance(response, AnthropicMessage):
-        # Non-streaming fallback (shouldn't happen with stream=True, but defensive)
-        for chunk in _convert_non_stream(response):
-            yield chunk
-        return
 
     async with response as stream:
         async for event in stream:
@@ -340,43 +322,6 @@ async def _convert_stream(
             cache_write_tokens=cache_write,
         )
     )
-
-
-def _convert_non_stream(response: AnthropicMessage) -> list[Chunk]:
-    """Convert a non-streaming Anthropic response to chunks."""
-    chunks: list[Chunk] = []
-    for block in response.content:
-        match block.type:
-            case "text":
-                chunks.append(TextChunk(text=block.text))
-            case "thinking":
-                chunks.append(ThinkChunk(text=block.thinking))
-                if hasattr(block, "signature") and block.signature:
-                    chunks.append(ThinkSignatureChunk(signature=block.signature))
-            case "tool_use":
-                chunks.append(ToolCallStart(id=block.id, name=block.name))
-                chunks.append(ToolCallDelta(arguments=json.dumps(block.input)))
-                chunks.append(ToolCallEnd())
-            case _:
-                pass
-
-    usage = response.usage
-    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    chunks.append(
-        UsageChunk(
-            usage=TokenUsage(
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                cache_read_tokens=cache_read,
-                cache_write_tokens=cache_write,
-            )
-        )
-    )
-    return chunks
-
-
-# --- Error Conversion ---
 
 
 def _convert_error(error: AnthropicError) -> ProviderError:

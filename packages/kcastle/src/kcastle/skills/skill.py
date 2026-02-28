@@ -28,7 +28,7 @@ class Skill:
     """A single skill discovered from a ``SKILL.md`` file.
 
     ``name`` from frontmatter serves as the unique identifier.
-    ``path`` is the skill directory; ``file_path`` is derived as ``path / SKILL.md``.
+    ``path`` is the skill directory.
     """
 
     name: str
@@ -48,11 +48,6 @@ class Skill:
 
     source: str = "unknown"
     """Source layer: ``builtin``, ``user``, or ``project``."""
-
-    @property
-    def file_path(self) -> Path:
-        """Absolute path to ``SKILL.md`` (derived from ``path``)."""
-        return self.path / _SKILL_MD
 
     @classmethod
     def load(cls, skill_dir: Path, *, source: str = "unknown") -> Skill | None:

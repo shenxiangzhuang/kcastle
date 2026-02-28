@@ -11,7 +11,6 @@ every ``append()``, and existing traces can be loaded for session resume.
 
 from __future__ import annotations
 
-from kagent.trace.entry import TraceEntry
 from kagent.trace.store import TraceStore
 from kagent.trace.trace import Trace
 
@@ -42,8 +41,6 @@ class TraceManager:
     def __init__(self, *, store: TraceStore | None = None) -> None:
         self._store = store
         self._traces: dict[str, Trace] = {}
-
-    # --- Lifecycle ---
 
     def create(self, name: str = "") -> Trace:
         """Create a new trace and register it.
@@ -102,26 +99,8 @@ class TraceManager:
         """
         return sorted(self._traces.keys())
 
-    # --- Internal ---
-
     def _install_callback(self, trace: Trace) -> None:
         """Install an on-append callback that persists entries to the store."""
         store = self._store
         assert store is not None
         trace.set_on_append(lambda trace_id, entry: store.append(trace_id, entry))
-
-    # --- Entry operations ---
-
-    def append(self, trace_id: str, entry: TraceEntry) -> TraceEntry:
-        """Append an entry to the specified trace.
-
-        If a store is configured, the entry is also persisted via the
-        on-append callback installed on the trace.
-        Returns the stored entry with its assigned ID.
-        """
-        trace = self._traces[trace_id]
-        return trace.append(entry)
-
-    def reset(self, trace_id: str) -> None:
-        """Clear all entries in the specified trace."""
-        self._traces[trace_id].reset()

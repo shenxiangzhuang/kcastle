@@ -5,12 +5,10 @@ builtin (``kcastle/skills``), user (``~/.kcastle/skills``), and
 project (``<root>/.skills``).
 """
 
-from kcastle.skills.manager import SkillManager, SkillMatch, find_project_root
+from kcastle.skills.manager import SkillManager
 from kcastle.skills.skill import Skill
 
 __all__ = [
     "Skill",
     "SkillManager",
-    "SkillMatch",
-    "find_project_root",
 ]

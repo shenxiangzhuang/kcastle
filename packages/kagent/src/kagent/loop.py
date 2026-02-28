@@ -91,13 +91,6 @@ async def agent_loop(
     agent_t0 = time.perf_counter()
     total_usage: TokenUsage | None = None
 
-    _log.info(
-        "[%s] Agent loop start: provider=%s model=%s max_turns=%d",
-        run_id,
-        provider.name,
-        provider.model,
-        max_turns,
-    )
     _hooks.on_agent_start(run_id=run_id, model=provider.model, provider=provider.name)
 
     turn_count = 0
@@ -226,12 +219,6 @@ async def agent_loop(
             break
 
     agent_duration_ms = (time.perf_counter() - agent_t0) * 1000
-    _log.info(
-        "[%s] Agent loop end: turns=%d duration=%.0fms",
-        run_id,
-        turn_count,
-        agent_duration_ms,
-    )
     _hooks.on_agent_end(
         run_id=run_id,
         turn_count=turn_count,

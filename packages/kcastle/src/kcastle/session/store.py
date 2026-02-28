@@ -75,7 +75,3 @@ class SessionTraceStore:
                 if trace_id:
                     return [str(trace_id)]
         return []
-
-    def exists(self) -> bool:
-        """Whether the trace file exists."""
-        return self._path.is_file()
