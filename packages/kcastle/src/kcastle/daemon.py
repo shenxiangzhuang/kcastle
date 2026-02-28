@@ -59,18 +59,6 @@ def _read_pid(home: Path) -> int | None:
     return pid
 
 
-def _print_log_tail(log: Path, lines: int = 5) -> None:
-    """Print the last *lines* of the log file."""
-    if not log.is_file():
-        return
-    with contextlib.suppress(OSError):
-        tail = log.read_text(encoding="utf-8").rstrip().splitlines()[-lines:]
-        if tail:
-            print(f"  Log ({_DIM}{log}{_RESET}):")
-            for line in tail:
-                print(f"    {_DIM}{line}{_RESET}")
-
-
 def daemon_status(home: Path) -> None:
     """Print whether the daemon is running."""
     pid = _read_pid(home)
@@ -83,11 +71,46 @@ def daemon_status(home: Path) -> None:
         print(f"  {_DIM}●{_RESET} Daemon is {_BOLD}not running{_RESET}")
 
 
+def _check_daemon_config(home: Path) -> str | None:
+    """Validate configuration for daemon mode.  Returns error message or ``None``."""
+    from kcastle.config import load_config
+
+    try:
+        config = load_config(home=home)
+    except Exception as exc:
+        return f"Invalid configuration: {exc}"
+
+    try:
+        config.active_provider()
+    except ValueError as exc:
+        return str(exc)
+
+    if not (config.telegram.enabled and config.telegram_token):
+        cfg = home / "config.yaml"
+        return (
+            "No daemon channels configured\n"
+            f"  Enable Telegram in {_DIM}{cfg}{_RESET}:\n"
+            f"    {_DIM}channels:\n"
+            f"      telegram:\n"
+            f"        enabled: true\n"
+            f"        bot_username: YOUR_BOT{_RESET}\n"
+            f"  Set token via {_DIM}KCASTLE_TG_TOKEN{_RESET} env var"
+            f" or {_DIM}channels.telegram.token{_RESET} in config"
+        )
+
+    return None
+
+
 def daemon_start(home: Path, *, verbose: bool = False) -> None:
     """Start the daemon as a detached background process."""
     pid = _read_pid(home)
     if pid is not None:
         print(f"  {_YELLOW}Daemon already running{_RESET} (PID {pid})")
+        return
+
+    error = _check_daemon_config(home)
+    if error:
+        print(f"  {_RED}●{_RESET} {error}")
         return
 
     home.mkdir(parents=True, exist_ok=True)
@@ -107,19 +130,7 @@ def daemon_start(home: Path, *, verbose: bool = False) -> None:
             start_new_session=True,
         )
 
-    pid_path = _pid_file(home)
-    pid_path.write_text(str(proc.pid), encoding="utf-8")
-
-    # Poll briefly to catch immediate startup failures
-    # (e.g. no channels configured, bad config, missing provider).
-    for _ in range(20):
-        time.sleep(0.15)
-        if proc.poll() is not None:
-            pid_path.unlink(missing_ok=True)
-            print(f"  {_RED}●{_RESET} Daemon failed to start")
-            _print_log_tail(log)
-            return
-
+    _pid_file(home).write_text(str(proc.pid), encoding="utf-8")
     print(f"  {_GREEN}●{_RESET} Daemon started (PID {proc.pid})")
     print(f"  Log: {_DIM}{log}{_RESET}")
 
