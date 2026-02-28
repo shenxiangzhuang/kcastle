@@ -130,6 +130,6 @@ def test_builtin_skills_are_discoverable() -> None:
     )
 
     skills = manager.discover()
-    ids = {s.id for s in skills}
+    ids = {s.name for s in skills}
     assert "skill-creator" in ids
     assert "skill-installer" in ids

@@ -30,13 +30,13 @@ class ListSkillsTool(_SkillTool):
         if params.query.strip():
             matches = self._manager.search(params.query)
             rows = [
-                f"{m.meta.id} | {m.meta.source} | score={m.score:.2f} | {m.meta.description}"
+                f"{m.skill.name} | {m.skill.source} | score={m.score:.2f} | {m.skill.description}"
                 for m in matches[: params.max_results]
             ]
             return ToolResult(output="\n".join(rows) if rows else "(no matches)")
 
         rows = [
-            f"{s.id} | {s.source} | {s.description}"
+            f"{s.name} | {s.source} | {s.description}"
             for s in self._manager.all_skills()[: params.max_results]
         ]
         return ToolResult(output="\n".join(rows) if rows else "(no skills)")

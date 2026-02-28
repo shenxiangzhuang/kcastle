@@ -42,19 +42,10 @@ from typing import Any
 
 import yaml
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _DEFAULT_HOME = Path.home() / ".kcastle"
 _CONFIG_FILENAME = "config.yaml"
 _DEFAULT_SYSTEM_PROMPT = ""
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
-
-
-# ---------------------------------------------------------------------------
-# Configuration dataclasses
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,7 +122,6 @@ class CastleConfig:
     skills_dir: Path
     """User-level skills directory."""
 
-    # Providers ----------------------------------------------------------
     providers: dict[str, ProviderConfig] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
     """Configured providers keyed by name."""
 
@@ -141,14 +131,12 @@ class CastleConfig:
     default_model: str = ""
     """Default model identifier."""
 
-    # Agent settings -----------------------------------------------------
     system_prompt: str = _DEFAULT_SYSTEM_PROMPT
     """Base identity / persona prompt."""
 
     max_turns: int = 100
     """Maximum turns per agent run."""
 
-    # Channels -----------------------------------------------------------
     cli: ChannelConfig = field(default_factory=ChannelConfig)
     telegram: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(enabled=False),
@@ -156,8 +144,6 @@ class CastleConfig:
 
     telegram_token: str = ""
     """Telegram bot token."""
-
-    # Helpers ------------------------------------------------------------
 
     def active_provider(self) -> ProviderConfig:
         """Return the currently selected provider config.
@@ -170,11 +156,6 @@ class CastleConfig:
                 f"Default provider {self.default_provider!r} not found. Available: {available}"
             )
         return self.providers[self.default_provider]
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
 
 
 def _expand_env(value: str) -> str:
@@ -232,11 +213,6 @@ def _to_str_dict(d: object) -> dict[str, Any]:
         str(k): v  # pyright: ignore[reportUnknownArgumentType]
         for k, v in d.items()  # pyright: ignore[reportUnknownVariableType]
     }
-
-
-# ---------------------------------------------------------------------------
-# Section parsers
-# ---------------------------------------------------------------------------
 
 
 def _parse_models(raw: object) -> list[ModelConfig]:
@@ -311,11 +287,6 @@ def _parse_channel(
     return ChannelConfig(enabled=enabled, options=options)
 
 
-# ---------------------------------------------------------------------------
-# Built-in provider registry
-# ---------------------------------------------------------------------------
-
-
 def _builtin_provider_dicts() -> dict[str, dict[str, Any]]:
     """Built-in provider definitions.
 
@@ -333,7 +304,6 @@ def _builtin_provider_dicts() -> dict[str, dict[str, Any]]:
         "MiniMax-M2": {"active": True},
     }
     return {
-        # --- DeepSeek ---------------------------------------------------
         "deepseek-openai": {
             "protocol": "openai",
             "base_url": "https://api.deepseek.com",
@@ -346,7 +316,6 @@ def _builtin_provider_dicts() -> dict[str, dict[str, Any]]:
             "api_key": "${DEEPSEEK_API_KEY}",
             "models": dict(ds_models),
         },
-        # --- MiniMax ----------------------------------------------------
         "minimax-openai": {
             "protocol": "openai",
             "base_url": "https://api.minimaxi.com/v1",
@@ -387,11 +356,6 @@ def _merge_builtin_providers(data: dict[str, Any]) -> None:
     data["providers"] = merged
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-
 def config_file_path(home: Path | None = None) -> Path:
     """Return the path to the configuration file."""
     return _resolve_home(home) / _CONFIG_FILENAME
@@ -419,24 +383,19 @@ def load_config(home: Path | None = None) -> CastleConfig:
     sessions_dir = home / "sessions"
     skills_dir = home / "skills"
 
-    # --- Providers ------------------------------------------------------
     providers = _parse_providers(data)
 
-    # --- Default provider / model ---------------------------------------
     default_section = _to_str_dict(data.get("default"))
     default_provider = str(default_section.get("provider", ""))
     default_model = str(default_section.get("model", ""))
 
-    # Env overrides
     default_provider = os.environ.get("KCASTLE_PROVIDER", default_provider) or default_provider
     default_model = os.environ.get("KCASTLE_MODEL", default_model) or default_model
 
-    # --- Agent ----------------------------------------------------------
     agent = _to_str_dict(data.get("agent"))
     system_prompt = str(agent.get("system_prompt", _DEFAULT_SYSTEM_PROMPT))
     max_turns = int(agent.get("max_turns", 100))
 
-    # --- Channels -------------------------------------------------------
     cli_cfg = _parse_channel(data, "cli", default_enabled=True)
     tg_cfg = _parse_channel(data, "telegram", default_enabled=False)
 

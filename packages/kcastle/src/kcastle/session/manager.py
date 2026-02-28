@@ -8,29 +8,18 @@ no separate registry file.
 from __future__ import annotations
 
 import json
-import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from kcastle.log import logger
 from kcastle.session.session import Session, SessionMeta
-
-_log = logging.getLogger("kcastle.session")
 
 _META_FILENAME = "meta.json"
 
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
 type AgentFactory = Any  # Callable[[Trace], Agent]
-
-
-# ---------------------------------------------------------------------------
-# SessionInfo (lightweight listing)
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,11 +31,6 @@ class SessionInfo:
     created_at: int
     last_active_at: int
     session_dir: Path
-
-
-# ---------------------------------------------------------------------------
-# SessionManager
-# ---------------------------------------------------------------------------
 
 
 class SessionManager:
@@ -73,14 +57,11 @@ class SessionManager:
         self._agent_factory = agent_factory
         self._sessions: dict[str, Session] = {}
 
-        # Ensure directory exists
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def sessions_dir(self) -> Path:
         return self._sessions_dir
-
-    # --- Create ---
 
     def create(
         self,
@@ -101,26 +82,19 @@ class SessionManager:
             agent_factory=self._agent_factory,
         )
         self._sessions[sid] = session
-        _log.info("Created session %s", sid)
+        logger.info("Created session %s", sid)
         return session
-
-    # --- Get or Create (primary channel API) ---
 
     def get_or_create(self, session_id: str, name: str = "") -> Session:
         """Resume if exists, create if not.  Primary API for channels."""
-        # Already in memory?
         if session_id in self._sessions:
             return self._sessions[session_id]
 
-        # On disk?
         session_dir = self._sessions_dir / session_id
         if session_dir.is_dir() and (session_dir / _META_FILENAME).is_file():
             return self.resume(session_id)
 
-        # Create new
         return self.create(session_id=session_id, name=name)
-
-    # --- Resume ---
 
     def resume(self, session_id: str) -> Session:
         """Resume a session from disk."""
@@ -136,30 +110,24 @@ class SessionManager:
             agent_factory=self._agent_factory,
         )
         self._sessions[session_id] = session
-        _log.info("Resumed session %s", session_id)
+        logger.info("Resumed session %s", session_id)
         return session
-
-    # --- Get (memory only) ---
 
     def get(self, session_id: str) -> Session | None:
         """Get a session from memory cache.  Returns None if not loaded."""
         return self._sessions.get(session_id)
-
-    # --- Suspend ---
 
     def suspend(self, session_id: str) -> None:
         """Suspend a session — drop from memory (trace already persisted)."""
         session = self._sessions.pop(session_id, None)
         if session is not None:
             session.suspend()
-            _log.info("Suspended session %s", session_id)
+            logger.info("Suspended session %s", session_id)
 
     def suspend_all(self) -> None:
         """Suspend all in-memory sessions."""
         for sid in list(self._sessions.keys()):
             self.suspend(sid)
-
-    # --- List ---
 
     def list(self) -> list[SessionInfo]:
         """Scan the sessions directory and return session info.
@@ -187,13 +155,10 @@ class SessionManager:
                     )
                 )
             except Exception:
-                _log.warning("Skipping invalid session directory: %s", child)
+                logger.warning("Skipping invalid session directory: %s", child)
 
-        # Sort by last_active_at descending (most recent first)
         results.sort(key=lambda s: s.last_active_at, reverse=True)
         return results
-
-    # --- Drop ---
 
     def drop(self, session_id: str) -> None:
         """Delete a session directory permanently."""
@@ -201,11 +166,9 @@ class SessionManager:
         session_dir = self._sessions_dir / session_id
         if session_dir.is_dir():
             shutil.rmtree(session_dir)
-            _log.info("Dropped session %s", session_id)
+            logger.info("Dropped session %s", session_id)
         else:
             raise KeyError(f"Session '{session_id}' not found")
-
-    # --- Latest ---
 
     def latest(self) -> Session | None:
         """Resume the most recently active session.  Returns None if empty."""

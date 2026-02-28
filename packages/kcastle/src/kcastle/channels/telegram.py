@@ -14,7 +14,6 @@ Requires the ``python-telegram-bot`` package (``pip install python-telegram-bot`
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING, Any
 
 from kagent import (
@@ -24,17 +23,16 @@ from kagent import (
 )
 from kai import TextDeltaEvent
 
+from kcastle.log import logger
+
 if TYPE_CHECKING:
     from kcastle.castle import Castle
-
-_log = logging.getLogger("kcastle.channels.telegram")
 
 
 def _session_id_for_chat(chat_type: str, chat_id: int, user_id: int | None) -> str:
     """Derive a deterministic session ID from Telegram chat context."""
     if chat_type == "private":
         return f"tg-u{user_id}" if user_id else f"tg-u{chat_id}"
-    # group / supergroup
     return f"tg-g{chat_id}"
 
 
@@ -82,7 +80,7 @@ class TelegramChannel:
                 filters,  # pyright: ignore[reportUnknownVariableType]
             )
         except ImportError:
-            _log.error(
+            logger.error(
                 "python-telegram-bot is not installed. "
                 "Install it with: pip install python-telegram-bot"
             )
@@ -92,7 +90,6 @@ class TelegramChannel:
 
         self._app = Application.builder().token(self._token).build()  # type: ignore[reportUnknownMemberType]
 
-        # Register handlers
         self._app.add_handler(CommandHandler("start", self._cmd_start))  # type: ignore[reportUnknownMemberType]
         self._app.add_handler(CommandHandler("new", self._cmd_new))  # type: ignore[reportUnknownMemberType]
         self._app.add_handler(CommandHandler("model", self._cmd_model))  # type: ignore[reportUnknownMemberType]
@@ -103,7 +100,7 @@ class TelegramChannel:
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)  # type: ignore[reportUnknownMemberType]
         )
 
-        _log.info("Starting Telegram bot")
+        logger.info("Starting Telegram bot")
         await self._app.initialize()  # type: ignore[reportUnknownMemberType]
         await self._app.start()  # type: ignore[reportUnknownMemberType]
 
@@ -121,7 +118,6 @@ class TelegramChannel:
 
         await self._app.updater.start_polling()  # type: ignore[union-attr]
 
-        # Keep running until stopped
         try:
             while True:
                 await asyncio.sleep(1)
@@ -131,12 +127,10 @@ class TelegramChannel:
     async def stop(self) -> None:
         """Stop the Telegram bot."""
         if self._app is not None:
-            _log.info("Stopping Telegram bot")
+            logger.info("Stopping Telegram bot")
             await self._app.updater.stop()  # type: ignore[union-attr]
             await self._app.stop()
             await self._app.shutdown()
-
-    # --- Handlers ---
 
     async def _cmd_start(self, update: Any, context: Any) -> None:
         """Handle /start command."""
@@ -201,7 +195,6 @@ class TelegramChannel:
         user = update.effective_user
         sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
 
-        # Ensure current session is loaded before switching.
         self._castle.session_manager.get_or_create(sid)
 
         from telegram import (  # type: ignore[import-untyped]
@@ -250,7 +243,6 @@ class TelegramChannel:
         user = update.effective_user
         sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
 
-        # Ensure current session is loaded before switching.
         self._castle.session_manager.get_or_create(sid)
 
         try:
@@ -285,36 +277,30 @@ class TelegramChannel:
             if not is_reply and not is_mentioned:
                 return
 
-            # Strip bot mention from text
             if self._bot_username:
                 message_text = message_text.replace(f"@{self._bot_username}", "").strip()
 
-            # Add sender info for group context
             sender_name = user.full_name if user else "Unknown"
             message_text = f"[{sender_name}]: {message_text}"
 
-        # Resolve session
         sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
         manager = self._castle.session_manager
         session = manager.get_or_create(sid)
 
-        # Show "typing..." indicator while the agent is working
         typing_task = asyncio.create_task(self._send_typing(chat.id))
 
-        # Run agent and collect events
         collected_events: list[Any] = []
         try:
             prepared_input = self._castle.prepare_user_input(message_text)
             async for event in session.run(prepared_input):
                 collected_events.append(event)
         except Exception as e:
-            _log.exception("Error in session %s", sid)
+            logger.exception("Error in session %s", sid)
             await update.message.reply_text(f"\u274c Error: {e}")
             return
         finally:
             typing_task.cancel()
 
-        # Render and send response
         response = _render_events_to_text(collected_events)  # pyright: ignore[reportUnknownArgumentType]
         if response:
             await self._send_markdown(update.message, response)
@@ -331,11 +317,10 @@ class TelegramChannel:
 
             converted = str(markdownify(text))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
         except ImportError:
-            _log.debug("telegramify-markdown not installed — sending plain text")
+            logger.debug("telegramify-markdown not installed — sending plain text")
         except Exception:
-            _log.debug("Markdown conversion failed — sending plain text", exc_info=True)
+            logger.debug("Markdown conversion failed — sending plain text", exc_info=True)
 
-        # Try MarkdownV2 first, fall back to plain text
         if converted:
             try:
                 for i in range(0, len(converted), 4096):
@@ -343,9 +328,8 @@ class TelegramChannel:
                     await message.reply_text(chunk, parse_mode="MarkdownV2")
                 return
             except Exception:
-                _log.debug("MarkdownV2 send failed — falling back to plain text", exc_info=True)
+                logger.debug("MarkdownV2 send failed — falling back to plain text", exc_info=True)
 
-        # Fallback: plain text
         for i in range(0, len(text), 4096):
             chunk = text[i : i + 4096]
             await message.reply_text(chunk)
@@ -368,4 +352,4 @@ class TelegramChannel:
         except asyncio.CancelledError:
             pass
         except Exception:
-            _log.debug("Typing indicator error (non-fatal)", exc_info=True)
+            logger.debug("Typing indicator error (non-fatal)", exc_info=True)

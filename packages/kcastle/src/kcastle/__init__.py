@@ -17,35 +17,25 @@ Or from the command line::
     $ k -S <id>            # Resume specific session
 """
 
-import logging as _logging
-
 from kcastle.castle import Castle
 from kcastle.channels import Channel
 from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderConfig, load_config
 from kcastle.session import Session, SessionInfo, SessionManager, SessionMeta, SessionTraceStore
-from kcastle.skills import LoadedSkill, SkillManager, SkillMeta, SkillResolver
+from kcastle.skills import Skill, SkillManager
 
 __all__ = [
-    # Core
     "Castle",
     "CastleConfig",
     "ChannelConfig",
     "ModelConfig",
     "ProviderConfig",
     "load_config",
-    # Session
     "Session",
     "SessionInfo",
     "SessionManager",
     "SessionMeta",
     "SessionTraceStore",
-    # Channel
     "Channel",
-    # Skills
+    "Skill",
     "SkillManager",
-    "SkillMeta",
-    "SkillResolver",
-    "LoadedSkill",
 ]
-
-_logging.getLogger("kcastle").addHandler(_logging.NullHandler())

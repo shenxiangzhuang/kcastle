@@ -7,7 +7,6 @@ and channels.  It is the single entry point for running kcastle.
 from __future__ import annotations
 
 import asyncio
-import logging
 import signal
 from pathlib import Path
 from typing import Any
@@ -19,16 +18,11 @@ from kcastle.channels import Channel
 from kcastle.channels.cli import CLIChannel
 from kcastle.channels.telegram import TelegramChannel
 from kcastle.config import CastleConfig, load_config
+from kcastle.log import logger
 from kcastle.session.manager import SessionManager
 from kcastle.skills.manager import SkillManager, find_project_root
-from kcastle.skills.view import extract_skill_hints, render_compact_skills, render_expanded_skills
+from kcastle.skills.skill import Skill
 from kcastle.tools import create_builtin_tools
-
-_log = logging.getLogger("kcastle")
-
-# ---------------------------------------------------------------------------
-# Provider factory
-# ---------------------------------------------------------------------------
 
 
 def _create_provider(config: CastleConfig) -> object:
@@ -65,11 +59,6 @@ def _create_provider(config: CastleConfig) -> object:
     raise ValueError(f"Unknown protocol: {provider_cfg.protocol!r}")
 
 
-# ---------------------------------------------------------------------------
-# System prompt builder
-# ---------------------------------------------------------------------------
-
-
 def _build_system_prompt(config: CastleConfig, skill_prompts: str = "") -> str:
     """Assemble the system prompt from composable blocks."""
     from kcastle.prompts import (
@@ -81,8 +70,6 @@ def _build_system_prompt(config: CastleConfig, skill_prompts: str = "") -> str:
 
     workspace_prompt = read_workspace_prompt(Path.cwd())
 
-    # If user set a custom system_prompt in config, use it as override;
-    # otherwise fall back to the built-in identity.
     user_override = config.system_prompt or None
 
     return assemble_system_prompt(
@@ -92,11 +79,6 @@ def _build_system_prompt(config: CastleConfig, skill_prompts: str = "") -> str:
         skill_prompts=skill_prompts or None,
         user_override=user_override,
     )
-
-
-# ---------------------------------------------------------------------------
-# Castle
-# ---------------------------------------------------------------------------
 
 
 class Castle:
@@ -124,15 +106,12 @@ class Castle:
         self._skill_manager = skill_manager
         self._channels: list[Channel] = channels
         self._shutdown_event = asyncio.Event()
-        # Runtime defaults for newly created sessions.
         self._provider = provider
         self._system_prompt = system_prompt
         self._skill_tools = skill_tools
         self._active_provider_name = config.default_provider
         self._active_model = config.default_model
         self._session_models: dict[str, tuple[str, str]] = {}
-
-    # --- Properties ---
 
     @property
     def config(self) -> CastleConfig:
@@ -171,18 +150,18 @@ class Castle:
         - compact skill metadata is always present in system prompt
         - full skill body is injected only when user references ``$skill-id``
         """
-        hints = extract_skill_hints(user_input)
+        hints = Skill.extract_hints(user_input)
         if not hints:
             return user_input
 
         expanded: list[Any] = []
         for hint in hints:
-            meta = self._skill_manager.get_skill(hint)
-            if meta is None:
+            skill = self._skill_manager.get_skill(hint)
+            if skill is None:
                 continue
-            expanded.append(meta)
+            expanded.append(skill)
 
-        expansion_block = render_expanded_skills(expanded)
+        expansion_block = Skill.render_expanded(expanded)
         if not expansion_block:
             return user_input
         return f"{user_input}\n\n{expansion_block}"
@@ -212,8 +191,6 @@ class Castle:
             raise KeyError(f"Session {session_id!r} is not loaded")
         session._agent._provider = provider  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
 
-    # --- Agent factory ---
-
     def _make_agent_factory(self) -> Any:  # noqa: ANN401
         """Create an agent factory closure using current provider."""
         provider = self._provider
@@ -231,8 +208,6 @@ class Castle:
             )
 
         return factory
-
-    # --- Model switching ---
 
     def available_models(self) -> list[tuple[str, str]]:
         """Return ``(provider_name, model_id)`` pairs for all active models.
@@ -262,14 +237,12 @@ class Castle:
         provider = self._build_provider(provider_name, model_id)
         self._apply_provider_to_session(session_id, provider)
         self._session_models[session_id] = (provider_name, model_id)
-        _log.info(
+        logger.info(
             "Switched session %s to %s / %s",
             session_id,
             provider_name,
             model_id,
         )
-
-    # --- Factory ---
 
     @classmethod
     def create(
@@ -287,12 +260,10 @@ class Castle:
         if config is None:
             config = load_config()
 
-        # Ensure directories exist
         config.home.mkdir(parents=True, exist_ok=True)
         config.sessions_dir.mkdir(parents=True, exist_ok=True)
         config.skills_dir.mkdir(parents=True, exist_ok=True)
 
-        # Skill manager
         project_root = find_project_root(Path.cwd())
         project_skills = project_root / ".skills"
         skill_manager = SkillManager(
@@ -302,7 +273,6 @@ class Castle:
         )
         skill_manager.discover()
 
-        # Build provider, system prompt, skill tools
         provider = _create_provider(config)
 
         all_skills = skill_manager.all_skills()
@@ -310,12 +280,10 @@ class Castle:
             workspace=Path.cwd(),
             skill_manager=skill_manager,
         )
-        skill_prompts = render_compact_skills(all_skills)
+        skill_prompts = Skill.render_compact(all_skills)
 
         system_prompt = _build_system_prompt(config, skill_prompts)
 
-        # Channels — Telegram only runs in daemon mode to avoid
-        # "terminated by other getUpdates request" conflicts.
         channels: list[Channel] = []
         if config.cli.enabled and not daemon:
             channels.append(
@@ -356,26 +324,22 @@ class Castle:
         castle._session_manager._agent_factory = castle._make_agent_factory()  # pyright: ignore[reportPrivateUsage]
         return castle
 
-    # --- Lifecycle ---
-
     async def run(self) -> None:
         """Start all channels and wait until shutdown."""
         if not self._channels:
-            _log.warning("No channels configured — nothing to do")
+            logger.warning("No channels configured — nothing to do")
             return
 
-        # Install signal handlers
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._signal_handler)
 
-        _log.info(
+        logger.info(
             "Castle starting with %d channel(s): %s",
             len(self._channels),
             ", ".join(c.name for c in self._channels),
         )
 
-        # Start all channels concurrently
         tasks = [asyncio.create_task(ch.start(self)) for ch in self._channels]
 
         try:
@@ -388,25 +352,22 @@ class Castle:
 
     async def shutdown(self) -> None:
         """Stop all channels and suspend all sessions."""
-        _log.info("Castle shutting down")
+        logger.info("Castle shutting down")
 
-        # Stop channels
         for ch in self._channels:
             try:
                 await ch.stop()
             except Exception:
-                _log.exception("Error stopping channel %s", ch.name)
+                logger.exception("Error stopping channel %s", ch.name)
 
-        # Suspend all sessions
         self._session_manager.suspend_all()
 
-        _log.info("Castle shut down")
+        logger.info("Castle shut down")
 
     def _signal_handler(self) -> None:
         """Handle SIGINT/SIGTERM."""
-        _log.info("Received shutdown signal")
+        logger.info("Received shutdown signal")
         self._shutdown_event.set()
-        # Cancel all running tasks
         for task in asyncio.all_tasks():
             if task is not asyncio.current_task():
                 task.cancel()

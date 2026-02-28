@@ -10,7 +10,6 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
 from typing import TYPE_CHECKING
 
@@ -31,12 +30,6 @@ from kcastle.session.session import Session
 
 if TYPE_CHECKING:
     from kcastle.castle import Castle
-
-_log = logging.getLogger("kcastle.channels.cli")
-
-# ---------------------------------------------------------------------------
-# Rendering helpers
-# ---------------------------------------------------------------------------
 
 
 def _render_event(event: AgentEvent) -> None:
@@ -65,10 +58,6 @@ def _render_event(event: AgentEvent) -> None:
         case _:
             pass
 
-
-# ---------------------------------------------------------------------------
-# Session commands
-# ---------------------------------------------------------------------------
 
 _COMMANDS = {
     "/session list": "List all sessions",
@@ -138,11 +127,6 @@ async def _handle_command(line: str, castle: Castle, session: Session) -> Sessio
     return None
 
 
-# ---------------------------------------------------------------------------
-# CLIChannel
-# ---------------------------------------------------------------------------
-
-
 class CLIChannel:
     """Interactive CLI channel using stdin/stdout.
 
@@ -171,7 +155,6 @@ class CLIChannel:
         self._running = True
         manager = castle.session_manager
 
-        # Resolve initial session
         if self._session_id:
             session = manager.get_or_create(self._session_id)
             print(f'Resumed session "{session.id}"')
@@ -210,14 +193,12 @@ class CLIChannel:
                     session = new_session
                 continue
 
-            # Regular user input → run agent
             try:
                 async for event in session.run(line):
                     _render_event(event)
             except Exception as e:
                 print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
 
-        # Cleanup
         manager.suspend(session.id)
 
     async def stop(self) -> None:

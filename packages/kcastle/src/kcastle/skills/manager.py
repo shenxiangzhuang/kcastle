@@ -1,22 +1,20 @@
-"""Skill lifecycle management — discover, search, and load.
+"""Skill lifecycle management — discover and search.
 
 ``SkillManager`` is the main entry point for all skill operations in kcastle.
 It handles layered discovery (builtin → user → project), override resolution,
-and prompt loading.
+and keyword search.
 """
 
 from __future__ import annotations
 
-import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
-from kai import Tool
+from kcastle.log import logger
+from kcastle.skills.skill import Skill
 
-from kcastle.skills.loader import LoadedSkill, SkillLoader
-from kcastle.skills.resolver import SkillMatch, SkillResolver
-from kcastle.skills.schema import SkillMeta, load_skill_meta
-
-_log = logging.getLogger("kcastle.skills")
+_WORD_RE = re.compile(r"[a-z0-9]+")
 
 
 def find_project_root(cwd: Path) -> Path:
@@ -33,15 +31,23 @@ def find_project_root(cwd: Path) -> Path:
     return current
 
 
+@dataclass(frozen=True, slots=True)
+class SkillMatch:
+    """A skill matched against a query with a relevance score."""
+
+    skill: Skill
+    score: float
+
+
 class SkillManager:
-    """Manages the skill runtime lifecycle: discover, search, and load.
+    """Manages the skill lifecycle: discover and search.
 
     Skills are discovered from three layers (lowest → highest priority):
     1. Builtin skills (shipped with kcastle)
     2. User skills (``~/.kcastle/skills``)
     3. Project skills (``<project_root>/.skills``)
 
-    Same-id skills in higher-priority layers override lower ones.
+    Same-name skills in higher-priority layers override lower ones.
     """
 
     def __init__(
@@ -50,104 +56,97 @@ class SkillManager:
         user_skills_dir: Path,
         project_skills_dir: Path | None = None,
         builtin_skills_dir: Path | None = None,
+        top_k: int = 3,
     ) -> None:
         self._user_dir = user_skills_dir
         self._project_dir = project_skills_dir
         self._builtin_dir = builtin_skills_dir
-        self._loader = SkillLoader()
-        self._resolver = SkillResolver()
-        self._skills: dict[str, SkillMeta] = {}
+        self._top_k = top_k
+        self._skills: dict[str, Skill] = {}
 
-    # --- Discovery ---
-
-    def discover(self) -> list[SkillMeta]:
+    def discover(self) -> list[Skill]:
         """Scan all skill layers and build the merged skill index.
 
-        Override order: project > user > builtin (same id).
+        Override order: project > user > builtin (same name).
         Returns the final merged list of discovered skills.
         """
-        merged: dict[str, SkillMeta] = {}
+        merged: dict[str, Skill] = {}
 
-        # Layer 1: builtin (lowest priority)
         if self._builtin_dir and self._builtin_dir.is_dir():
-            for meta in self._scan_dir(self._builtin_dir, "builtin"):
-                merged[meta.id] = meta
+            for skill in self._scan_dir(self._builtin_dir, "builtin"):
+                merged[skill.name] = skill
 
-        # Layer 2: user
         if self._user_dir.is_dir():
-            for meta in self._scan_dir(self._user_dir, "user"):
-                merged[meta.id] = meta
+            for skill in self._scan_dir(self._user_dir, "user"):
+                merged[skill.name] = skill
 
-        # Layer 3: project (highest priority)
         if self._project_dir and self._project_dir.is_dir():
-            for meta in self._scan_dir(self._project_dir, "project"):
-                merged[meta.id] = meta
+            for skill in self._scan_dir(self._project_dir, "project"):
+                merged[skill.name] = skill
 
         self._skills = merged
-        skills_list = list(merged.values())
-        self._resolver.index(skills_list)
-        _log.info("Discovered %d skills", len(skills_list))
-        return skills_list
-
-    # --- Search ---
+        logger.info("Discovered %d skills", len(merged))
+        return list(merged.values())
 
     def search(self, query: str) -> list[SkillMatch]:
-        """Search for skills matching the query."""
-        return self._resolver.search(query)
+        """Search for skills matching the query.  Returns top-K results."""
+        if not query.strip():
+            return []
 
-    def all_skills(self) -> list[SkillMeta]:
+        query_tokens = _tokenize(query)
+        if not query_tokens:
+            return []
+
+        scored: list[SkillMatch] = []
+        for skill in self._skills.values():
+            score = _score(skill, query_tokens)
+            if score > 0:
+                scored.append(SkillMatch(skill=skill, score=score))
+
+        scored.sort(key=lambda m: m.score, reverse=True)
+        return scored[: self._top_k]
+
+    def all_skills(self) -> list[Skill]:
         """Return all discovered skills."""
         return list(self._skills.values())
 
-    def get_skill(self, skill_id: str) -> SkillMeta | None:
-        """Get a single skill by ID."""
-        return self._skills.get(skill_id)
-
-    # --- Loading ---
-
-    def load_skill(self, skill_id: str) -> LoadedSkill | None:
-        """Load a skill (tools + prompt) by its ID."""
-        meta = self._skills.get(skill_id)
-        if meta is None:
-            return None
-        return self._loader.load(meta)
-
-    def load_skills(self, skill_ids: list[str]) -> list[LoadedSkill]:
-        """Load multiple skills by their IDs."""
-        results: list[LoadedSkill] = []
-        for sid in skill_ids:
-            loaded = self.load_skill(sid)
-            if loaded is not None:
-                results.append(loaded)
-        return results
-
-    def collect_tools(self, loaded: list[LoadedSkill]) -> list[Tool]:
-        """Flatten all tools from loaded skills.
-
-        Skills are prompt-only in this architecture, so this generally returns
-        an empty list. Kept for API compatibility.
-        """
-        return [tool for skill in loaded for tool in skill.tools]
-
-    def collect_prompts(self, loaded: list[LoadedSkill]) -> str:
-        """Concatenate instruction bodies from loaded skills."""
-        fragments = [s.instructions for s in loaded if s.instructions]
-        return "\n\n".join(fragments)
-
-    # --- Internal ---
+    def get_skill(self, name: str) -> Skill | None:
+        """Get a single skill by name."""
+        return self._skills.get(name)
 
     @staticmethod
-    def _scan_dir(directory: Path, source: str) -> list[SkillMeta]:
+    def _scan_dir(directory: Path, source: str) -> list[Skill]:
         """Scan a directory for skill sub-directories."""
-        results: list[SkillMeta] = []
+        results: list[Skill] = []
         if not directory.is_dir():
             return results
         for child in sorted(directory.iterdir()):
             if not child.is_dir():
                 continue
-            meta = load_skill_meta(child, source=source)
-            if meta is not None:
-                results.append(meta)
+            skill = Skill.load(child, source=source)
+            if skill is not None:
+                results.append(skill)
             else:
-                _log.debug("Skipping %s — not a valid skill directory", child)
+                logger.debug("Skipping %s — not a valid skill directory", child)
         return results
+
+
+def _tokenize(text: str) -> set[str]:
+    normalized = text.lower().replace("-", " ").replace("_", " ").replace(".", " ")
+    return set(_WORD_RE.findall(normalized))
+
+
+def _score(skill: Skill, query_tokens: set[str]) -> float:
+    """Score a skill against query tokens (keyword overlap)."""
+    searchable = " ".join(
+        [
+            skill.name.lower(),
+            skill.description.lower(),
+            " ".join(t.lower() for t in skill.tags),
+        ]
+    )
+    searchable_tokens = _tokenize(searchable)
+    overlap = query_tokens & searchable_tokens
+    if not overlap:
+        return 0.0
+    return len(overlap) / len(query_tokens)

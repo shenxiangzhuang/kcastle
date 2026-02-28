@@ -15,28 +15,16 @@ import yaml
 
 from kcastle.config import config_file_path
 
-# ---------------------------------------------------------------------------
-# Vendor definitions (display, env_var, default_provider, default_model)
-# ---------------------------------------------------------------------------
-
 _VENDORS: list[tuple[str, str, str, str]] = [
     ("DeepSeek", "DEEPSEEK_API_KEY", "deepseek-openai", "deepseek-chat"),
     ("MiniMax", "MINIMAX_API_KEY", "minimax-openai", "MiniMax-Text-01"),
 ]
-
-# ---------------------------------------------------------------------------
-# Terminal formatting
-# ---------------------------------------------------------------------------
 
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _GREEN = "\033[32m"
 _YELLOW = "\033[33m"
 _RESET = "\033[0m"
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def needs_setup(home: Path | None = None) -> bool:
@@ -53,7 +41,6 @@ def run_setup(home: Path | None = None) -> Path:
 
     print(f"\n  {_BOLD}🏰 kcastle — first-run setup{_RESET}\n")
 
-    # --- Detect API keys ------------------------------------------------
     print("  Detecting API keys…")
     detected: list[tuple[str, str, str, str]] = []
     for display, env_var, provider, model in _VENDORS:
@@ -70,11 +57,9 @@ def run_setup(home: Path | None = None) -> Path:
         print("  Then run `k` again.\n")
         sys.exit(1)
 
-    # --- Pick default ---------------------------------------------------
     _display, _env, provider, model = detected[0]
     print(f"\n  Default: {_BOLD}{provider}{_RESET} ({model})")
 
-    # --- Confirm --------------------------------------------------------
     try:
         answer = input(f"\n  Write {_DIM}{path}{_RESET}? [Y/n] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -85,7 +70,6 @@ def run_setup(home: Path | None = None) -> Path:
         print("  Aborted.\n")
         sys.exit(0)
 
-    # --- Write ----------------------------------------------------------
     config: dict[str, object] = {
         "default": {"provider": provider, "model": model},
     }

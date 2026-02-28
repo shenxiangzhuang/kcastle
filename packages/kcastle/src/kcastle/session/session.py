@@ -8,7 +8,6 @@ exposes the ``run()`` / ``suspend()`` lifecycle.
 from __future__ import annotations
 
 import json
-import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -18,14 +17,8 @@ from typing import Any
 
 from kagent import Agent, AgentEvent, Trace, TraceManager
 
+from kcastle.log import logger
 from kcastle.session.store import SessionTraceStore
-
-_log = logging.getLogger("kcastle.session")
-
-
-# ---------------------------------------------------------------------------
-# SessionMeta — persisted in meta.json
-# ---------------------------------------------------------------------------
 
 _META_FILENAME = "meta.json"
 
@@ -89,16 +82,7 @@ def _load_meta(session_dir: Path) -> SessionMeta:
     return SessionMeta.from_dict(data)
 
 
-# ---------------------------------------------------------------------------
-# AgentFactory type alias
-# ---------------------------------------------------------------------------
-
 type AgentFactory = Any  # Callable[[Trace], Agent] — use Any to avoid Protocol overhead
-
-
-# ---------------------------------------------------------------------------
-# Session
-# ---------------------------------------------------------------------------
 
 
 class Session:
@@ -122,8 +106,6 @@ class Session:
         self._trace = trace
         self._trace_manager = trace_manager
         self._running = False
-
-    # --- Properties ---
 
     @property
     def id(self) -> str:
@@ -157,8 +139,6 @@ class Session:
     @property
     def session_dir(self) -> Path:
         return self._session_dir
-
-    # --- Primary API ---
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run the agent with user input, streaming events.
@@ -205,17 +185,13 @@ class Session:
         Trace is already persisted incrementally; just write final meta.
         """
         self._touch()
-        _log.info("Session %s suspended", self.id)
-
-    # --- Internal ---
+        logger.info("Session %s suspended", self.id)
 
     def _touch(self) -> None:
         """Update last_active_at in meta.json."""
         self._meta.last_active_at = _now_ms()
         self._meta.last_active_at_iso = _now_iso()
         _save_meta(self._session_dir, self._meta)
-
-    # --- Factory ---
 
     @classmethod
     def create(
@@ -247,7 +223,7 @@ class Session:
 
         agent: Agent = agent_factory(trace)
 
-        _log.info("Created session %s", session_id)
+        logger.info("Created session %s", session_id)
         return cls(
             session_dir=session_dir,
             meta=meta,
@@ -269,7 +245,6 @@ class Session:
         trace_store = SessionTraceStore(session_dir)
         trace_manager = TraceManager(store=trace_store)
 
-        # Find the trace ID from the trace file
         trace_ids = trace_store.list_traces()
         if not trace_ids:
             raise ValueError(f"No trace found in session {meta.id}")
@@ -277,7 +252,7 @@ class Session:
 
         agent: Agent = agent_factory(trace)
 
-        _log.info("Resumed session %s (%d trace entries)", meta.id, len(trace))
+        logger.info("Resumed session %s (%d trace entries)", meta.id, len(trace))
         return cls(
             session_dir=session_dir,
             meta=meta,

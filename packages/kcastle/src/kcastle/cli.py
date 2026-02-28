@@ -57,7 +57,6 @@ def main() -> None:
         help="Override kcastle home directory (default: ~/.kcastle)",
     )
 
-    # Subcommands for daemon management
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("start", help="Start daemon in background")
     sub.add_parser("stop", help="Stop the background daemon")
@@ -66,7 +65,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Logging
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -78,7 +76,6 @@ def main() -> None:
 
     home = Path(args.home) if args.home else None
 
-    # --- Daemon management subcommands ----------------------------------
     if args.command in ("start", "stop", "status", "restart"):
         from kcastle.config import _DEFAULT_HOME  # pyright: ignore[reportPrivateUsage]
         from kcastle.daemon import (
@@ -99,11 +96,9 @@ def main() -> None:
             daemon_restart(resolved_home, verbose=args.verbose)
         return
 
-    # --- Normal operation -----------------------------------------------
     from kcastle.config import load_config
     from kcastle.setup import needs_setup, run_setup
 
-    # First-run: guide user through initial configuration
     if needs_setup(home):
         run_setup(home)
 
