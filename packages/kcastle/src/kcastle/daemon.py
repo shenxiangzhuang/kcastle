@@ -59,6 +59,18 @@ def _read_pid(home: Path) -> int | None:
     return pid
 
 
+def _print_log_tail(log: Path, lines: int = 5) -> None:
+    """Print the last *lines* of the log file."""
+    if not log.is_file():
+        return
+    with contextlib.suppress(OSError):
+        tail = log.read_text(encoding="utf-8").rstrip().splitlines()[-lines:]
+        if tail:
+            print(f"  Log ({_DIM}{log}{_RESET}):")
+            for line in tail:
+                print(f"    {_DIM}{line}{_RESET}")
+
+
 def daemon_status(home: Path) -> None:
     """Print whether the daemon is running."""
     pid = _read_pid(home)
@@ -95,7 +107,19 @@ def daemon_start(home: Path, *, verbose: bool = False) -> None:
             start_new_session=True,
         )
 
-    _pid_file(home).write_text(str(proc.pid), encoding="utf-8")
+    pid_path = _pid_file(home)
+    pid_path.write_text(str(proc.pid), encoding="utf-8")
+
+    # Poll briefly to catch immediate startup failures
+    # (e.g. no channels configured, bad config, missing provider).
+    for _ in range(20):
+        time.sleep(0.15)
+        if proc.poll() is not None:
+            pid_path.unlink(missing_ok=True)
+            print(f"  {_RED}●{_RESET} Daemon failed to start")
+            _print_log_tail(log)
+            return
+
     print(f"  {_GREEN}●{_RESET} Daemon started (PID {proc.pid})")
     print(f"  Log: {_DIM}{log}{_RESET}")
 
