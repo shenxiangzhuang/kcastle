@@ -147,7 +147,7 @@ class Castle:
 
         Bub-style progressive disclosure:
         - compact skill metadata is always present in system prompt
-        - full skill body is injected only when user references ``$skill-id``
+        - full skill body is injected only when user references ``$skill-name``
         """
         hints = Skill.extract_hints(user_input)
         if not hints:
