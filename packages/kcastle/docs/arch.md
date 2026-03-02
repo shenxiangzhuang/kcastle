@@ -150,11 +150,11 @@ kcastle/
 ├── daemon.py             # Daemon process management (start/stop/status/restart)
 ├── setup.py              # First-run env var detection + config generation
 ├── skills/
-│   ├── __init__.py       # Re-exports: SkillManager, SkillResolver, SkillLoader
-│   ├── manager.py        # Skill lifecycle: discover/search/create/update
-│   ├── resolver.py       # Query → candidate skills (Top-K)
-│   ├── loader.py         # Skill → tools + prompt fragments
-│   └── schema.py         # skill.yaml schema + validation
+│   ├── __init__.py       # Re-exports: SkillManager, Skill
+│   ├── manager.py        # Skill discovery/search across builtin/user/project
+│   ├── skill.py          # SKILL.md loading/parsing + hint rendering
+│   ├── skill-creator/    # Builtin skill package
+│   └── skill-installer/  # Builtin skill package
 ├── session/
 │   ├── __init__.py       # Re-exports: Session, SessionManager, SessionTraceStore
 │   ├── session.py        # Session — wraps kagent.Agent + metadata
@@ -294,28 +294,40 @@ skill layer.
 
 ### Skill Unit Format
 
-Each skill is a directory:
+Each skill is a directory containing `SKILL.md`:
 
 ```
 <skills_dir>/<skill_id>/
-├── skill.yaml          # required: id/name/version/description/tags/entry
-├── prompt.md           # optional: skill-specific system guidance
-└── tools.py            # optional: tool implementations for this skill
+└── SKILL.md            # required: YAML frontmatter + Markdown instructions
+```
+
+`SKILL.md` format:
+
+```markdown
+---
+name: skill-name
+description: What this skill helps with
+tags: [optional, tags]
+---
+
+# Instructions
+...
 ```
 
 Invalid skill directories are skipped with warnings (non-fatal).
 
 ### Runtime Resolution and Loading
 
-For each user turn, kcastle resolves skills dynamically:
+Current PoC behavior is split into two phases:
 
-1. `SkillResolver.search(query)` returns ranked candidates (keyword/BM25 in PoC)
-2. Select Top-K candidates (default small K, e.g. 3)
-3. `SkillLoader` loads those skills into:
-  - flattened `list[Tool]` for `kagent.Agent`
-  - prompt fragments appended to the system prompt
+1. **Startup-time discovery**
+  - `SkillManager.discover()` scans builtin/user/project layers
+  - `Skill.render_compact(all_skills)` injects compact metadata into system prompt
+2. **Per-turn explicit expansion**
+  - User input is parsed for `$skill-name` hints via `Skill.extract_hints(...)`
+  - Matched skills are expanded into the current turn input via `Skill.render_expanded(...)`
 
-This keeps startup light and avoids injecting unrelated tools into every turn.
+This keeps default prompts compact while allowing full instructions only when explicitly requested.
 
 ### Create/Update Lifecycle
 
