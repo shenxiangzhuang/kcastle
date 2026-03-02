@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from kai import LLM, Context, Message, Tool, ToolResult, complete
-from kai.message import TextPart, ThinkPart
+from kai.types.message import TextPart, ThinkPart
 from pydantic import BaseModel, Field, PrivateAttr
 
 from kagent.state import AgentState

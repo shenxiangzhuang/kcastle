@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from kai import Message
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 from kagent.trace import (
     InMemoryTraceStore,

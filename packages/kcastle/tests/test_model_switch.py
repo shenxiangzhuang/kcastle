@@ -7,7 +7,8 @@ from typing import Any, cast
 import pytest
 from kagent import Agent
 from kai import Context
-from kai.chunk import Chunk
+from kai.providers import LLMBase
+from kai.types.stream import Chunk
 
 from kcastle.castle import Castle
 from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderEntry
@@ -15,14 +16,18 @@ from kcastle.provider_config import ProviderConfig
 from kcastle.session.manager import SessionManager
 
 
-class DummyProvider:
-    def __init__(self, *, name: str, model: str) -> None:
-        self._name = name
+class DummyProvider(LLMBase):
+    def __init__(self, *, provider: str, model: str) -> None:
+        self._provider = provider
         self._model = model
 
     @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
     def name(self) -> str:
-        return self._name
+        return self._provider
 
     @property
     def model(self) -> str:
@@ -35,9 +40,8 @@ class DummyProvider:
 
 def _build_config(tmp_path: Path) -> CastleConfig:
     provider = ProviderEntry(
-        provider=ProviderConfig(
-            vendor="mock",
-            protocol="openai-completions",
+        config=ProviderConfig(
+            provider="mock",
             model="",
             api_key="test-key",
         ),
@@ -61,7 +65,7 @@ def _build_config(tmp_path: Path) -> CastleConfig:
 def _make_castle(tmp_path: Path) -> Castle:
     config = _build_config(tmp_path)
 
-    default_provider = DummyProvider(name="mock", model="model-a")
+    default_provider = DummyProvider(provider="mock", model="model-a")
 
     def _agent_factory(trace: Any) -> Agent:
         return Agent(llm=default_provider, trace=trace)
@@ -100,10 +104,10 @@ def test_switch_model_only_affects_target_session(
 
     import kcastle.castle as castle_module
 
-    def _fake_create_provider(config: CastleConfig) -> object:
-        return DummyProvider(name=config.default_provider, model=config.default_model)
+    def _fake_create_provider(config: ProviderConfig) -> object:
+        return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "_create_provider", _fake_create_provider)
+    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
 
     castle.switch_model("mock", "model-b", session_id="s1")
 
@@ -121,10 +125,10 @@ def test_switch_model_raises_for_unloaded_session(
 
     import kcastle.castle as castle_module
 
-    def _fake_create_provider(config: CastleConfig) -> object:
-        return DummyProvider(name=config.default_provider, model=config.default_model)
+    def _fake_create_provider(config: ProviderConfig) -> object:
+        return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "_create_provider", _fake_create_provider)
+    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
 
     with pytest.raises(KeyError, match="not loaded"):
         castle.switch_model("mock", "model-b", session_id="missing")
@@ -138,10 +142,10 @@ def test_switch_model_persists_across_resume(
 
     import kcastle.castle as castle_module
 
-    def _fake_create_provider(config: CastleConfig) -> object:
-        return DummyProvider(name=config.default_provider, model=config.default_model)
+    def _fake_create_provider(config: ProviderConfig) -> object:
+        return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "_create_provider", _fake_create_provider)
+    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
 
     castle.session_manager.create(session_id="s1")
     castle.switch_model("mock", "model-b", session_id="s1")

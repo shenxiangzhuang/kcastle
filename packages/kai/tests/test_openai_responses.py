@@ -8,9 +8,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import patch
 
-from kai.chunk import Chunk
-from kai.message import Context, ImagePart, Message, TextPart, ToolCall
 from kai.providers.openai import OpenAIResponses
+from kai.types.message import Context, ImagePart, Message, TextPart, ToolCall
+from kai.types.stream import Chunk
 
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:
@@ -38,7 +38,7 @@ async def _stream_raw(
 
         return _gen()
 
-    with patch("kai.providers.openai._responses.AsyncOpenAI") as mock_cls:
+    with patch("kai.providers.openai.AsyncOpenAI") as mock_cls:
         mock_cls.return_value.responses.create = _fake_create
         provider = OpenAIResponses(model="test-model", api_key="test-key")
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from abc import ABC
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
@@ -38,7 +39,11 @@ from anthropic.types import (
     ToolUseBlockParam,
 )
 
-from kai.chunk import (
+from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
+from kai.providers.base import LLMBase
+from kai.tool import Tool
+from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart
+from kai.types.stream import (
     Chunk,
     TextChunk,
     ThinkChunk,
@@ -48,24 +53,16 @@ from kai.chunk import (
     ToolCallStart,
     UsageChunk,
 )
-from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
-from kai.message import Context, ImagePart, Message, TextPart, ThinkPart
-from kai.tool import Tool
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
-class AnthropicMessages:
-    """Anthropic Messages API implementation.
-
-    Example::
-
-        llm = AnthropicMessages(model="claude-sonnet-4-20250514")
-        llm = AnthropicMessages(model="claude-sonnet-4-20250514", max_tokens=8192)
-    """
+class AnthropicBase(LLMBase, ABC):
+    """Shared Anthropic-compatible implementation base."""
 
     def __init__(
         self,
         *,
+        provider: str,
         model: str,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -75,24 +72,19 @@ class AnthropicMessages:
     ) -> None:
         if api_key is None:
             api_key = os.environ.get("ANTHROPIC_API_KEY")
+        self._provider = provider
         self._model = model
         self._max_tokens = max_tokens
         self._thinking = thinking
 
-        # Third-party Anthropic-compatible endpoints (MiniMax, DeepSeek, …)
-        # typically require ``Authorization: Bearer <key>`` rather than the
-        # native ``x-api-key`` header.  When a custom *base_url* is provided
-        # and no explicit *auth_token* is given, send the API key as a Bearer
-        # token so both header styles are present and the server can accept
-        # whichever it supports.
         if "auth_token" not in client_kwargs and base_url:
             client_kwargs["auth_token"] = api_key
 
         self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, **client_kwargs)
 
     @property
-    def name(self) -> str:
-        return "anthropic"
+    def provider(self) -> str:
+        return self._provider
 
     @property
     def model(self) -> str:
@@ -129,6 +121,36 @@ class AnthropicMessages:
                 yield chunk
         except AnthropicError as e:
             raise _convert_error(e) from e
+
+
+class AnthropicMessages(AnthropicBase):
+    """Anthropic Messages API implementation.
+
+    Example::
+
+        llm = AnthropicMessages(model="claude-sonnet-4-20250514")
+        llm = AnthropicMessages(model="claude-sonnet-4-20250514", max_tokens=8192)
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        max_tokens: int = 16384,
+        thinking: ThinkingConfigParam | None = None,
+        **client_kwargs: Any,
+    ) -> None:
+        super().__init__(
+            provider="anthropic",
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            max_tokens=max_tokens,
+            thinking=thinking,
+            **client_kwargs,
+        )
 
 
 def _build_messages(context: Context) -> list[MessageParam]:
@@ -333,3 +355,9 @@ def _convert_error(error: AnthropicError) -> ProviderError:
     if isinstance(error, AnthropicTimeoutError):
         return TimeoutError(str(error))
     return ProviderError(f"Anthropic error: {error}")
+
+
+__all__ = [
+    "AnthropicBase",
+    "AnthropicMessages",
+]

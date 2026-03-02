@@ -9,12 +9,11 @@ from dataclasses import dataclass, field
 class ProviderConfig:
     """Provider construction config.
 
-    A config captures vendor identity, protocol, model, and endpoint/auth
+    A config captures provider identity, model, and endpoint/auth
     options needed to construct a concrete provider instance.
     """
 
-    vendor: str
-    protocol: str
+    provider: str
     model: str
     api_key: str | None = None
     base_url: str | None = None
@@ -23,5 +22,5 @@ class ProviderConfig:
 
     @property
     def name(self) -> str:
-        """Canonical profile name, e.g. ``deepseek-openai-completions``."""
-        return f"{self.vendor}-{self.protocol.lower()}"
+        """Canonical profile name, e.g. ``deepseek-openai``."""
+        return self.provider.lower()

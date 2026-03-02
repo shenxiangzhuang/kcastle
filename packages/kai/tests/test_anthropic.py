@@ -14,7 +14,9 @@ from anthropic.types import (
     RawContentBlockStartEvent,
 )
 
-from kai.chunk import (
+from kai.providers.anthropic import AnthropicMessages
+from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
+from kai.types.stream import (
     Chunk,
     TextChunk,
     ToolCallDelta,
@@ -22,8 +24,6 @@ from kai.chunk import (
     ToolCallStart,
     UsageChunk,
 )
-from kai.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
-from kai.providers.anthropic import AnthropicMessages
 
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:

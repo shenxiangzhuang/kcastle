@@ -33,7 +33,7 @@ import logging
 from typing import Any
 
 from kai import Message, ToolResult
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 logger = logging.getLogger("kagent.hooks")
 

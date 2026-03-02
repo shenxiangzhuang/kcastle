@@ -23,7 +23,7 @@ import sys
 from typing import Any
 
 from kai import AnthropicMessages, Tool, ToolResult
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 from pydantic import BaseModel, Field
 
 from kagent import Agent, Hooks, LoggingHooks, MultiHooks

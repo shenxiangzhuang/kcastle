@@ -274,8 +274,8 @@ class TestAgentErrorPropagation:
     @pytest.mark.asyncio
     async def test_complete_raises_on_empty_response(self) -> None:
         """complete() should raise when the provider returns no content."""
-        from kai.chunk import UsageChunk
-        from kai.usage import TokenUsage
+        from kai.types.stream import UsageChunk
+        from kai.types.usage import TokenUsage
 
         # A provider that returns only a usage chunk (no text, no tool call).
         provider = MockProvider([[UsageChunk(usage=TokenUsage(input_tokens=0, output_tokens=0))]])

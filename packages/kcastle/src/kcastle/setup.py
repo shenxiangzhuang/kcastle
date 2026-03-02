@@ -24,7 +24,6 @@ class VendorPreset:
     display_name: str
     env_var: str
     provider: str
-    protocol: str
     model: str
 
 
@@ -32,15 +31,13 @@ _VENDOR_PRESETS: list[VendorPreset] = [
     VendorPreset(
         display_name="DeepSeek",
         env_var="DEEPSEEK_API_KEY",
-        provider="deepseek",
-        protocol="openai-completions",
+        provider="deepseek-openai",
         model="deepseek-chat",
     ),
     VendorPreset(
         display_name="MiniMax",
         env_var="MINIMAX_API_KEY",
-        provider="minimax",
-        protocol="openai-completions",
+        provider="minimax-openai",
         model="MiniMax-Text-01",
     ),
 ]
@@ -93,7 +90,6 @@ def _write_minimal_config(path: Path, preset: VendorPreset) -> None:
     config: dict[str, object] = {
         "default": {
             "provider": preset.provider,
-            "protocol": preset.protocol,
             "model": preset.model,
         },
     }
@@ -118,7 +114,7 @@ def run_setup(home: Path | None = None) -> Path:
         sys.exit(1)
 
     chosen = detected[0]
-    print(f"\n  Default: {_BOLD}{chosen.provider}/{chosen.protocol}{_RESET} ({chosen.model})")
+    print(f"\n  Default: {_BOLD}{chosen.provider}{_RESET} ({chosen.model})")
 
     if not _confirm_write(path):
         print("  Aborted.\n")

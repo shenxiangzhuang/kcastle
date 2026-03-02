@@ -47,7 +47,7 @@ All endpoints share the same `Agent` instance and its `Trace`. This means:
 ### What kcastle owns
 
 - **Endpoint adapters** — CLI, Telegram, Discord (and future endpoints)
-- **Provider factory/registry** — protocol-to-provider construction policy (`kcastle.provider_factory`)
+- **Provider factory/registry** — provider-id-to-constructor mapping policy (`kcastle.provider_factory`)
 - **Persistence** — `TraceStore` configuration and session management
 - **Tool registration** — Domain-specific tools for the agent
 - **Configuration** — Agent setup, system prompts, model selection
@@ -58,3 +58,28 @@ All endpoints share the same `Agent` instance and its `Trace`. This means:
 These live in lower layers:
 - **Agent runtime** — `kagent` (agent loop, state, events, context builders)
 - **LLM abstraction** — `kai` (providers, streaming, tool schemas)
+
+## Configuration
+
+kcastle uses explicit provider profiles. The default runtime selection is a
+`provider + model` pair:
+
+```yaml
+default:
+	provider: deepseek-openai
+	model: deepseek-chat
+```
+
+You can override built-in providers by redefining the same provider key:
+
+```yaml
+providers:
+	deepseek-openai:
+		api_key: ${DEEPSEEK_API_KEY}
+		base_url: https://api.deepseek.com
+		models:
+			deepseek-chat:
+				active: true
+			deepseek-reasoner:
+				active: true
+```

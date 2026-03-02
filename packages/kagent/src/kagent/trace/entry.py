@@ -19,7 +19,7 @@ from enum import StrEnum
 from typing import Any
 
 from kai import Message
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
 class TraceKind(StrEnum):

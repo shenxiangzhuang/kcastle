@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
 from kai import LLM, Message
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 from kagent.context import ContextBuilder, DefaultBuilder
 from kagent.event import (

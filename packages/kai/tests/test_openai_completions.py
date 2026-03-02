@@ -11,18 +11,18 @@ from unittest.mock import patch
 
 from openai.types.chat import ChatCompletionChunk
 
-from kai.chunk import (
+from kai.providers.openai import OpenAIChatCompletions
+from kai.providers.openai import (
+    _extract_reasoning_text as _extract_reasoning_text,  # pyright: ignore[reportPrivateUsage]
+)
+from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
+from kai.types.stream import (
     Chunk,
     TextChunk,
     ToolCallDelta,
     ToolCallEnd,
     ToolCallStart,
     UsageChunk,
-)
-from kai.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
-from kai.providers.openai import OpenAIChatCompletions
-from kai.providers.openai._completions import (
-    _extract_reasoning_text as _extract_reasoning_text,  # pyright: ignore[reportPrivateUsage]
 )
 
 
@@ -102,7 +102,7 @@ async def _stream_raw(
 
         return _gen()
 
-    with patch("kai.providers.openai._completions.AsyncOpenAI") as mock_cls:
+    with patch("kai.providers.openai.AsyncOpenAI") as mock_cls:
         mock_cls.return_value.chat.completions.create = _fake_create
         provider = OpenAIChatCompletions(model="test-model", api_key="test-key")
 

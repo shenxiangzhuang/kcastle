@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pytest
-from kai.providers.openai import OpenAIChatCompletions, OpenAIResponses
+from kai.providers import LLMBase
+from kai.providers.deepseek import DeepseekOpenAI
+from kai.providers.openai import OpenAIResponses
 
 from kcastle.provider_config import ProviderConfig
 from kcastle.provider_factory import ProviderRegistry, create_provider
@@ -10,22 +12,20 @@ from kcastle.provider_factory import ProviderRegistry, create_provider
 def test_create_provider_openai_completions() -> None:
     provider = create_provider(
         ProviderConfig(
-            vendor="deepseek",
-            protocol="openai-completions",
+            provider="deepseek-openai",
             model="deepseek-chat",
             api_key="test-key",
             base_url="https://api.deepseek.com",
         )
     )
-    assert isinstance(provider, OpenAIChatCompletions)
+    assert isinstance(provider, DeepseekOpenAI)
     assert provider.model == "deepseek-chat"
 
 
 def test_create_provider_openai_responses() -> None:
     provider = create_provider(
         ProviderConfig(
-            vendor="openai",
-            protocol="openai-responses",
+            provider="openai-responses",
             model="gpt-4.1",
             api_key="test-key",
             options={"reasoning": {"effort": "medium"}},
@@ -35,24 +35,23 @@ def test_create_provider_openai_responses() -> None:
     assert provider.model == "gpt-4.1"
 
 
-def test_create_provider_unknown_protocol_raises() -> None:
-    with pytest.raises(ValueError, match="Unknown protocol"):
+def test_create_provider_unknown_provider_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown provider"):
         create_provider(
             ProviderConfig(
-                vendor="x",
-                protocol="unknown-protocol",
+                provider="unknown-provider",
                 model="m",
             )
         )
 
 
 def test_provider_registry_register() -> None:
-    class DummyProvider:
+    class DummyProvider(LLMBase):
         def __init__(self) -> None:
             self._model = "dummy-model"
 
         @property
-        def name(self) -> str:
+        def provider(self) -> str:
             return "dummy"
 
         @property
@@ -64,13 +63,13 @@ def test_provider_registry_register() -> None:
                 yield None
 
     def _factory(config: ProviderConfig) -> DummyProvider:
-        assert config.protocol == "dummy"
+        assert config.provider == "dummy"
         return DummyProvider()
 
     registry = ProviderRegistry()
     registry.register("dummy", _factory)
     provider = create_provider(
-        ProviderConfig(vendor="x", protocol="dummy", model="m"),
+        ProviderConfig(provider="dummy", model="m"),
         registry=registry,
     )
-    assert provider.name == "dummy"
+    assert provider.provider == "dummy"

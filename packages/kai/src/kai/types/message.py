@@ -13,7 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, field_serializer, field_validator
 
 from kai.tool import Tool
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
 class TextPart(BaseModel, frozen=True):

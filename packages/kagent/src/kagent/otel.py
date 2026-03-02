@@ -35,7 +35,7 @@ import json
 from typing import Any
 
 from kai import Message, ToolResult
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 from kagent.hooks import Hooks
 

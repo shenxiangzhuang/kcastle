@@ -11,35 +11,33 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any, cast
 
-from kai.chunk import (
-    Chunk,
-    TextChunk,
-    ThinkChunk,
-    ThinkSignatureChunk,
-    ToolCallDelta,
-    ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
-)
 from kai.errors import EmptyResponseError, ProviderError
-from kai.event import (
+from kai.providers import LLM
+from kai.types.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
+from kai.types.stream import (
+    Chunk,
     DoneEvent,
     ErrorEvent,
     StartEvent,
     StreamEvent,
+    TextChunk,
     TextDeltaEvent,
     TextEndEvent,
     TextStartEvent,
+    ThinkChunk,
     ThinkDeltaEvent,
     ThinkEndEvent,
+    ThinkSignatureChunk,
     ThinkStartEvent,
+    ToolCallDelta,
     ToolCallDeltaEvent,
+    ToolCallEnd,
     ToolCallEndEvent,
+    ToolCallStart,
     ToolCallStartEvent,
+    UsageChunk,
 )
-from kai.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
-from kai.providers import LLM
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 logger = logging.getLogger("kai.stream")
 
@@ -75,7 +73,7 @@ async def stream(
     tool_count = len(context.tools) if context.tools else 0
     logger.debug(
         "LLM stream start: provider=%s model=%s messages=%d tools=%d",
-        llm.name,
+        getattr(llm, "provider", getattr(llm, "name", "unknown")),
         llm.model,
         msg_count,
         tool_count,
@@ -94,7 +92,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
-            llm.name,
+            getattr(llm, "provider", getattr(llm, "name", "unknown")),
             llm.model,
             e,
             duration_ms,
@@ -108,7 +106,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.exception(
             "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
-            llm.name,
+            getattr(llm, "provider", getattr(llm, "name", "unknown")),
             llm.model,
             e,
             duration_ms,
@@ -128,7 +126,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream empty response: provider=%s model=%s duration=%.0fms",
-            llm.name,
+            getattr(llm, "provider", getattr(llm, "name", "unknown")),
             llm.model,
             duration_ms,
         )
@@ -142,7 +140,7 @@ async def stream(
     usage = final.usage
     logger.info(
         "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
-        llm.name,
+        getattr(llm, "provider", getattr(llm, "name", "unknown")),
         llm.model,
         usage.input_tokens if usage else 0,
         usage.output_tokens if usage else 0,

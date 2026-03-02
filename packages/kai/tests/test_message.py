@@ -3,7 +3,8 @@
 import pytest
 from pydantic import ValidationError
 
-from kai.message import (
+from kai.tool import Tool
+from kai.types.message import (
     ContentPart,
     Context,
     ImagePart,
@@ -12,8 +13,7 @@ from kai.message import (
     ThinkPart,
     ToolCall,
 )
-from kai.tool import Tool
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
 class TestContentParts:

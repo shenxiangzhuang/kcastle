@@ -5,53 +5,52 @@ from typing import Any
 
 import pytest
 
-from kai.chunk import (
-    Chunk,
-    TextChunk,
-    ThinkChunk,
-    ThinkSignatureChunk,
-    ToolCallDelta,
-    ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
-)
 from kai.errors import EmptyResponseError, ProviderError
-from kai.event import (
+from kai.providers import LLMBase
+from kai.stream import complete, stream
+from kai.types.message import Context, Message
+from kai.types.stream import (
+    Chunk,
     DoneEvent,
     ErrorEvent,
     StartEvent,
     StreamEvent,
+    TextChunk,
     TextDeltaEvent,
     TextEndEvent,
     TextStartEvent,
+    ThinkChunk,
     ThinkDeltaEvent,
     ThinkEndEvent,
+    ThinkSignatureChunk,
     ThinkStartEvent,
+    ToolCallDelta,
+    ToolCallEnd,
     ToolCallEndEvent,
+    ToolCallStart,
     ToolCallStartEvent,
+    UsageChunk,
 )
-from kai.message import Context, Message
-from kai.stream import complete, stream
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
-class MockProvider:
+class MockProvider(LLMBase):
     """A mock provider that yields pre-configured chunks."""
 
     def __init__(
         self,
         chunks: Sequence[Chunk],
         *,
-        name: str = "mock",
+        provider: str = "mock",
         model: str = "mock-1",
     ) -> None:
         self._chunks = chunks
-        self._name = name
+        self._provider = provider
         self._model = model
 
     @property
-    def name(self) -> str:
-        return self._name
+    def provider(self) -> str:
+        return self._provider
 
     @property
     def model(self) -> str:
@@ -62,14 +61,14 @@ class MockProvider:
             yield chunk
 
 
-class ErrorProvider:
+class ErrorProvider(LLMBase):
     """A mock provider that raises an error."""
 
     def __init__(self, error: Exception) -> None:
         self._error = error
 
     @property
-    def name(self) -> str:
+    def provider(self) -> str:
         return "error"
 
     @property

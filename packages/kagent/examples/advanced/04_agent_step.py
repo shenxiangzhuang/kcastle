@@ -21,7 +21,7 @@ import asyncio
 import os
 
 from kai import AnthropicMessages, Context, Message, Tool, ToolResult
-from kai.event import TextDeltaEvent
+from kai.types.stream import TextDeltaEvent
 from pydantic import BaseModel, Field
 
 from kagent import agent_step

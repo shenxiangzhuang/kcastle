@@ -14,10 +14,10 @@ uv add kai
 
 ```python
 import asyncio
-from kai import OpenAICompletions, Context, Message, complete
+from kai import OpenAIChatCompletions, Context, Message, complete
 
 async def main():
-    provider = OpenAICompletions(model="gpt-4o")
+    provider = OpenAIChatCompletions(model="gpt-4o")
     context = Context(
         system="You are a helpful assistant.",
         messages=[Message(role="user", content="Hello!")],
@@ -33,7 +33,7 @@ asyncio.run(main())
 ### Layer Boundary
 
 `kai` defines provider interfaces and concrete provider clients, but does not own provider factory/registry wiring.
-Provider instantiation policy (protocol mapping and custom registries) belongs to the application layer (for this repo: `kcastle`).
+Provider instantiation policy (provider mapping and custom registries) belongs to the application layer (for this repo: `kcastle`).
 
 ### Two Entry Points
 
@@ -46,9 +46,9 @@ Provider instantiation policy (protocol mapping and custom registries) belongs t
 
 | Provider | Class | Env Variable |
 |----------|-------|-------------|
-| OpenAI Completions (+ compatible APIs) | `OpenAICompletions(model=...)` | `OPENAI_API_KEY` |
+| OpenAI Chat Completions (+ compatible APIs) | `OpenAIChatCompletions(model=...)` | `OPENAI_API_KEY` |
 | OpenAI Responses | `OpenAIResponses(model=...)` | `OPENAI_API_KEY` |
-| Anthropic | `Anthropic(model=...)` | `ANTHROPIC_API_KEY` |
+| Anthropic Messages | `AnthropicMessages(model=...)` | `ANTHROPIC_API_KEY` |
 
 Both classes accept `api_key` and `base_url` for explicit configuration.
 
@@ -116,17 +116,17 @@ if response.tool_calls:
 
 ### Custom / Compatible Providers
 
-Use `OpenAICompletions` with `base_url` for any OpenAI-compatible API:
+Use `OpenAIChatCompletions` with `base_url` for any OpenAI-compatible API:
 
 ```python
 # DeepSeek
-provider = OpenAICompletions(model="deepseek-chat", base_url="https://api.deepseek.com")
+provider = OpenAIChatCompletions(model="deepseek-chat", base_url="https://api.deepseek.com")
 
 # Local Ollama
-provider = OpenAICompletions(model="llama3", api_key="ollama", base_url="http://localhost:11434/v1")
+provider = OpenAIChatCompletions(model="llama3", api_key="ollama", base_url="http://localhost:11434/v1")
 
 # Together AI
-provider = OpenAICompletions(model="meta-llama/...", base_url="https://api.together.xyz/v1")
+provider = OpenAIChatCompletions(model="meta-llama/...", base_url="https://api.together.xyz/v1")
 ```
 
 ### Error Handling
@@ -149,12 +149,12 @@ With `stream()`, errors arrive as `ErrorEvent` instead of exceptions.
 ### Extended Thinking (Anthropic)
 
 ```python
-provider = Anthropic(
+provider = AnthropicMessages(
     model="claude-sonnet-4-20250514",
     thinking={"type": "enabled", "budget_tokens": 5000},
 )
 
-async for event in await stream(provider, context):
+async for event in stream(provider, context):
     match event:
         case ThinkDeltaEvent(delta=text):
             print(f"💭 {text}", end="")

@@ -173,23 +173,19 @@ parallel naming.
 
 ## Provider Configuration
 
-OpenAI and Anthropic in kai are **API protocols**, not concrete providers.
-Any vendor that speaks the OpenAI Chat Completions API (DeepSeek,
-Minimax, …) or the Anthropic Messages API can be configured as a named
-*provider* in `config.yaml`.
+Providers are configured as explicit provider profiles in `config.yaml`.
+Each profile maps directly to a concrete kai provider class.
 
 ### Built-in provider registry
 
-kcastle maintains a built-in registry of supported vendors. Each vendor is
-registered as **two** providers — one for the OpenAI protocol and one for the
-Anthropic protocol:
+kcastle maintains a built-in registry of supported providers:
 
-| Provider name | Vendor | Protocol | Base URL | Env var |
-|--------------|--------|----------|----------|---------|
-| `deepseek-openai` | DeepSeek | openai | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
-| `deepseek-anthropic` | DeepSeek | anthropic | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
-| `minimax-openai` | MiniMax | openai | `https://api.minimax.chat/v1` | `MINIMAX_API_KEY` |
-| `minimax-anthropic` | MiniMax | anthropic | `https://api.minimax.chat/v1` | `MINIMAX_API_KEY` |
+| Provider name | Class | Base URL | Env var |
+|--------------|-------|----------|---------|
+| `deepseek-openai` | `DeepseekOpenAI` | `https://api.deepseek.com` | `DEEPSEEK_API_KEY` |
+| `deepseek-anthropic` | `DeepseekAnthropic` | `https://api.deepseek.com/anthropic` | `DEEPSEEK_API_KEY` |
+| `minimax-openai` | `MinimaxOpenAI` | `https://api.minimaxi.com/v1` | `MINIMAX_API_KEY` |
+| `minimax-anthropic` | `MinimaxAnthropic` | `https://api.minimaxi.com/anthropic` | `MINIMAX_API_KEY` |
 
 Each built-in provider includes a default model catalogue, so the user config
 does **not** need to list models.
@@ -257,8 +253,8 @@ have already exported the relevant env var.
 
 | Aspect | Decision |
 |--------|----------|
-| Protocol vs provider | `protocol` selects the kai driver (`openai` → `OpenAICompletions`); the provider *name* is free-form. |
-| Dual protocol | Each vendor is registered twice (OpenAI + Anthropic), allowing the user to switch protocols without extra config. |
+| Provider identity | `provider` is the canonical config key and maps directly to a factory constructor. |
+| Compatibility families | DeepSeek and MiniMax each expose two explicit provider profiles (OpenAI-compatible and Anthropic-compatible). |
 | Built-in models | Builtins include model catalogues; user config only overrides when needed. |
 | Env var interpolation | `${VAR}` in any YAML string value is expanded at load time. |
 | Default selection | `default.provider` + `default.model` selects the active combination. Overridable via `KCASTLE_PROVIDER` / `KCASTLE_MODEL` env vars. |

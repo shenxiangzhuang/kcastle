@@ -32,41 +32,59 @@ from kai.errors import (
     TimeoutError,
 )
 
-# Stream events
-from kai.event import (
-    DoneEvent,
-    ErrorEvent,
-    StartEvent,
-    StreamEvent,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
-    ThinkDeltaEvent,
-    ThinkEndEvent,
-    ThinkStartEvent,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
-)
-
-# Message types
-from kai.message import ContentPart, Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
-
 # Protocol contract
 from kai.providers import (
     LLM,
+    LLMBase,
 )
 from kai.providers.anthropic import AnthropicMessages
+from kai.providers.deepseek import DeepseekAnthropic, DeepseekOpenAI
+from kai.providers.minimax import MinimaxAnthropic, MinimaxOpenAI
 
 # Concrete implementations
-from kai.providers.openai import OpenAIChatCompletions, OpenAIResponses
+from kai.providers.openai import (
+    OpenAIChatCompletions,
+    OpenAIResponses,
+)
 from kai.stream import complete, stream
 
 # Tool definition
 from kai.tool import Tool, ToolResult
 
-# Token usage
-from kai.usage import TokenUsage
+# Types
+from kai.types.message import (
+    ContentPart,
+    Context,
+    ImagePart,
+    Message,
+    TextPart,
+    ThinkPart,
+    ToolCall,
+)
+from kai.types.stream import (
+    Chunk,
+    DoneEvent,
+    ErrorEvent,
+    StartEvent,
+    StreamEvent,
+    TextChunk,
+    TextDeltaEvent,
+    TextEndEvent,
+    TextStartEvent,
+    ThinkChunk,
+    ThinkDeltaEvent,
+    ThinkEndEvent,
+    ThinkSignatureChunk,
+    ThinkStartEvent,
+    ToolCallDelta,
+    ToolCallDeltaEvent,
+    ToolCallEnd,
+    ToolCallEndEvent,
+    ToolCallStart,
+    ToolCallStartEvent,
+    UsageChunk,
+)
+from kai.types.usage import TokenUsage
 
 __all__ = [
     # Functions
@@ -83,7 +101,16 @@ __all__ = [
     # Tool
     "Tool",
     "ToolResult",
-    # Events
+    # Stream chunks
+    "Chunk",
+    "TextChunk",
+    "ThinkChunk",
+    "ThinkSignatureChunk",
+    "ToolCallStart",
+    "ToolCallDelta",
+    "ToolCallEnd",
+    "UsageChunk",
+    # Stream events
     "StreamEvent",
     "StartEvent",
     "TextStartEvent",
@@ -99,6 +126,7 @@ __all__ = [
     "ErrorEvent",
     # Protocol
     "LLM",
+    "LLMBase",
     # Usage
     "TokenUsage",
     # Errors
@@ -112,6 +140,10 @@ __all__ = [
     "OpenAIChatCompletions",
     "OpenAIResponses",
     "AnthropicMessages",
+    "DeepseekOpenAI",
+    "MinimaxOpenAI",
+    "DeepseekAnthropic",
+    "MinimaxAnthropic",
 ]
 
 _logging.getLogger("kai").addHandler(_logging.NullHandler())

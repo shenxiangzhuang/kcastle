@@ -1,6 +1,6 @@
 """Tests for kai.usage module."""
 
-from kai.usage import TokenUsage
+from kai.types.usage import TokenUsage
 
 
 def test_token_usage_total_input_tokens() -> None:

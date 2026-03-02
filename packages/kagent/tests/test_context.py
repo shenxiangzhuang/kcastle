@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from conftest import MockProvider, text_chunks
 from kai import Message
-from kai.message import ToolCall
+from kai.types.message import ToolCall
 
 from kagent.context import (
     AdaptiveBuilder,
