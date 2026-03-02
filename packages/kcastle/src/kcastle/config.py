@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from kai import ProviderConfig as KaiProviderConfig
+from kcastle.provider_config import ProviderConfig
 
 _DEFAULT_HOME = Path.home() / ".kcastle"
 _CONFIG_FILENAME = "config.yaml"
@@ -72,12 +72,12 @@ class ModelConfig:
 class ProviderEntry:
     """Configuration entry for one provider profile.
 
-    Keeps runtime provider construction fields in ``provider`` (kai-owned)
+    Keeps runtime provider construction fields in ``provider`` (kcastle-owned)
     and catalog-only fields (model list) in this entry.
     """
 
-    provider: KaiProviderConfig
-    """Runtime provider config owned by kai."""
+    provider: ProviderConfig
+    """Runtime provider config owned by kcastle."""
 
     models: list[ModelConfig] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     """Available models for this provider."""
@@ -117,8 +117,8 @@ class ProviderEntry:
                 return m
         return None
 
-    def to_provider_config(self, model_id: str) -> KaiProviderConfig:
-        """Build a kai ProviderConfig for the given model.
+    def to_provider_config(self, model_id: str) -> ProviderConfig:
+        """Build a provider config for the given model.
 
         Raises:
             ValueError: If the requested model is not available in this provider.
@@ -190,13 +190,13 @@ class CastleConfig:
             )
         return self.providers[self.default_provider]
 
-    def provider_config(self, provider_name: str, model_id: str) -> KaiProviderConfig:
+    def provider_config(self, provider_name: str, model_id: str) -> ProviderConfig:
         """Build a provider config from explicit provider/model selection."""
         if provider_name not in self.providers:
             raise ValueError(f"Unknown provider: {provider_name!r}")
         return self.providers[provider_name].to_provider_config(model_id)
 
-    def active_provider_config(self) -> KaiProviderConfig:
+    def active_provider_config(self) -> ProviderConfig:
         """Build a provider config for the active provider/model selection."""
         return self.active_provider().to_provider_config(self.default_model)
 
@@ -299,7 +299,7 @@ def _build_provider_config(
         else None
     )
     return ProviderEntry(
-        provider=KaiProviderConfig(
+        provider=ProviderConfig(
             vendor=vendor,
             protocol=protocol,
             model="",

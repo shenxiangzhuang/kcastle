@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Any
 
 from kagent import Agent, Trace
-from kai import Provider, Tool, create_provider
+from kai import Provider, Tool
 
 from kcastle.channels import Channel
 from kcastle.channels.cli import CLIChannel
 from kcastle.channels.telegram import TelegramChannel
 from kcastle.config import CastleConfig, load_config
 from kcastle.log import logger
+from kcastle.provider_factory import create_provider
 from kcastle.session.manager import SessionManager
 from kcastle.skills.manager import SkillManager, find_project_root
 from kcastle.skills.skill import Skill

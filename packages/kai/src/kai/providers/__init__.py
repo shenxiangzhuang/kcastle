@@ -9,11 +9,6 @@ from typing import Any, Protocol, runtime_checkable
 
 from kai.chunk import Chunk
 from kai.message import Context
-from kai.providers.factory import (
-    ProviderConfig,
-    ProviderRegistry,
-    create_provider,
-)
 
 
 @runtime_checkable
@@ -72,7 +67,4 @@ class Provider(Protocol):
 
 __all__ = [
     "Provider",
-    "ProviderConfig",
-    "ProviderRegistry",
-    "create_provider",
 ]

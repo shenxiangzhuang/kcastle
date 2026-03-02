@@ -6,11 +6,12 @@ from typing import Any, cast
 
 import pytest
 from kagent import Agent
-from kai import Context, ProviderConfig
+from kai import Context
 from kai.chunk import Chunk
 
 from kcastle.castle import Castle
 from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderEntry
+from kcastle.provider_config import ProviderConfig
 from kcastle.session.manager import SessionManager
 
 

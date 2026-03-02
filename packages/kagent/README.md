@@ -9,6 +9,7 @@ Core agent runtime for the K agent framework — a context-first, three-level ag
 3. **No framework concepts** — Callbacks are plain function parameters. No Hooks, no Middleware.
 4. **Unified tools** — Uses `kai.Tool` directly. Define inner `Params(BaseModel)` for typed, auto-schema tools.
 5. **kai-native** — Uses `kai.Message`, `kai.Context`, `kai.Provider`, `kai.StreamEvent` directly.
+6. **App-owned provider assembly** — `kagent` consumes a concrete `kai.Provider`; provider factory/registry concerns stay in the application layer.
 
 ## Architecture
 

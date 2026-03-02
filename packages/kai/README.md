@@ -30,6 +30,11 @@ asyncio.run(main())
 
 ## API Overview
 
+### Layer Boundary
+
+`kai` defines provider interfaces and concrete provider clients, but does not own provider factory/registry wiring.
+Provider instantiation policy (protocol mapping and custom registries) belongs to the application layer (for this repo: `kcastle`).
+
 ### Two Entry Points
 
 | Function | Returns | Use When |

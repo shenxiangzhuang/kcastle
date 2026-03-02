@@ -1,44 +1,18 @@
-"""Provider factory and registry.
-
-Defines a typed provider config and a registry-based construction mechanism
-for creating concrete providers from protocol names.
-"""
+"""Provider factory and registry for kcastle application layer."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from kai.providers.anthropic import Anthropic
 from kai.providers.openai import OpenAICompletions, OpenAIResponses
+from kcastle.provider_config import ProviderConfig
 
 if TYPE_CHECKING:
-    from kai.providers import Provider
+    from kai import Provider
 
 
 type ProviderFactory = Callable[["ProviderConfig"], "Provider"]
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    """Provider construction config.
-
-    A config captures vendor identity, protocol, model, and endpoint/auth
-    options needed to construct a concrete provider instance.
-    """
-
-    vendor: str
-    protocol: str
-    model: str
-    api_key: str | None = None
-    base_url: str | None = None
-    extra_body: dict[str, object] | None = None
-    options: dict[str, object] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
-
-    @property
-    def name(self) -> str:
-        """Canonical profile name, e.g. ``deepseek-openai-completions``."""
-        return f"{self.vendor}-{self.protocol.lower()}"
 
 
 class ProviderRegistry:
@@ -59,9 +33,6 @@ class ProviderRegistry:
             available = sorted(self._factories.keys())
             raise ValueError(f"Unknown protocol: {config.protocol!r}. Available: {available}")
         return factory(config)
-
-
-_DEFAULT_REGISTRY = ProviderRegistry()
 
 
 def _openai_completions_factory(config: ProviderConfig) -> "Provider":
@@ -105,6 +76,7 @@ def _anthropic_factory(config: ProviderConfig) -> "Provider":
     return Anthropic(**kwargs)  # type: ignore[arg-type]
 
 
+_DEFAULT_REGISTRY = ProviderRegistry()
 _DEFAULT_REGISTRY.register("openai-completions", _openai_completions_factory)
 _DEFAULT_REGISTRY.register("openai-responses", _openai_responses_factory)
 _DEFAULT_REGISTRY.register("anthropic", _anthropic_factory)

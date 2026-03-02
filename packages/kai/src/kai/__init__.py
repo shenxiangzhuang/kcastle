@@ -55,9 +55,6 @@ from kai.message import ContentPart, Context, ImagePart, Message, TextPart, Thin
 # Provider protocol
 from kai.providers import (
     Provider,
-    ProviderConfig,
-    ProviderRegistry,
-    create_provider,
 )
 from kai.providers.anthropic import Anthropic
 
@@ -102,9 +99,6 @@ __all__ = [
     "ErrorEvent",
     # Provider
     "Provider",
-    "ProviderConfig",
-    "ProviderRegistry",
-    "create_provider",
     # Usage
     "TokenUsage",
     # Errors

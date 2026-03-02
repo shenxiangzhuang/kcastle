@@ -47,6 +47,7 @@ All endpoints share the same `Agent` instance and its `Trace`. This means:
 ### What kcastle owns
 
 - **Endpoint adapters** — CLI, Telegram, Discord (and future endpoints)
+- **Provider factory/registry** — protocol-to-provider construction policy (`kcastle.provider_factory`)
 - **Persistence** — `TraceStore` configuration and session management
 - **Tool registration** — Domain-specific tools for the agent
 - **Configuration** — Agent setup, system prompts, model selection

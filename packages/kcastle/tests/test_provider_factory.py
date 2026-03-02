@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from kai import ProviderConfig, ProviderRegistry, create_provider
 from kai.providers.openai import OpenAICompletions, OpenAIResponses
+
+from kcastle.provider_config import ProviderConfig
+from kcastle.provider_factory import ProviderRegistry, create_provider
 
 
 def test_create_provider_openai_completions() -> None:
