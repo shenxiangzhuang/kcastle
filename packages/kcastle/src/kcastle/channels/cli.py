@@ -61,11 +61,30 @@ def _render_event(event: AgentEvent) -> None:
 
 _COMMANDS = {
     "/session list": "List all sessions",
-    "/session new": "Create a new session",
+    "/session new": "Create a new session (optional: --id <id> [name])",
     "/session switch": "Switch to a session by ID",
     "/help": "Show available commands",
     "/quit": "Exit the CLI",
 }
+
+
+def parse_session_new_args(args: list[str]) -> tuple[str | None, str]:
+    """Parse args after ``/session new``.
+
+    Supports:
+    - ``/session new``
+    - ``/session new <name...>``
+    - ``/session new --id <id> [name...]``
+    """
+    if args[:1] == ["--id"]:
+        if len(args) < 2:
+            raise ValueError("Usage: /session new [--id <id>] [name]")
+        sid = args[1]
+        name = " ".join(args[2:]) if len(args) > 2 else ""
+        return sid, name
+
+    name = " ".join(args) if args else ""
+    return None, name
 
 
 async def _handle_command(line: str, castle: Castle, session: Session) -> Session | None:
@@ -83,7 +102,7 @@ async def _handle_command(line: str, castle: Castle, session: Session) -> Sessio
     if cmd == "/quit":
         return None  # Caller checks line == "/quit"
 
-    if cmd == "/session":
+    if parts[0] == "/session":
         if len(parts) < 2:
             print("Usage: /session <list|new|switch>")
             return None
@@ -104,8 +123,12 @@ async def _handle_command(line: str, castle: Castle, session: Session) -> Sessio
             return None
 
         if sub == "new":
-            name = " ".join(parts[2:]) if len(parts) > 2 else ""
-            sid = parts[2] if len(parts) > 2 and not name.startswith('"') else None
+            try:
+                sid, name = parse_session_new_args(parts[2:])
+            except ValueError as e:
+                print(str(e))
+                return None
+
             new_session = manager.create(session_id=sid, name=name)
             print(f'Created session "{new_session.id}"')
             return new_session
@@ -119,7 +142,7 @@ async def _handle_command(line: str, castle: Castle, session: Session) -> Sessio
                 new_session = manager.get_or_create(target_id)
                 print(f'Switched to session "{target_id}"')
                 return new_session
-            except Exception as e:
+            except (KeyError, ValueError) as e:
                 print(f"Error: {e}")
                 return None
 
@@ -195,7 +218,7 @@ class CLIChannel:
                 user_input = castle.prepare_user_input(line)
                 async for event in session.run(user_input):
                     _render_event(event)
-            except Exception as e:
+            except (RuntimeError, ValueError, KeyError) as e:
                 print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
 
         manager.suspend(session.id)

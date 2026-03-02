@@ -148,8 +148,9 @@ class SessionManager:
                         last_active_at=meta.last_active_at,
                     )
                 )
-            except Exception:
+            except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError):
                 logger.warning("Skipping invalid session directory: %s", child)
+                logger.debug("Invalid session metadata at %s", meta_path, exc_info=True)
 
         results.sort(key=lambda s: s.last_active_at, reverse=True)
         return results
