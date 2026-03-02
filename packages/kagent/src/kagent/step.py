@@ -166,8 +166,11 @@ async def agent_step(
                 try:
                     result = await _execute_tool(tool, arguments)
                 except Exception as e:
-                    result = ToolResult.error(str(e))
-                    logger.error("Tool %s execution error: %s", tool_call.name, e)
+                    # Intentional recovery boundary:
+                    # tool errors are converted into ToolResult.error so the
+                    # agent can continue and surface failure to the model.
+                    result = ToolResult.error(f"{type(e).__name__}: {e}")
+                    logger.exception("Tool %s execution error", tool_call.name)
 
             # on_tool_result interception
             if on_tool_result is not None:

@@ -403,8 +403,11 @@ async def _stream_impl(
         yield ErrorEvent(error=e, partial=state.build_partial())
         return
     except Exception as e:
+        # Intentional recovery boundary:
+        # unknown provider exceptions are converted into ErrorEvent so callers
+        # receive a unified stream contract instead of raised exceptions.
         duration_ms = (time.perf_counter() - t0) * 1000
-        logger.error(
+        logger.exception(
             "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
             provider.name,
             provider.model,
