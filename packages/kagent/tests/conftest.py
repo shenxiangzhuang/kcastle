@@ -16,7 +16,7 @@ class MockProvider(ProviderBase):
     """A mock provider that yields pre-configured chunks.
 
     Supports multiple turns via a list of chunk sequences.
-    The first call to stream_raw returns the first sequence, etc.
+    The first call to stream returns the first sequence, etc.
     """
 
     def __init__(
@@ -39,7 +39,7 @@ class MockProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         if self._call_index >= len(self._turns):
             raise RuntimeError("MockProvider exhausted: no more turns configured")
         chunks = self._turns[self._call_index]
@@ -49,7 +49,7 @@ class MockProvider(ProviderBase):
 
 
 class ErrorProvider(ProviderBase):
-    """A mock provider that raises an error on stream_raw."""
+    """A mock provider that raises an error on stream."""
 
     def __init__(self, error: Exception, *, name: str = "error", model: str = "error-1") -> None:
         self._error = error
@@ -64,7 +64,7 @@ class ErrorProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         raise self._error
         # Make this a valid async generator
         yield  # type: ignore[misc]  # pragma: no cover

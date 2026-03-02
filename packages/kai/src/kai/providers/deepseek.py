@@ -48,6 +48,3 @@ class DeepseekAnthropic(AnthropicBase):
             thinking=thinking,
             **client_kwargs,
         )
-
-
-__all__ = ["DeepseekOpenAI", "DeepseekAnthropic"]

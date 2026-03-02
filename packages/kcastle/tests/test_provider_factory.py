@@ -58,7 +58,7 @@ def test_provider_registry_register() -> None:
         def model(self) -> str:
             return self._model
 
-        async def stream_raw(self, context, **kwargs):  # type: ignore[no-untyped-def]
+        async def stream(self, context, **kwargs):  # type: ignore[no-untyped-def]
             if False:
                 yield None
 

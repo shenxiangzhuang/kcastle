@@ -1,6 +1,6 @@
 """Tests for OpenAI Completions provider — message serialization and stream conversion.
 
-Tests exercise the public ``stream_raw()`` method with a mocked OpenAI client,
+Tests exercise the public ``stream()`` method with a mocked OpenAI client,
 verifying both the message format sent to the API and the chunks produced from
 the streamed response.
 """
@@ -82,7 +82,7 @@ async def _stream_raw(
     api_chunks: list[ChatCompletionChunk],
     context: Context | None = None,
 ) -> tuple[list[Chunk], dict[str, Any]]:
-    """Call ``OpenAIChatCompletions.stream_raw()`` with a mocked client.
+    """Call ``OpenAIChatCompletions.stream()`` with a mocked client.
 
     Returns ``(output_chunks, captured_create_kwargs)``.
     """
@@ -106,7 +106,7 @@ async def _stream_raw(
         mock_cls.return_value.chat.completions.create = _fake_create
         provider = OpenAIChatCompletions(model="test-model", api_key="test-key")
 
-    output = [c async for c in provider.stream_raw(context)]
+    output = [c async for c in provider.stream(context)]
     return output, captured
 
 
