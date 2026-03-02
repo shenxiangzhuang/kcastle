@@ -6,13 +6,13 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from kai import Context, Tool, ToolResult
-from kai.providers.base import LLMBase
+from kai.providers.base import ProviderBase
 from kai.types.stream import Chunk, TextChunk, ToolCallDelta, ToolCallEnd, ToolCallStart, UsageChunk
 from kai.types.usage import TokenUsage
 from pydantic import BaseModel, Field
 
 
-class MockProvider(LLMBase):
+class MockProvider(ProviderBase):
     """A mock provider that yields pre-configured chunks.
 
     Supports multiple turns via a list of chunk sequences.
@@ -48,7 +48,7 @@ class MockProvider(LLMBase):
             yield chunk
 
 
-class ErrorProvider(LLMBase):
+class ErrorProvider(ProviderBase):
     """A mock provider that raises an error on stream_raw."""
 
     def __init__(self, error: Exception, *, name: str = "error", model: str = "error-1") -> None:

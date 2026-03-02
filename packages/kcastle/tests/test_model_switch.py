@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 from kagent import Agent
 from kai import Context
-from kai.providers import LLMBase
+from kai.providers import ProviderBase
 from kai.types.stream import Chunk
 
 from kcastle.castle import Castle
@@ -16,17 +16,13 @@ from kcastle.provider_config import ProviderConfig
 from kcastle.session.manager import SessionManager
 
 
-class DummyProvider(LLMBase):
+class DummyProvider(ProviderBase):
     def __init__(self, *, provider: str, model: str) -> None:
         self._provider = provider
         self._model = model
 
     @property
     def provider(self) -> str:
-        return self._provider
-
-    @property
-    def name(self) -> str:
         return self._provider
 
     @property

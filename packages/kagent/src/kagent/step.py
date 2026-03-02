@@ -12,7 +12,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from kai import LLM, Context, DoneEvent, ErrorEvent, Message, Tool, ToolResult, stream
+from kai import Context, DoneEvent, ErrorEvent, Message, ProviderBase, Tool, ToolResult, stream
 from kai.tool import get_params_class
 from pydantic import ValidationError
 
@@ -57,7 +57,7 @@ async def _execute_tool(tool: Tool, arguments: dict[str, object]) -> ToolResult:
 
 async def agent_step(
     *,
-    llm: LLM,
+    llm: ProviderBase,
     context: Context,
     tools: list[Tool],
     on_tool_result: OnToolResultFn | None = None,

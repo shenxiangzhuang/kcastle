@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from kai.errors import EmptyResponseError, ProviderError
-from kai.providers import LLMBase
+from kai.providers import ProviderBase
 from kai.stream import complete, stream
 from kai.types.message import Context, Message
 from kai.types.stream import (
@@ -34,7 +34,7 @@ from kai.types.stream import (
 from kai.types.usage import TokenUsage
 
 
-class MockProvider(LLMBase):
+class MockProvider(ProviderBase):
     """A mock provider that yields pre-configured chunks."""
 
     def __init__(
@@ -61,7 +61,7 @@ class MockProvider(LLMBase):
             yield chunk
 
 
-class ErrorProvider(LLMBase):
+class ErrorProvider(ProviderBase):
     """A mock provider that raises an error."""
 
     def __init__(self, error: Exception) -> None:

@@ -1,7 +1,5 @@
 """Provider contracts and concrete implementations."""
 
-from kai.providers.base import LLMBase
+from kai.providers.base import ProviderBase
 
-LLM = LLMBase
-
-__all__ = ["LLM", "LLMBase"]
+__all__ = ["ProviderBase"]

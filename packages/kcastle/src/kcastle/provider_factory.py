@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from kai import LLM
+from kai import ProviderBase
 from kai.providers.anthropic import AnthropicMessages
 from kai.providers.deepseek import DeepseekAnthropic, DeepseekOpenAI
 from kai.providers.minimax import MinimaxAnthropic, MinimaxOpenAI
@@ -15,7 +15,7 @@ from kai.providers.openai import (
 
 from kcastle.provider_config import ProviderConfig
 
-type ProviderFactory = Callable[[ProviderConfig], LLM]
+type ProviderFactory = Callable[[ProviderConfig], ProviderBase]
 
 
 class ProviderRegistry:
@@ -28,8 +28,8 @@ class ProviderRegistry:
         """Register a factory for a provider ID."""
         self._factories[provider.lower()] = factory
 
-    def create(self, config: ProviderConfig) -> LLM:
-        """Create an LLM from config using registered provider factory."""
+    def create(self, config: ProviderConfig) -> ProviderBase:
+        """Create an ProviderBase from config using registered provider factory."""
         provider = config.provider.lower()
         factory = self._factories.get(provider)
         if factory is None:
@@ -38,7 +38,7 @@ class ProviderRegistry:
         return factory(config)
 
 
-def _openai_completions_factory(config: ProviderConfig) -> LLM:
+def _openai_completions_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -53,7 +53,7 @@ def _openai_completions_factory(config: ProviderConfig) -> LLM:
     return OpenAIChatCompletions(**kwargs)  # type: ignore[arg-type]
 
 
-def _deepseek_openai_factory(config: ProviderConfig) -> LLM:
+def _deepseek_openai_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -68,7 +68,7 @@ def _deepseek_openai_factory(config: ProviderConfig) -> LLM:
     return DeepseekOpenAI(**kwargs)  # type: ignore[arg-type]
 
 
-def _minimax_openai_factory(config: ProviderConfig) -> LLM:
+def _minimax_openai_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -83,7 +83,7 @@ def _minimax_openai_factory(config: ProviderConfig) -> LLM:
     return MinimaxOpenAI(**kwargs)  # type: ignore[arg-type]
 
 
-def _openai_responses_factory(config: ProviderConfig) -> LLM:
+def _openai_responses_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -96,7 +96,7 @@ def _openai_responses_factory(config: ProviderConfig) -> LLM:
     return OpenAIResponses(**kwargs)  # type: ignore[arg-type]
 
 
-def _anthropic_factory(config: ProviderConfig) -> LLM:
+def _anthropic_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -109,7 +109,7 @@ def _anthropic_factory(config: ProviderConfig) -> LLM:
     return AnthropicMessages(**kwargs)  # type: ignore[arg-type]
 
 
-def _deepseek_anthropic_factory(config: ProviderConfig) -> LLM:
+def _deepseek_anthropic_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -122,7 +122,7 @@ def _deepseek_anthropic_factory(config: ProviderConfig) -> LLM:
     return DeepseekAnthropic(**kwargs)  # type: ignore[arg-type]
 
 
-def _minimax_anthropic_factory(config: ProviderConfig) -> LLM:
+def _minimax_anthropic_factory(config: ProviderConfig) -> ProviderBase:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -145,8 +145,12 @@ _DEFAULT_REGISTRY.register("minimax-openai", _minimax_openai_factory)
 _DEFAULT_REGISTRY.register("minimax-anthropic", _minimax_anthropic_factory)
 
 
-def create_provider(config: ProviderConfig, *, registry: ProviderRegistry | None = None) -> LLM:
-    """Create an LLM from config.
+def create_provider(
+    config: ProviderConfig,
+    *,
+    registry: ProviderRegistry | None = None,
+) -> ProviderBase:
+    """Create a ProviderBase from config.
 
     Uses the default registry unless a custom *registry* is supplied.
     """

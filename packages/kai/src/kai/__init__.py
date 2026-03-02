@@ -33,10 +33,7 @@ from kai.errors import (
 )
 
 # Protocol contract
-from kai.providers import (
-    LLM,
-    LLMBase,
-)
+from kai.providers import ProviderBase
 from kai.providers.anthropic import AnthropicMessages
 from kai.providers.deepseek import DeepseekAnthropic, DeepseekOpenAI
 from kai.providers.minimax import MinimaxAnthropic, MinimaxOpenAI
@@ -125,8 +122,7 @@ __all__ = [
     "DoneEvent",
     "ErrorEvent",
     # Protocol
-    "LLM",
-    "LLMBase",
+    "ProviderBase",
     # Usage
     "TokenUsage",
     # Errors

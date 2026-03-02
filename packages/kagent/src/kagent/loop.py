@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
-from kai import LLM, Message
+from kai import Message, ProviderBase
 from kai.types.usage import TokenUsage
 
 from kagent.context import ContextBuilder, DefaultBuilder
@@ -44,7 +44,7 @@ Receives ``(state, assistant_message)``. Return ``False`` to stop."""
 
 async def agent_loop(
     *,
-    llm: LLM,
+    llm: ProviderBase,
     state: AgentState,
     context_builder: ContextBuilder | None = None,
     on_tool_result: OnToolResultFn | None = None,
@@ -91,7 +91,7 @@ async def agent_loop(
     agent_t0 = time.perf_counter()
     total_usage: TokenUsage | None = None
 
-    _hooks.on_agent_start(run_id=run_id, model=llm.model, provider=llm.name)
+    _hooks.on_agent_start(run_id=run_id, model=llm.model, provider=llm.provider)
 
     turn_count = 0
     while max_turns == 0 or turn_count < max_turns:

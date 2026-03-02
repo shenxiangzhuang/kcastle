@@ -23,7 +23,7 @@ from openai.types.responses import (
 )
 
 from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
-from kai.providers.base import LLMBase
+from kai.providers.base import ProviderBase
 from kai.types.message import (
     ContentPart,
     Context,
@@ -44,7 +44,7 @@ from kai.types.stream import (
 from kai.types.usage import TokenUsage
 
 
-class OpenAIBase(LLMBase, ABC):
+class OpenAIBase(ProviderBase, ABC):
     def __init__(
         self,
         *,
