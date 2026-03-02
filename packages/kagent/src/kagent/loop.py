@@ -33,7 +33,7 @@ from kagent.state import AgentState
 from kagent.step import OnToolResultFn, agent_step
 from kagent.trace.entry import TraceEntry
 
-_log = logging.getLogger("kagent.loop")
+logger = logging.getLogger("kagent.loop")
 
 # --- Callback type aliases ---
 
@@ -183,7 +183,7 @@ async def agent_loop(
                 )
 
             elif isinstance(event, AgentError):
-                _log.error("[%s] Agent error at turn %d: %s", run_id, turn_count, event.error)
+                logger.error("[%s] Agent error at turn %d: %s", run_id, turn_count, event.error)
                 agent_duration_ms = (time.perf_counter() - agent_t0) * 1000
                 _hooks.on_agent_end(
                     run_id=run_id,
