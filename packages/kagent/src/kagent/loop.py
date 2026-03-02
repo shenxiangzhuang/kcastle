@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
-from kai import Message, Provider
+from kai import LLM, Message
 from kai.usage import TokenUsage
 
 from kagent.context import ContextBuilder, DefaultBuilder
@@ -44,7 +44,7 @@ Receives ``(state, assistant_message)``. Return ``False`` to stop."""
 
 async def agent_loop(
     *,
-    provider: Provider,
+    llm: LLM,
     state: AgentState,
     context_builder: ContextBuilder | None = None,
     on_tool_result: OnToolResultFn | None = None,
@@ -61,7 +61,7 @@ async def agent_loop(
     ``TraceEntry`` objects in ``state.trace``.
 
     Args:
-        provider: The kai LLM provider.
+        llm: The kai LLM implementation.
         state: Mutable agent state (system, trace, tools).
         context_builder: Controls how ``AgentState`` becomes ``kai.Context``.
             If ``None``, uses ``DefaultBuilder()`` (pass-through).
@@ -77,7 +77,7 @@ async def agent_loop(
 
         state = AgentState(system="You are helpful.")
         state.trace.append(TraceEntry.user(Message(role="user", content="Hello!")))
-        async for event in agent_loop(provider=provider, state=state):
+        async for event in agent_loop(llm=provider, state=state):
             match event:
                 case TurnEnd(message=msg):
                     print(msg.extract_text())
@@ -91,7 +91,7 @@ async def agent_loop(
     agent_t0 = time.perf_counter()
     total_usage: TokenUsage | None = None
 
-    _hooks.on_agent_start(run_id=run_id, model=provider.model, provider=provider.name)
+    _hooks.on_agent_start(run_id=run_id, model=llm.model, provider=llm.name)
 
     turn_count = 0
     while max_turns == 0 or turn_count < max_turns:
@@ -105,7 +105,7 @@ async def agent_loop(
         # Delegate to agent_step — all LLM streaming + tool execution happens there
         assistant_msg: Message | None = None
         async for event in agent_step(
-            provider=provider,
+            llm=llm,
             context=context,
             tools=state.tools,
             on_tool_result=on_tool_result,

@@ -39,7 +39,7 @@ class TestAgentLoopTextOnly:
         provider = MockProvider([text_chunks("Hello!")])
         state = _state_with_user_msg("Hi", system="You are helpful.")
 
-        events = [e async for e in agent_loop(provider=provider, state=state)]
+        events = [e async for e in agent_loop(llm=provider, state=state)]
 
         assert isinstance(events[0], AgentStart)
         assert isinstance(events[-1], AgentEnd)
@@ -67,7 +67,7 @@ class TestAgentLoopWithTools:
         )
         state = _state_with_user_msg("echo something", system="Use tools.", tools=[echo])
 
-        events = [e async for e in agent_loop(provider=provider, state=state)]
+        events = [e async for e in agent_loop(llm=provider, state=state)]
 
         turn_ends = [e for e in events if isinstance(e, TurnEnd)]
         assert len(turn_ends) == 2
@@ -101,7 +101,7 @@ class TestAgentLoopMaxTurns:
         )
         state = _state_with_user_msg("go", tools=[echo])
 
-        events = [e async for e in agent_loop(provider=provider, state=state, max_turns=2)]
+        events = [e async for e in agent_loop(llm=provider, state=state, max_turns=2)]
 
         turn_ends = [e for e in events if isinstance(e, TurnEnd)]
         assert len(turn_ends) == 2  # Stopped at max_turns
@@ -129,12 +129,7 @@ class TestAgentLoopCallbacks:
         trace.append(TraceEntry.user(Message(role="user", content="new")))
         state = AgentState(system="Original system", trace=trace)
 
-        [
-            e
-            async for e in agent_loop(
-                provider=provider, state=state, context_builder=CustomBuilder()
-            )
-        ]
+        [e async for e in agent_loop(llm=provider, state=state, context_builder=CustomBuilder())]
 
         assert len(captured_contexts) == 1
         assert captured_contexts[0].system == "Custom system!"
@@ -158,8 +153,7 @@ class TestAgentLoopCallbacks:
         state = _state_with_user_msg("go", tools=[echo])
 
         events = [
-            e
-            async for e in agent_loop(provider=provider, state=state, on_tool_result=modify_result)
+            e async for e in agent_loop(llm=provider, state=state, on_tool_result=modify_result)
         ]
 
         exec_ends = [e for e in events if isinstance(e, ToolExecEnd)]
@@ -182,7 +176,7 @@ class TestAgentLoopCallbacks:
         state = _state_with_user_msg("go", tools=[echo])
 
         events = [
-            e async for e in agent_loop(provider=provider, state=state, should_continue=stop_always)
+            e async for e in agent_loop(llm=provider, state=state, should_continue=stop_always)
         ]
 
         turn_ends = [e for e in events if isinstance(e, TurnEnd)]

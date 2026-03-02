@@ -15,7 +15,7 @@ Run:
 import asyncio
 import os
 
-from kai import Anthropic
+from kai import AnthropicMessages
 
 from kagent import (
     AdaptiveBuilder,
@@ -27,13 +27,13 @@ from kagent import (
 )
 
 
-def make_provider() -> Anthropic:
-    # return Anthropic(
+def make_provider() -> AnthropicMessages:
+    # return AnthropicMessages(
     #     model="deepseek-chat",
     #     api_key=os.environ.get("DEEPSEEK_API_KEY"),
     #     base_url="https://api.deepseek.com/anthropic",
     # )
-    return Anthropic(
+    return AnthropicMessages(
         model="MiniMax-M2.5",
         api_key=os.environ.get("MINIMAX_API_KEY"),
         base_url="https://api.minimaxi.com/anthropic",
@@ -50,7 +50,7 @@ async def demo_sliding_window() -> None:
 
     provider = make_provider()
     agent = Agent(
-        provider=provider,
+        llm=provider,
         system="You are concise. Reply in one sentence.",
         context_builder=SlidingWindowBuilder(window_size=6),
     )
@@ -87,7 +87,7 @@ async def demo_adaptive() -> None:
     )
 
     agent = Agent(
-        provider=provider,
+        llm=provider,
         system=(
             "You are a helpful assistant. You have a tool to switch context strategies. "
             "When the conversation grows long, consider switching to 'compact' or 'window' "

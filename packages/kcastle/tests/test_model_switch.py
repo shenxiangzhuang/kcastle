@@ -64,7 +64,7 @@ def _make_castle(tmp_path: Path) -> Castle:
     default_provider = DummyProvider(name="mock", model="model-a")
 
     def _agent_factory(trace: Any) -> Agent:
-        return Agent(provider=default_provider, trace=trace)
+        return Agent(llm=default_provider, trace=trace)
 
     session_manager = SessionManager(
         sessions_dir=config.sessions_dir,
@@ -107,8 +107,8 @@ def test_switch_model_only_affects_target_session(
 
     castle.switch_model("mock", "model-b", session_id="s1")
 
-    assert s1.agent.provider.model == "model-b"
-    assert s2.agent.provider.model == "model-a"
+    assert s1.agent.llm.model == "model-b"
+    assert s2.agent.llm.model == "model-a"
     assert castle.get_active_model("s1") == ("mock", "model-b")
     assert castle.get_active_model("s2") == ("mock", "model-a")
 
@@ -151,4 +151,4 @@ def test_switch_model_persists_across_resume(
     s1_resumed = castle2.session_manager.get_or_create("s1")
 
     assert castle2.get_active_model("s1") == ("mock", "model-b")
-    assert s1_resumed.agent.provider.model == "model-b"
+    assert s1_resumed.agent.llm.model == "model-b"

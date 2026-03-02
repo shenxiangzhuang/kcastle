@@ -19,21 +19,21 @@ import asyncio
 import os
 from datetime import UTC, datetime
 
-from kai import Anthropic, Context, Message, Tool, ToolResult
+from kai import AnthropicMessages, Context, Message, Tool, ToolResult
 from pydantic import BaseModel
 
 from kagent import AgentError, AgentState, Trace, TraceEntry, TurnEnd, agent_loop
 
 
-def make_provider() -> Anthropic:
-    # return Anthropic(model="claude-sonnet-4-20250514")
+def make_provider() -> AnthropicMessages:
+    # return AnthropicMessages(model="claude-sonnet-4-20250514")
     # return OpenAICompletions(model="gpt-4o")
-    # return Anthropic(
+    # return AnthropicMessages(
     #     model="deepseek-chat",
     #     api_key=os.environ.get("DEEPSEEK_API_KEY"),
     #     base_url="https://api.deepseek.com/anthropic",
     # )
-    return Anthropic(
+    return AnthropicMessages(
         model="MiniMax-M2.5",
         api_key=os.environ.get("MINIMAX_API_KEY"),
         base_url="https://api.minimaxi.com/anthropic",
@@ -102,7 +102,7 @@ async def main() -> None:
 
     print("Running agent_loop…\n")
     async for event in agent_loop(
-        provider=make_provider(),
+        llm=make_provider(),
         state=state,
         context_builder=DateInjectingBuilder(),
         on_tool_result=on_tool_result,

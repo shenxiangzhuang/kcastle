@@ -1,4 +1,4 @@
-"""Anthropic Messages API provider."""
+"""Anthropic Messages API protocol implementation."""
 
 from __future__ import annotations
 
@@ -54,13 +54,13 @@ from kai.tool import Tool
 from kai.usage import TokenUsage
 
 
-class Anthropic:
-    """Anthropic Messages API provider.
+class AnthropicMessages:
+    """Anthropic Messages API implementation.
 
     Example::
 
-        provider = Anthropic(model="claude-sonnet-4-20250514")
-        provider = Anthropic(model="claude-sonnet-4-20250514", max_tokens=8192)
+        llm = AnthropicMessages(model="claude-sonnet-4-20250514")
+        llm = AnthropicMessages(model="claude-sonnet-4-20250514", max_tokens=8192)
     """
 
     def __init__(

@@ -20,7 +20,7 @@ Run:
 import asyncio
 import os
 
-from kai import Anthropic, Context, Message, Tool, ToolResult
+from kai import AnthropicMessages, Context, Message, Tool, ToolResult
 from kai.event import TextDeltaEvent
 from pydantic import BaseModel, Field
 
@@ -28,15 +28,15 @@ from kagent import agent_step
 from kagent.event import AgentError, StreamChunk, ToolExecEnd, ToolExecStart, TurnEnd
 
 
-def make_provider() -> Anthropic:
-    # return Anthropic(model="claude-sonnet-4-20250514")
+def make_provider() -> AnthropicMessages:
+    # return AnthropicMessages(model="claude-sonnet-4-20250514")
     # return OpenAICompletions(model="gpt-4o")
-    # return Anthropic(
+    # return AnthropicMessages(
     #     model="deepseek-chat",
     #     api_key=os.environ.get("DEEPSEEK_API_KEY"),
     #     base_url="https://api.deepseek.com/anthropic",
     # )
-    return Anthropic(
+    return AnthropicMessages(
         model="MiniMax-M2.5",
         api_key=os.environ.get("MINIMAX_API_KEY"),
         base_url="https://api.minimaxi.com/anthropic",
@@ -70,7 +70,7 @@ class Calculator(Tool):
 
 
 async def run_step(
-    provider: Anthropic,
+    provider: AnthropicMessages,
     messages: list[Message],
     tools: list[Tool],
     *,
@@ -88,7 +88,7 @@ async def run_step(
     assistant_msg: Message | None = None
     tool_results: list[Message] = []
 
-    async for event in agent_step(provider=provider, context=context, tools=tools):
+    async for event in agent_step(llm=provider, context=context, tools=tools):
         match event:
             case StreamChunk(event=e) if isinstance(e, TextDeltaEvent):
                 print(e.delta, end="", flush=True)

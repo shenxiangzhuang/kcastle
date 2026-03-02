@@ -21,7 +21,7 @@ import os
 import sys
 from datetime import UTC, datetime
 
-from kai import Anthropic, Message, Tool, ToolResult
+from kai import AnthropicMessages, Message, Tool, ToolResult
 from kai.event import TextDeltaEvent
 from pydantic import BaseModel, Field
 
@@ -38,15 +38,15 @@ from kagent import (
 )
 
 
-def make_provider() -> Anthropic:
-    # return Anthropic(model="claude-sonnet-4-20250514")
+def make_provider() -> AnthropicMessages:
+    # return AnthropicMessages(model="claude-sonnet-4-20250514")
     # return OpenAICompletions(model="gpt-4o")
-    return Anthropic(
+    return AnthropicMessages(
         model="deepseek-chat",
         api_key=os.environ.get("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com/anthropic",
     )
-    # return Anthropic(
+    # return AnthropicMessages(
     #     model="MiniMax-M2.5",
     #     api_key=os.environ.get("MINIMAX_API_KEY"),
     #     base_url="https://api.minimaxi.com/anthropic",
@@ -113,7 +113,7 @@ async def demo_non_streaming() -> None:
     print("=" * 60)
 
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant. Use tools when needed. Be concise.",
         tools=TOOLS,
     )
@@ -148,7 +148,7 @@ async def demo_streaming() -> None:
     print("=" * 60)
 
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant. Use tools when needed. Be concise.",
         tools=TOOLS,
     )
@@ -191,7 +191,7 @@ async def demo_interactive() -> None:
     # --- steer ---
     print("\n-- steer() --")
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant. Use tools when needed.",
         tools=TOOLS,
     )
@@ -203,7 +203,7 @@ async def demo_interactive() -> None:
     # --- abort ---
     print("\n-- abort() --")
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant.",
     )
 

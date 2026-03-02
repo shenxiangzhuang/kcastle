@@ -10,7 +10,7 @@ Example::
 
     from kagent import Agent
 
-    agent = Agent(provider=my_provider, system="You are helpful.", tools=[my_tool])
+    agent = Agent(llm=my_llm, system=\"You are helpful.\", tools=[my_tool])
     msg = await agent.complete("Hello!")
     print(msg.extract_text())
 """

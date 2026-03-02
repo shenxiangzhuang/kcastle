@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from kagent import Agent, Trace
-from kai import Provider, Tool
+from kai import LLM, Tool
 
 from kcastle.channels import Channel
 from kcastle.channels.cli import CLIChannel
@@ -26,7 +26,7 @@ from kcastle.skills.skill import Skill
 from kcastle.tools import create_builtin_tools
 
 
-def _create_provider(config: CastleConfig) -> Provider:
+def _create_provider(config: CastleConfig) -> LLM:
     """Create a kai Provider from the active provider config."""
     provider_config = config.active_provider_config()
     return create_provider(provider_config)
@@ -70,7 +70,7 @@ class Castle:
         session_manager: SessionManager,
         skill_manager: SkillManager,
         channels: list[Channel],
-        provider: Provider,
+        provider: LLM,
         system_prompt: str,
         skill_tools: list[Tool],
     ) -> None:
@@ -120,7 +120,7 @@ class Castle:
                 override = loaded.model_override
                 self._session_models[session_id] = override
                 try:
-                    loaded.agent.replace_provider(self._build_provider(*override))
+                    loaded.agent.replace_llm(self._build_provider(*override))
                 except (ValueError, RuntimeError):
                     logger.warning(
                         "Failed to restore session %s model override %s / %s",
@@ -155,17 +155,17 @@ class Castle:
             return user_input
         return f"{user_input}\n\n{expansion_block}"
 
-    def _build_provider(self, provider_name: str, model_id: str) -> Provider:
+    def _build_provider(self, provider_name: str, model_id: str) -> LLM:
         """Validate and build a provider instance for ``provider_name/model_id``."""
         provider_config = self._config.provider_config(provider_name, model_id)
         return create_provider(provider_config)
 
-    def _apply_provider_to_session(self, session_id: str, provider: Provider) -> None:
+    def _apply_provider_to_session(self, session_id: str, provider: LLM) -> None:
         """Hot-swap provider for one loaded session."""
         session = self._session_manager.get(session_id)
         if session is None:
             raise KeyError(f"Session {session_id!r} is not loaded")
-        session.agent.replace_provider(provider)
+        session.agent.replace_llm(provider)
 
     def available_models(self) -> list[tuple[str, str]]:
         """Return ``(provider_name, model_id)`` pairs for all active models.
@@ -275,7 +275,7 @@ class Castle:
 
         def agent_factory(trace: Trace) -> Agent:
             return Agent(
-                provider=provider,
+                llm=provider,
                 system=system_prompt,
                 tools=skill_tools if skill_tools else None,
                 trace=trace,

@@ -9,12 +9,12 @@ Run:
 import asyncio
 import os
 
-from kai import Context, ImagePart, Message, OpenAICompletions, TextPart, complete
+from kai import Context, ImagePart, Message, OpenAIChatCompletions, TextPart, complete
 
 
 async def main() -> None:
-    # provider = OpenAICompletions(model="gpt-4o")
-    provider = OpenAICompletions(
+    # provider = OpenAIChatCompletions(model="gpt-4o")
+    provider = OpenAIChatCompletions(
         model="deepseek-chat",
         api_key=os.environ.get("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com",

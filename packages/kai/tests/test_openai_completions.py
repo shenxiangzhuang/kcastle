@@ -20,7 +20,7 @@ from kai.chunk import (
     UsageChunk,
 )
 from kai.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
-from kai.providers.openai import OpenAICompletions
+from kai.providers.openai import OpenAIChatCompletions
 from kai.providers.openai._completions import (
     _extract_reasoning_text as _extract_reasoning_text,  # pyright: ignore[reportPrivateUsage]
 )
@@ -82,7 +82,7 @@ async def _stream_raw(
     api_chunks: list[ChatCompletionChunk],
     context: Context | None = None,
 ) -> tuple[list[Chunk], dict[str, Any]]:
-    """Call ``OpenAICompletions.stream_raw()`` with a mocked client.
+    """Call ``OpenAIChatCompletions.stream_raw()`` with a mocked client.
 
     Returns ``(output_chunks, captured_create_kwargs)``.
     """
@@ -104,7 +104,7 @@ async def _stream_raw(
 
     with patch("kai.providers.openai._completions.AsyncOpenAI") as mock_cls:
         mock_cls.return_value.chat.completions.create = _fake_create
-        provider = OpenAICompletions(model="test-model", api_key="test-key")
+        provider = OpenAIChatCompletions(model="test-model", api_key="test-key")
 
     output = [c async for c in provider.stream_raw(context)]
     return output, captured

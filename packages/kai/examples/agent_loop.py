@@ -29,7 +29,7 @@ from kai import (
     DoneEvent,
     ErrorEvent,
     Message,
-    OpenAICompletions,
+    OpenAIChatCompletions,
     StartEvent,
     TextDeltaEvent,
     TextEndEvent,
@@ -127,7 +127,7 @@ async def execute_tool_call(name: str, arguments: str) -> str:
 
 
 async def stream_round(
-    provider: OpenAICompletions,
+    provider: OpenAIChatCompletions,
     messages: list[Message],
     round_num: int,
 ) -> Message | None:
@@ -219,8 +219,8 @@ async def stream_round(
 
 async def agent_loop(question: str) -> None:
     """Run the agent loop: ask → tool calls → respond, repeat until done."""
-    # provider = OpenAICompletions(model="gpt-4o")
-    provider = OpenAICompletions(
+    # provider = OpenAIChatCompletions(model="gpt-4o")
+    provider = OpenAIChatCompletions(
         model="deepseek-reasoner",
         api_key=os.environ.get("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com",

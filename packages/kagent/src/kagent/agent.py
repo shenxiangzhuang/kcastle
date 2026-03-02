@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 
-from kai import Message, Provider, Tool
+from kai import LLM, Message, Tool
 
 from kagent.context import ContextBuilder
 from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, TurnEnd
@@ -34,7 +34,7 @@ class Agent:
     Example — streaming::
 
         agent = Agent(
-            provider=OpenAICompletions(model="gpt-4o"),
+            llm=OpenAIChatCompletions(model="gpt-4o"),
             system="You are helpful.",
             tools=[my_tool],
         )
@@ -60,7 +60,7 @@ class Agent:
     def __init__(
         self,
         *,
-        provider: Provider,
+        llm: LLM,
         system: str | None = None,
         tools: list[Tool] | None = None,
         trace: Trace | None = None,
@@ -78,7 +78,7 @@ class Agent:
         Pass an existing ``trace`` to resume a previous session.
         Pass ``hooks`` for observability (logging, tracing, metrics).
         """
-        self._provider = provider
+        self._llm = llm
         self._context_builder = context_builder
         self._on_tool_result = on_tool_result
         self._should_continue = should_continue
@@ -100,14 +100,14 @@ class Agent:
         return self._state
 
     @property
-    def provider(self) -> Provider:
-        """Current LLM provider used by this agent."""
-        return self._provider
+    def llm(self) -> LLM:
+        """Current LLM used by this agent."""
+        return self._llm
 
-    @provider.setter
-    def provider(self, provider: Provider) -> None:
-        """Thin alias for ``replace_provider()``."""
-        self.replace_provider(provider)
+    @llm.setter
+    def llm(self, llm: LLM) -> None:
+        """Thin alias for ``replace_llm()``."""
+        self.replace_llm(llm)
 
     @property
     def is_running(self) -> bool:
@@ -170,30 +170,30 @@ class Agent:
         if self._abort_event is not None:
             self._abort_event.set()
 
-    def replace_provider(self, provider: Provider) -> None:
-        """Replace the current LLM provider.
+    def replace_llm(self, llm: LLM) -> None:
+        """Replace the current LLM.
 
         Raises:
             RuntimeError: If called while the agent is running.
         """
-        old_provider = self._provider
-        old_name = old_provider.name
-        old_model = old_provider.model
-        new_name = provider.name
-        new_model = provider.model
+        old_llm = self._llm
+        old_name = old_llm.name
+        old_model = old_llm.model
+        new_name = llm.name
+        new_model = llm.model
 
         if self._running:
             logger.warning(
-                "replace_provider rejected while running: %s/%s -> %s/%s",
+                "replace_llm rejected while running: %s/%s -> %s/%s",
                 old_name,
                 old_model,
                 new_name,
                 new_model,
             )
-            raise RuntimeError("Cannot replace provider while agent is running")
+            raise RuntimeError("Cannot replace LLM while agent is running")
 
-        self._provider = provider
-        logger.info("Provider replaced: %s/%s -> %s/%s", old_name, old_model, new_name, new_model)
+        self._llm = llm
+        logger.info("LLM replaced: %s/%s -> %s/%s", old_name, old_model, new_name, new_model)
 
     async def _run_loop(self) -> AsyncIterator[AgentEvent]:
         """Run the agent loop with steering and follow-up support."""
@@ -207,7 +207,7 @@ class Agent:
             while True:
                 # Run the main loop
                 async for event in agent_loop(
-                    provider=self._provider,
+                    llm=self._llm,
                     state=self._state,
                     context_builder=self._context_builder,
                     on_tool_result=self._on_tool_result,

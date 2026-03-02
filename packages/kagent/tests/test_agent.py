@@ -20,7 +20,7 @@ class TestAgentRun:
     @pytest.mark.asyncio
     async def test_simple_run(self) -> None:
         provider = MockProvider([text_chunks("Hello!")])
-        agent = Agent(provider=provider, system="You are helpful.")
+        agent = Agent(llm=provider, system="You are helpful.")
 
         events = [e async for e in agent.run("Hi")]
 
@@ -37,7 +37,7 @@ class TestAgentRun:
                 text_chunks("Second response"),
             ]
         )
-        agent = Agent(provider=provider, system="Remember things.")
+        agent = Agent(llm=provider, system="Remember things.")
 
         _ = [e async for e in agent.run("Message 1")]
         _ = [e async for e in agent.run("Message 2")]
@@ -54,7 +54,7 @@ class TestAgentComplete:
     @pytest.mark.asyncio
     async def test_complete_returns_message(self) -> None:
         provider = MockProvider([text_chunks("The answer is 4.")])
-        agent = Agent(provider=provider, system="You are a calculator.")
+        agent = Agent(llm=provider, system="You are a calculator.")
 
         msg = await agent.complete("What's 2+2?")
         assert msg.extract_text() == "The answer is 4."
@@ -67,7 +67,7 @@ class TestAgentComplete:
                 text_chunks("Your name is Alice."),
             ]
         )
-        agent = Agent(provider=provider)
+        agent = Agent(llm=provider)
 
         await agent.complete("My name is Alice.")
         msg = await agent.complete("What's my name?")
@@ -84,7 +84,7 @@ class TestAgentWithTools:
                 text_chunks("Tool said: echo: test"),
             ]
         )
-        agent = Agent(provider=provider, tools=[echo])
+        agent = Agent(llm=provider, tools=[echo])
 
         msg = await agent.complete("Echo test")
         assert msg.extract_text() == "Tool said: echo: test"
@@ -93,38 +93,38 @@ class TestAgentWithTools:
 class TestAgentState:
     def test_state_is_accessible(self) -> None:
         provider = MockProvider([])
-        agent = Agent(provider=provider, system="Hello")
+        agent = Agent(llm=provider, system="Hello")
         assert agent.state.system == "Hello"
         assert agent.state.messages == []
 
     def test_state_is_mutable(self) -> None:
         provider = MockProvider([])
-        agent = Agent(provider=provider, system="v1")
+        agent = Agent(llm=provider, system="v1")
         agent.state.system = "v2"
         assert agent.state.system == "v2"
 
     def test_is_running_initially_false(self) -> None:
         provider = MockProvider([])
-        agent = Agent(provider=provider)
+        agent = Agent(llm=provider)
         assert agent.is_running is False
 
-    def test_provider_setter_is_alias_for_replace(self) -> None:
+    def test_llm_setter_is_alias_for_replace(self) -> None:
         provider1 = MockProvider([])
         provider2 = MockProvider([])
-        agent = Agent(provider=provider1)
+        agent = Agent(llm=provider1)
 
-        agent.provider = provider2
+        agent.llm = provider2
 
-        assert agent.provider is provider2
+        assert agent.llm is provider2
 
-    def test_provider_setter_raises_when_running(self) -> None:
+    def test_llm_setter_raises_when_running(self) -> None:
         provider1 = MockProvider([])
         provider2 = MockProvider([])
-        agent = Agent(provider=provider1)
+        agent = Agent(llm=provider1)
         agent._running = True  # pyright: ignore[reportPrivateUsage]
 
-        with pytest.raises(RuntimeError, match="Cannot replace provider while agent is running"):
-            agent.provider = provider2
+        with pytest.raises(RuntimeError, match="Cannot replace LLM while agent is running"):
+            agent.llm = provider2
 
 
 class TestAgentFollowUp:
@@ -136,7 +136,7 @@ class TestAgentFollowUp:
                 text_chunks("Follow-up done."),
             ]
         )
-        agent = Agent(provider=provider)
+        agent = Agent(llm=provider)
 
         # Queue a follow-up before running
         agent.follow_up(Message(role="user", content="And do this too."))
@@ -164,7 +164,7 @@ class TestAgentCallbacks:
                 text_chunks("Done"),
             ]
         )
-        agent = Agent(provider=provider, tools=[echo], on_tool_result=modify)
+        agent = Agent(llm=provider, tools=[echo], on_tool_result=modify)
 
         await agent.complete("go")
         # The tool result should have been intercepted
@@ -185,7 +185,7 @@ class TestAgentAbort:
                 text_chunks("Done"),
             ]
         )
-        agent = Agent(provider=provider, tools=[echo])
+        agent = Agent(llm=provider, tools=[echo])
 
         events: list[AgentEvent] = []
         async for event in agent.run("go"):
@@ -213,7 +213,7 @@ class TestAgentAbort:
     async def test_abort_before_run_is_noop(self) -> None:
         """abort() before run starts should be a no-op."""
         provider = MockProvider([text_chunks("Hi")])
-        agent = Agent(provider=provider)
+        agent = Agent(llm=provider)
 
         # abort before run — should not crash
         agent.abort()
@@ -231,7 +231,7 @@ class TestAgentAbort:
             ]
         )
         echo = make_echo_tool()
-        agent = Agent(provider=provider, tools=[echo])
+        agent = Agent(llm=provider, tools=[echo])
 
         async for event in agent.run("go"):
             if isinstance(event, TurnEnd):
@@ -247,7 +247,7 @@ class TestAgentErrorPropagation:
         from kai.errors import ProviderError
 
         provider = ErrorProvider(ProviderError("API connection failed"))
-        agent = Agent(provider=provider, system="test")
+        agent = Agent(llm=provider, system="test")
 
         with pytest.raises(RuntimeError, match="API connection failed") as exc_info:
             await agent.complete("Hello")
@@ -260,7 +260,7 @@ class TestAgentErrorPropagation:
         from kai.errors import ProviderError
 
         provider = ErrorProvider(ProviderError("stream broke"))
-        agent = Agent(provider=provider, system="test")
+        agent = Agent(llm=provider, system="test")
 
         events = [e async for e in agent.run("Hello")]
 
@@ -279,7 +279,7 @@ class TestAgentErrorPropagation:
 
         # A provider that returns only a usage chunk (no text, no tool call).
         provider = MockProvider([[UsageChunk(usage=TokenUsage(input_tokens=0, output_tokens=0))]])
-        agent = Agent(provider=provider, system="test")
+        agent = Agent(llm=provider, system="test")
 
         with pytest.raises(RuntimeError, match="Agent loop failed"):
             await agent.complete("Hello")

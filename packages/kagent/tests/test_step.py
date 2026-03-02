@@ -41,7 +41,7 @@ class TestAgentStepTextOnly:
         provider = MockProvider([text_chunks("Hello", " world")])
         ctx = _context()
 
-        events = [e async for e in agent_step(provider=provider, context=ctx, tools=[])]
+        events = [e async for e in agent_step(llm=provider, context=ctx, tools=[])]
 
         assert isinstance(events[0], TurnStart)
         # StreamChunks in the middle
@@ -66,7 +66,7 @@ class TestAgentStepWithTools:
         )
         ctx = _context(tools=[echo])
 
-        events = [e async for e in agent_step(provider=provider, context=ctx, tools=[echo])]
+        events = [e async for e in agent_step(llm=provider, context=ctx, tools=[echo])]
 
         # Should have: TurnStart, StreamChunks..., ToolExecStart, ToolExecEnd, TurnEnd
         assert isinstance(events[0], TurnStart)
@@ -96,7 +96,7 @@ class TestAgentStepWithTools:
         )
         ctx = _context()
 
-        events = [e async for e in agent_step(provider=provider, context=ctx, tools=[])]
+        events = [e async for e in agent_step(llm=provider, context=ctx, tools=[])]
 
         exec_ends = [e for e in events if isinstance(e, ToolExecEnd)]
         assert len(exec_ends) == 1
@@ -113,7 +113,7 @@ class TestAgentStepWithTools:
         )
         ctx = _context(tools=[failing])
 
-        events = [e async for e in agent_step(provider=provider, context=ctx, tools=[failing])]
+        events = [e async for e in agent_step(llm=provider, context=ctx, tools=[failing])]
 
         exec_ends = [e for e in events if isinstance(e, ToolExecEnd)]
         assert len(exec_ends) == 1
@@ -129,7 +129,7 @@ class TestAgentStepWithTools:
         )
         ctx = _context(tools=[echo])
 
-        events = [e async for e in agent_step(provider=provider, context=ctx, tools=[echo])]
+        events = [e async for e in agent_step(llm=provider, context=ctx, tools=[echo])]
 
         exec_ends = [e for e in events if isinstance(e, ToolExecEnd)]
         assert len(exec_ends) == 1

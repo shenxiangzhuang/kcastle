@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+
 from kcastle.provider_config import ProviderConfig
 
 _DEFAULT_HOME = Path.home() / ".kcastle"
@@ -326,15 +327,9 @@ def _parse_providers(data: dict[str, Any]) -> dict[str, ProviderEntry]:
 
         protocols_raw = cfg_dict.get("protocols")
         if not isinstance(protocols_raw, dict):
-            raise ValueError(
-                f"Provider vendor {vendor!r} must define a 'protocols' mapping"
-            )
+            raise ValueError(f"Provider vendor {vendor!r} must define a 'protocols' mapping")
 
-        common: dict[str, Any] = {
-            k: v
-            for k, v in cfg_dict.items()
-            if k != "protocols"
-        }
+        common: dict[str, Any] = {k: v for k, v in cfg_dict.items() if k != "protocols"}
         for protocol_name, protocol_cfg in protocols_raw.items():  # pyright: ignore[reportUnknownVariableType]
             protocol = str(protocol_name).lower()  # pyright: ignore[reportUnknownArgumentType]
             protocol_dict = _to_str_dict(protocol_cfg)  # pyright: ignore[reportUnknownArgumentType]
@@ -455,8 +450,7 @@ def _merge_builtin_providers(data: dict[str, Any]) -> None:
             user_protocols_raw = user_cfg.get("protocols")
             if isinstance(user_protocols_raw, dict):
                 user_protocols = {
-                    str(k): v
-                    for k, v in cast(dict[object, object], user_protocols_raw).items()
+                    str(k): v for k, v in cast(dict[object, object], user_protocols_raw).items()
                 }
                 protocol_names = set(base_protocols.keys()) | set(user_protocols.keys())
                 merged_protocols: dict[str, Any] = {}

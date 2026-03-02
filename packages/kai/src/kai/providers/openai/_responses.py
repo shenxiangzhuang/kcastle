@@ -1,4 +1,4 @@
-"""OpenAI Responses API provider."""
+"""OpenAI Responses API protocol implementation."""
 
 from __future__ import annotations
 
@@ -36,15 +36,15 @@ from kai.usage import TokenUsage
 
 
 class OpenAIResponses:
-    """OpenAI Responses API provider.
+    """OpenAI Responses API implementation.
 
     Uses the newer ``/v1/responses`` endpoint. Supports streaming with
     rich event types including reasoning summaries and function calls.
 
     Example::
 
-        provider = OpenAIResponses(model="gpt-4.1")
-        provider = OpenAIResponses(
+        llm = OpenAIResponses(model="gpt-4.1")
+        llm = OpenAIResponses(
             model="o3",
             reasoning={"effort": "medium", "summary": "auto"},
         )

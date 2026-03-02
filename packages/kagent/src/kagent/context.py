@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from kai import Context, Message, Provider, Tool, ToolResult, complete
+from kai import LLM, Context, Message, Tool, ToolResult, complete
 from kai.message import TextPart, ThinkPart
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -119,15 +119,15 @@ class CompactingBuilder:
     efficient.
 
     Args:
-        provider: LLM provider used for summarization.
+        llm: LLM used for summarization.
         max_preserved: Number of recent messages to keep verbatim (default 6).
         threshold: Trigger compaction when message count exceeds this (default 20).
         summary_system: System prompt for the summarization call.
 
     Example::
 
-        builder = CompactingBuilder(provider=my_provider, threshold=30)
-        agent = Agent(provider=my_provider, system="…", context_builder=builder)
+        builder = CompactingBuilder(my_llm, threshold=30)
+        agent = Agent(llm=my_llm, system="…", context_builder=builder)
     """
 
     _DEFAULT_SUMMARY_SYSTEM = (
@@ -138,7 +138,7 @@ class CompactingBuilder:
 
     def __init__(
         self,
-        provider: Provider,
+        llm: LLM,
         *,
         max_preserved: int = 6,
         threshold: int = 20,
@@ -148,7 +148,7 @@ class CompactingBuilder:
             raise ValueError("max_preserved must be >= 1")
         if threshold < max_preserved + 1:
             raise ValueError("threshold must be > max_preserved")
-        self._provider = provider
+        self._llm = llm
         self._max_preserved = max_preserved
         self._threshold = threshold
         self._summary_system = summary_system or self._DEFAULT_SUMMARY_SYSTEM
@@ -196,7 +196,7 @@ class CompactingBuilder:
             system=self._summary_system,
             messages=[Message(role="user", content=conversation_text)],
         )
-        result = await complete(self._provider, ctx)
+        result = await complete(self._llm, ctx)
         return result.extract_text()
 
 

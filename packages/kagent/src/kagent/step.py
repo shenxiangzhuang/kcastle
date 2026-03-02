@@ -12,7 +12,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from kai import Context, DoneEvent, ErrorEvent, Message, Provider, Tool, ToolResult, stream
+from kai import LLM, Context, DoneEvent, ErrorEvent, Message, Tool, ToolResult, stream
 from kai.tool import get_params_class
 from pydantic import ValidationError
 
@@ -57,7 +57,7 @@ async def _execute_tool(tool: Tool, arguments: dict[str, object]) -> ToolResult:
 
 async def agent_step(
     *,
-    provider: Provider,
+    llm: LLM,
     context: Context,
     tools: list[Tool],
     on_tool_result: OnToolResultFn | None = None,
@@ -68,7 +68,7 @@ async def agent_step(
     builds the ``Context`` and decides what to do with the results.
 
     Args:
-        provider: The kai LLM provider.
+        llm: The kai LLM implementation.
         context: The complete LLM context (system + messages + tool schemas).
         tools: Executable tools for dispatching tool calls from the LLM response.
         on_tool_result: Optional callback to intercept/modify tool results.
@@ -83,7 +83,7 @@ async def agent_step(
             messages=[Message(role="user", content="Hello!")],
             tools=my_tools,
         )
-        async for event in agent_step(provider=provider, context=context, tools=my_tools):
+        async for event in agent_step(llm=llm, context=context, tools=my_tools):
             match event:
                 case TurnEnd(message=msg):
                     print(msg.extract_text())
@@ -93,7 +93,7 @@ async def agent_step(
     # Stream LLM response
     llm_t0 = time.perf_counter()
     assistant_msg: Message | None = None
-    async for stream_event in stream(provider, context):
+    async for stream_event in stream(llm, context):
         yield StreamChunk(event=stream_event)
 
         match stream_event:

@@ -1,6 +1,6 @@
 """Core streaming API — stream() and complete().
 
-stream() consumes raw Chunks from a Provider, accumulates an assistant Message,
+stream() consumes raw Chunks from an LLM implementation, accumulates an assistant Message,
 and yields rich StreamEvent objects with partial message snapshots.
 
 complete() is a convenience wrapper that collects the full message.
@@ -38,33 +38,33 @@ from kai.event import (
     ToolCallStartEvent,
 )
 from kai.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
-from kai.providers import Provider
+from kai.providers import LLM
 from kai.usage import TokenUsage
 
 logger = logging.getLogger("kai.stream")
 
 
 async def stream(
-    provider: Provider,
+    llm: LLM,
     context: Context,
     **kwargs: Any,
 ) -> AsyncIterator[StreamEvent]:
-    """Stream events from an LLM provider.
+    """Stream events from an LLM.
 
-    Consumes raw chunks from the provider and yields rich stream events,
+    Consumes raw chunks from the LLM implementation and yields rich stream events,
     each carrying an accumulated partial assistant message.
 
     Args:
-        provider: The LLM provider to use.
+        llm: The LLM implementation to use.
         context: Conversation context (system prompt, messages, tools).
-        **kwargs: Provider-specific options (temperature, max_tokens, etc.).
+        **kwargs: API-specific options (temperature, max_tokens, etc.).
 
     Yields:
         StreamEvent objects. The final event is always DoneEvent or ErrorEvent.
 
     Example::
 
-        async for event in stream(provider, context):
+        async for event in stream(llm, context):
             match event:
                 case TextDeltaEvent(delta=text):
                     print(text, end="")
@@ -75,8 +75,8 @@ async def stream(
     tool_count = len(context.tools) if context.tools else 0
     logger.debug(
         "LLM stream start: provider=%s model=%s messages=%d tools=%d",
-        provider.name,
-        provider.model,
+        llm.name,
+        llm.model,
         msg_count,
         tool_count,
     )
@@ -87,15 +87,15 @@ async def stream(
     yield StartEvent()
 
     try:
-        async for chunk in provider.stream_raw(context, **kwargs):
+        async for chunk in llm.stream_raw(context, **kwargs):
             for event in state.process_chunk(chunk):
                 yield event
     except ProviderError as e:
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
-            provider.name,
-            provider.model,
+            llm.name,
+            llm.model,
             e,
             duration_ms,
         )
@@ -103,13 +103,13 @@ async def stream(
         return
     except Exception as e:
         # Intentional recovery boundary:
-        # unknown provider exceptions are converted into ErrorEvent so callers
+        # unknown exceptions are converted into ErrorEvent so callers
         # receive a unified stream contract instead of raised exceptions.
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.exception(
             "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
-            provider.name,
-            provider.model,
+            llm.name,
+            llm.model,
             e,
             duration_ms,
         )
@@ -128,12 +128,12 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream empty response: provider=%s model=%s duration=%.0fms",
-            provider.name,
-            provider.model,
+            llm.name,
+            llm.model,
             duration_ms,
         )
         yield ErrorEvent(
-            error=EmptyResponseError("The provider returned an empty response."),
+            error=EmptyResponseError("The LLM returned an empty response."),
             partial=final,
         )
         return
@@ -142,8 +142,8 @@ async def stream(
     usage = final.usage
     logger.info(
         "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
-        provider.name,
-        provider.model,
+        llm.name,
+        llm.model,
         usage.input_tokens if usage else 0,
         usage.output_tokens if usage else 0,
         stop_reason,
@@ -154,28 +154,28 @@ async def stream(
 
 
 async def complete(
-    provider: Provider,
+    llm: LLM,
     context: Context,
     **kwargs: Any,
 ) -> Message:
-    """Get a complete response from an LLM provider.
+    """Get a complete response from an LLM.
 
     Convenience wrapper around stream() that collects all events and returns
     the final assistant message.
 
     Args:
-        provider: The LLM provider to use.
+        llm: The LLM implementation to use.
         context: Conversation context (system prompt, messages, tools).
-        **kwargs: Provider-specific options (temperature, max_tokens, etc.).
+        **kwargs: API-specific options (temperature, max_tokens, etc.).
 
     Returns:
         The complete assistant Message with content, tool_calls, and usage.
 
     Raises:
-        ProviderError: If the provider encounters an error.
-        EmptyResponseError: If the provider returns no content.
+        ProviderError: If the LLM call encounters an error.
+        EmptyResponseError: If the LLM returns no content.
     """
-    async for event in stream(provider, context, **kwargs):
+    async for event in stream(llm, context, **kwargs):
         match event:
             case DoneEvent(message=message):
                 return message

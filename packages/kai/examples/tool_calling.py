@@ -25,7 +25,7 @@ from kai import (
     Context,
     DoneEvent,
     Message,
-    OpenAICompletions,
+    OpenAIChatCompletions,
     StartEvent,
     TextDeltaEvent,
     TextEndEvent,
@@ -86,9 +86,9 @@ async def execute_tool_call(name: str, arguments: str) -> str:
     return result.output
 
 
-def make_provider() -> OpenAICompletions:
-    # return OpenAICompletions(model="gpt-4o")
-    return OpenAICompletions(
+def make_provider() -> OpenAIChatCompletions:
+    # return OpenAIChatCompletions(model="gpt-4o")
+    return OpenAIChatCompletions(
         model="deepseek-chat",
         api_key=os.environ.get("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com",

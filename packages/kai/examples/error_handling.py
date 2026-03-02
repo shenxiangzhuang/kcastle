@@ -13,7 +13,7 @@ from kai import (
     DoneEvent,
     ErrorEvent,
     Message,
-    OpenAICompletions,
+    OpenAIChatCompletions,
     stream,
 )
 from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
@@ -23,8 +23,8 @@ async def example_complete_error_handling() -> None:
     """Error handling with complete() — use try/except."""
     from kai import complete
 
-    # provider = OpenAICompletions(model="gpt-4o", api_key="invalid-key")
-    provider = OpenAICompletions(
+    # provider = OpenAIChatCompletions(model="gpt-4o", api_key="invalid-key")
+    provider = OpenAIChatCompletions(
         model="deepseek-chat",
         api_key="invalid-key",
         base_url="https://api.deepseek.com",
@@ -48,8 +48,8 @@ async def example_complete_error_handling() -> None:
 
 async def example_stream_error_handling() -> None:
     """Error handling with stream() — errors arrive as ErrorEvent."""
-    # provider = OpenAICompletions(model="gpt-4o", api_key="invalid-key")
-    provider = OpenAICompletions(
+    # provider = OpenAIChatCompletions(model="gpt-4o", api_key="invalid-key")
+    provider = OpenAIChatCompletions(
         model="deepseek-chat",
         api_key="invalid-key",
         base_url="https://api.deepseek.com",

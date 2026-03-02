@@ -11,21 +11,21 @@ Run:
 import asyncio
 import os
 
-from kai import Anthropic, Tool, ToolResult
+from kai import AnthropicMessages, Tool, ToolResult
 from pydantic import BaseModel, Field
 
 from kagent import Agent
 
 
-def make_provider() -> Anthropic:
-    # return Anthropic(model="claude-sonnet-4-20250514")
+def make_provider() -> AnthropicMessages:
+    # return AnthropicMessages(model="claude-sonnet-4-20250514")
     # return OpenAICompletions(model="gpt-4o")
-    # return Anthropic(
+    # return AnthropicMessages(
     #     model="deepseek-chat",
     #     api_key=os.environ.get("DEEPSEEK_API_KEY"),
     #     base_url="https://api.deepseek.com/anthropic",
     # )
-    return Anthropic(
+    return AnthropicMessages(
         model="MiniMax-M2.5",
         api_key=os.environ.get("MINIMAX_API_KEY"),
         base_url="https://api.minimaxi.com/anthropic",
@@ -67,7 +67,7 @@ class SearchWeb(Tool):
 
 async def main() -> None:
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant. Use tools when needed.",
         tools=[GetWeather(), SearchWeb()],
     )

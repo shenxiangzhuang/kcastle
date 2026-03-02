@@ -1,4 +1,4 @@
-"""OpenAI Chat Completions provider."""
+"""OpenAI Chat Completions API protocol implementation."""
 
 from __future__ import annotations
 
@@ -35,15 +35,15 @@ from kai.providers.openai._common import build_tools, convert_error
 from kai.usage import TokenUsage
 
 
-class OpenAICompletions:
-    """OpenAI Chat Completions API provider.
+class OpenAIChatCompletions:
+    """OpenAI Chat Completions API implementation.
 
     Supports OpenAI and any OpenAI-compatible API (via base_url).
 
     Example::
 
-        provider = OpenAICompletions(model="gpt-4o")
-        provider = OpenAICompletions(
+        llm = OpenAIChatCompletions(model="gpt-4o")
+        llm = OpenAIChatCompletions(
             model="deepseek-chat",
             base_url="https://api.deepseek.com",
         )

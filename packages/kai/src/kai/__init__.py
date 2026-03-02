@@ -1,21 +1,21 @@
-"""kai — Unified multi-provider LLM API.
+"""kai — Unified LLM API layer.
 
-Provides a simple, provider-agnostic interface for streaming LLM completions
+Provides a simple, API-agnostic interface for streaming LLM completions
 with tool calling support. Two entry points:
 
-- ``stream(provider, context)`` — async iterator of rich stream events
-- ``complete(provider, context)`` — get a complete response message
+- ``stream(llm, context)`` — async iterator of rich stream events
+- ``complete(llm, context)`` — get a complete response message
 
 Example::
 
-    from kai import OpenAICompletions, Context, Message, complete
+    from kai import OpenAIChatCompletions, Context, Message, complete
 
-    provider = OpenAICompletions(model="gpt-4o")
+    llm = OpenAIChatCompletions(model="gpt-4o")
     context = Context(
         system="You are a helpful assistant.",
         messages=[Message(role="user", content="Hello!")],
     )
-    message = await complete(provider, context)
+    message = await complete(llm, context)
     print(message.extract_text())
 """
 
@@ -52,14 +52,14 @@ from kai.event import (
 # Message types
 from kai.message import ContentPart, Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 
-# Provider protocol
+# Protocol contract
 from kai.providers import (
-    Provider,
+    LLM,
 )
-from kai.providers.anthropic import Anthropic
+from kai.providers.anthropic import AnthropicMessages
 
-# Concrete providers
-from kai.providers.openai import OpenAICompletions, OpenAIResponses
+# Concrete implementations
+from kai.providers.openai import OpenAIChatCompletions, OpenAIResponses
 from kai.stream import complete, stream
 
 # Tool definition
@@ -97,8 +97,8 @@ __all__ = [
     "ToolCallEndEvent",
     "DoneEvent",
     "ErrorEvent",
-    # Provider
-    "Provider",
+    # Protocol
+    "LLM",
     # Usage
     "TokenUsage",
     # Errors
@@ -108,10 +108,10 @@ __all__ = [
     "TimeoutError",
     "StatusError",
     "EmptyResponseError",
-    # Providers
-    "OpenAICompletions",
+    # Implementations
+    "OpenAIChatCompletions",
     "OpenAIResponses",
-    "Anthropic",
+    "AnthropicMessages",
 ]
 
 _logging.getLogger("kai").addHandler(_logging.NullHandler())

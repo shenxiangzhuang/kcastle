@@ -16,6 +16,7 @@ import yaml
 
 from kcastle.config import config_file_path
 
+
 @dataclass(frozen=True, slots=True)
 class VendorPreset:
     """First-run provider preset driven by environment variable detection."""
@@ -117,10 +118,7 @@ def run_setup(home: Path | None = None) -> Path:
         sys.exit(1)
 
     chosen = detected[0]
-    print(
-        f"\n  Default: {_BOLD}{chosen.provider}/{chosen.protocol}{_RESET} "
-        f"({chosen.model})"
-    )
+    print(f"\n  Default: {_BOLD}{chosen.provider}/{chosen.protocol}{_RESET} ({chosen.model})")
 
     if not _confirm_write(path):
         print("  Aborted.\n")

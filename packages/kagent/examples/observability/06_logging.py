@@ -21,7 +21,7 @@ import asyncio
 import logging
 import os
 
-from kai import Anthropic, Tool, ToolResult
+from kai import AnthropicMessages, Tool, ToolResult
 from pydantic import BaseModel, Field
 
 from kagent import Agent
@@ -31,8 +31,8 @@ from kagent import Agent
 # ---------------------------------------------------------------------------
 
 
-def make_provider() -> Anthropic:
-    return Anthropic(
+def make_provider() -> AnthropicMessages:
+    return AnthropicMessages(
         model="deepseek-chat",
         api_key=os.environ.get("DEEPSEEK_API_KEY"),
         base_url="https://api.deepseek.com/anthropic",
@@ -93,7 +93,7 @@ async def main() -> None:
         logger.addHandler(handler)
 
     agent = Agent(
-        provider=make_provider(),
+        llm=make_provider(),
         system="You are a helpful assistant. Use tools when needed. Be concise.",
         tools=TOOLS,
     )

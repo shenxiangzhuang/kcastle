@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from kai.providers.openai import OpenAICompletions, OpenAIResponses
+from kai.providers.openai import OpenAIChatCompletions, OpenAIResponses
 
 from kcastle.provider_config import ProviderConfig
 from kcastle.provider_factory import ProviderRegistry, create_provider
@@ -17,7 +17,7 @@ def test_create_provider_openai_completions() -> None:
             base_url="https://api.deepseek.com",
         )
     )
-    assert isinstance(provider, OpenAICompletions)
+    assert isinstance(provider, OpenAIChatCompletions)
     assert provider.model == "deepseek-chat"
 
 

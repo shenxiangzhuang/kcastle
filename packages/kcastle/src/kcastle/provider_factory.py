@@ -1,22 +1,20 @@
-"""Provider factory and registry for kcastle application layer."""
+"""LLM factory and registry for kcastle application layer."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
 
-from kai.providers.anthropic import Anthropic
-from kai.providers.openai import OpenAICompletions, OpenAIResponses
+from kai import LLM
+from kai.providers.anthropic import AnthropicMessages
+from kai.providers.openai import OpenAIChatCompletions, OpenAIResponses
+
 from kcastle.provider_config import ProviderConfig
 
-if TYPE_CHECKING:
-    from kai import Provider
-
-
-type ProviderFactory = Callable[["ProviderConfig"], "Provider"]
+type ProviderFactory = Callable[[ProviderConfig], LLM]
 
 
 class ProviderRegistry:
-    """Registry mapping protocol names to provider factory callables."""
+    """Registry mapping protocol names to factory callables."""
 
     def __init__(self) -> None:
         self._factories: dict[str, ProviderFactory] = {}
@@ -25,8 +23,8 @@ class ProviderRegistry:
         """Register a factory for a protocol."""
         self._factories[protocol.lower()] = factory
 
-    def create(self, config: ProviderConfig) -> "Provider":
-        """Create a provider from config using registered protocol factory."""
+    def create(self, config: ProviderConfig) -> LLM:
+        """Create an LLM from config using registered protocol factory."""
         protocol = config.protocol.lower()
         factory = self._factories.get(protocol)
         if factory is None:
@@ -35,7 +33,7 @@ class ProviderRegistry:
         return factory(config)
 
 
-def _openai_completions_factory(config: ProviderConfig) -> "Provider":
+def _openai_completions_factory(config: ProviderConfig) -> LLM:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -47,10 +45,10 @@ def _openai_completions_factory(config: ProviderConfig) -> "Provider":
         kwargs["extra_body"] = config.extra_body
     if config.options:
         kwargs.update(config.options)
-    return OpenAICompletions(**kwargs)  # type: ignore[arg-type]
+    return OpenAIChatCompletions(**kwargs)  # type: ignore[arg-type]
 
 
-def _openai_responses_factory(config: ProviderConfig) -> "Provider":
+def _openai_responses_factory(config: ProviderConfig) -> LLM:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -63,7 +61,7 @@ def _openai_responses_factory(config: ProviderConfig) -> "Provider":
     return OpenAIResponses(**kwargs)  # type: ignore[arg-type]
 
 
-def _anthropic_factory(config: ProviderConfig) -> "Provider":
+def _anthropic_factory(config: ProviderConfig) -> LLM:
     kwargs: dict[str, object] = {
         "model": config.model,
     }
@@ -73,7 +71,7 @@ def _anthropic_factory(config: ProviderConfig) -> "Provider":
         kwargs["base_url"] = config.base_url
     if config.options:
         kwargs.update(config.options)
-    return Anthropic(**kwargs)  # type: ignore[arg-type]
+    return AnthropicMessages(**kwargs)  # type: ignore[arg-type]
 
 
 _DEFAULT_REGISTRY = ProviderRegistry()
@@ -82,8 +80,8 @@ _DEFAULT_REGISTRY.register("openai-responses", _openai_responses_factory)
 _DEFAULT_REGISTRY.register("anthropic", _anthropic_factory)
 
 
-def create_provider(config: ProviderConfig, *, registry: ProviderRegistry | None = None) -> "Provider":
-    """Create a provider from config.
+def create_provider(config: ProviderConfig, *, registry: ProviderRegistry | None = None) -> LLM:
+    """Create an LLM from config.
 
     Uses the default registry unless a custom *registry* is supplied.
     """
