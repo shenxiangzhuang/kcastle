@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 
-from kai import LLM, Message, Tool
+from kai import Message, ProviderBase, Tool
 
 from kagent.context import ContextBuilder
 from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, TurnEnd
@@ -60,7 +60,7 @@ class Agent:
     def __init__(
         self,
         *,
-        llm: LLM,
+        llm: ProviderBase,
         system: str | None = None,
         tools: list[Tool] | None = None,
         trace: Trace | None = None,
@@ -100,12 +100,12 @@ class Agent:
         return self._state
 
     @property
-    def llm(self) -> LLM:
+    def llm(self) -> ProviderBase:
         """Current LLM used by this agent."""
         return self._llm
 
     @llm.setter
-    def llm(self, llm: LLM) -> None:
+    def llm(self, llm: ProviderBase) -> None:
         """Thin alias for ``replace_llm()``."""
         self.replace_llm(llm)
 
@@ -170,30 +170,36 @@ class Agent:
         if self._abort_event is not None:
             self._abort_event.set()
 
-    def replace_llm(self, llm: LLM) -> None:
+    def replace_llm(self, llm: ProviderBase) -> None:
         """Replace the current LLM.
 
         Raises:
             RuntimeError: If called while the agent is running.
         """
         old_llm = self._llm
-        old_name = old_llm.name
+        old_provider = old_llm.provider
         old_model = old_llm.model
-        new_name = llm.name
+        new_provider = llm.provider
         new_model = llm.model
 
         if self._running:
             logger.warning(
                 "replace_llm rejected while running: %s/%s -> %s/%s",
-                old_name,
+                old_provider,
                 old_model,
-                new_name,
+                new_provider,
                 new_model,
             )
             raise RuntimeError("Cannot replace LLM while agent is running")
 
         self._llm = llm
-        logger.info("LLM replaced: %s/%s -> %s/%s", old_name, old_model, new_name, new_model)
+        logger.info(
+            "LLM replaced: %s/%s -> %s/%s",
+            old_provider,
+            old_model,
+            new_provider,
+            new_model,
+        )
 
     async def _run_loop(self) -> AsyncIterator[AgentEvent]:
         """Run the agent loop with steering and follow-up support."""

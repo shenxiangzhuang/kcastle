@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from typing import Any, cast
 
 from kai.errors import EmptyResponseError, ProviderError
-from kai.providers import LLM
+from kai.providers import ProviderBase
 from kai.types.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
     Chunk,
@@ -43,7 +43,7 @@ logger = logging.getLogger("kai.stream")
 
 
 async def stream(
-    llm: LLM,
+    llm: ProviderBase,
     context: Context,
     **kwargs: Any,
 ) -> AsyncIterator[StreamEvent]:
@@ -73,7 +73,7 @@ async def stream(
     tool_count = len(context.tools) if context.tools else 0
     logger.debug(
         "LLM stream start: provider=%s model=%s messages=%d tools=%d",
-        getattr(llm, "provider", getattr(llm, "name", "unknown")),
+        llm.provider,
         llm.model,
         msg_count,
         tool_count,
@@ -92,7 +92,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
-            getattr(llm, "provider", getattr(llm, "name", "unknown")),
+            llm.provider,
             llm.model,
             e,
             duration_ms,
@@ -106,7 +106,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.exception(
             "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
-            getattr(llm, "provider", getattr(llm, "name", "unknown")),
+            llm.provider,
             llm.model,
             e,
             duration_ms,
@@ -126,7 +126,7 @@ async def stream(
         duration_ms = (time.perf_counter() - t0) * 1000
         logger.error(
             "LLM stream empty response: provider=%s model=%s duration=%.0fms",
-            getattr(llm, "provider", getattr(llm, "name", "unknown")),
+            llm.provider,
             llm.model,
             duration_ms,
         )
@@ -140,7 +140,7 @@ async def stream(
     usage = final.usage
     logger.info(
         "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
-        getattr(llm, "provider", getattr(llm, "name", "unknown")),
+        llm.provider,
         llm.model,
         usage.input_tokens if usage else 0,
         usage.output_tokens if usage else 0,
@@ -152,7 +152,7 @@ async def stream(
 
 
 async def complete(
-    llm: LLM,
+    llm: ProviderBase,
     context: Context,
     **kwargs: Any,
 ) -> Message:

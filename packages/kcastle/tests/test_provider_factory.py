@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from kai.providers import LLMBase
+from kai.providers import ProviderBase
 from kai.providers.deepseek import DeepseekOpenAI
 from kai.providers.openai import OpenAIResponses
 
@@ -46,7 +46,7 @@ def test_create_provider_unknown_provider_raises() -> None:
 
 
 def test_provider_registry_register() -> None:
-    class DummyProvider(LLMBase):
+    class DummyProvider(ProviderBase):
         def __init__(self) -> None:
             self._model = "dummy-model"
 

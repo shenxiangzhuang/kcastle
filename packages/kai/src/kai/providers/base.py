@@ -10,7 +10,7 @@ from kai.types.message import Context
 from kai.types.stream import Chunk
 
 
-class LLMBase(ABC):
+class ProviderBase(ABC):
     """Base contract for all kai provider implementations.
 
     A provider implementation is responsible for:
@@ -23,11 +23,6 @@ class LLMBase(ABC):
     @abstractmethod
     def provider(self) -> str:
         """Provider identity (e.g. ``openai``, ``deepseek-openai``)."""
-
-    @property
-    def name(self) -> str:
-        """Backward-compatible alias for ``provider``."""
-        return self.provider
 
     @property
     @abstractmethod

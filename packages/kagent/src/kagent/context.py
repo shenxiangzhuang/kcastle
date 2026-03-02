@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from kai import LLM, Context, Message, Tool, ToolResult, complete
+from kai import Context, Message, ProviderBase, Tool, ToolResult, complete
 from kai.types.message import TextPart, ThinkPart
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -119,7 +119,7 @@ class CompactingBuilder:
     efficient.
 
     Args:
-        llm: LLM used for summarization.
+        llm: ProviderBase used for summarization.
         max_preserved: Number of recent messages to keep verbatim (default 6).
         threshold: Trigger compaction when message count exceeds this (default 20).
         summary_system: System prompt for the summarization call.
@@ -138,7 +138,7 @@ class CompactingBuilder:
 
     def __init__(
         self,
-        llm: LLM,
+        llm: ProviderBase,
         *,
         max_preserved: int = 6,
         threshold: int = 20,

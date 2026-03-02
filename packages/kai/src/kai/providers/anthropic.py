@@ -40,7 +40,7 @@ from anthropic.types import (
 )
 
 from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
-from kai.providers.base import LLMBase
+from kai.providers.base import ProviderBase
 from kai.tool import Tool
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart
 from kai.types.stream import (
@@ -56,7 +56,7 @@ from kai.types.stream import (
 from kai.types.usage import TokenUsage
 
 
-class AnthropicBase(LLMBase, ABC):
+class AnthropicBase(ProviderBase, ABC):
     """Shared Anthropic-compatible implementation base."""
 
     def __init__(
