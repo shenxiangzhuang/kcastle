@@ -55,7 +55,7 @@ from kai.message import ContentPart, Context, ImagePart, Message, TextPart, Thin
 # Provider protocol
 from kai.providers import (
     Provider,
-    ProviderProfile,
+    ProviderConfig,
     ProviderRegistry,
     create_provider,
 )
@@ -102,7 +102,7 @@ __all__ = [
     "ErrorEvent",
     # Provider
     "Provider",
-    "ProviderProfile",
+    "ProviderConfig",
     "ProviderRegistry",
     "create_provider",
     # Usage
