@@ -25,7 +25,7 @@ from kagent.step import OnToolResultFn
 from kagent.trace.entry import TraceEntry
 from kagent.trace.trace import Trace
 
-_log = logging.getLogger("kagent.agent")
+logger = logging.getLogger("kagent.agent")
 
 
 class Agent:
@@ -119,7 +119,7 @@ class Agent:
 
         Records a user message in the trace, then runs the loop.
         """
-        _log.info("Agent.run called with %d chars of input", len(user_input))
+        logger.info("Agent.run called with %d chars of input", len(user_input))
         msg = Message(role="user", content=user_input)
         self._state.trace.append(TraceEntry.user(msg))
         async for event in self._run_loop():
@@ -183,7 +183,7 @@ class Agent:
         new_model = provider.model
 
         if self._running:
-            _log.warning(
+            logger.warning(
                 "replace_provider rejected while running: %s/%s -> %s/%s",
                 old_name,
                 old_model,
@@ -193,7 +193,7 @@ class Agent:
             raise RuntimeError("Cannot replace provider while agent is running")
 
         self._provider = provider
-        _log.info("Provider replaced: %s/%s -> %s/%s", old_name, old_model, new_name, new_model)
+        logger.info("Provider replaced: %s/%s -> %s/%s", old_name, old_model, new_name, new_model)
 
     async def _run_loop(self) -> AsyncIterator[AgentEvent]:
         """Run the agent loop with steering and follow-up support."""

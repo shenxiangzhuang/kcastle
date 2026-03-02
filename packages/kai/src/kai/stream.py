@@ -41,7 +41,7 @@ from kai.message import ContentPart, Context, Message, TextPart, ThinkPart, Tool
 from kai.providers import Provider
 from kai.usage import TokenUsage
 
-_log = logging.getLogger("kai.stream")
+logger = logging.getLogger("kai.stream")
 
 
 async def stream(
@@ -374,7 +374,7 @@ async def _stream_impl(
 ) -> AsyncIterator[StreamEvent]:
     msg_count = len(context.messages) if context.messages else 0
     tool_count = len(context.tools) if context.tools else 0
-    _log.debug(
+    logger.debug(
         "LLM stream start: provider=%s model=%s messages=%d tools=%d",
         provider.name,
         provider.model,
@@ -393,7 +393,7 @@ async def _stream_impl(
                 yield event
     except ProviderError as e:
         duration_ms = (time.perf_counter() - t0) * 1000
-        _log.error(
+        logger.error(
             "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
             provider.name,
             provider.model,
@@ -404,7 +404,7 @@ async def _stream_impl(
         return
     except Exception as e:
         duration_ms = (time.perf_counter() - t0) * 1000
-        _log.error(
+        logger.error(
             "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
             provider.name,
             provider.model,
@@ -424,7 +424,7 @@ async def _stream_impl(
 
     if not final.content and not final.tool_calls:
         duration_ms = (time.perf_counter() - t0) * 1000
-        _log.error(
+        logger.error(
             "LLM stream empty response: provider=%s model=%s duration=%.0fms",
             provider.name,
             provider.model,
@@ -438,7 +438,7 @@ async def _stream_impl(
 
     duration_ms = (time.perf_counter() - t0) * 1000
     usage = final.usage
-    _log.info(
+    logger.info(
         "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
         provider.name,
         provider.model,

@@ -35,7 +35,7 @@ from typing import Any
 from kai import Message, ToolResult
 from kai.usage import TokenUsage
 
-_log = logging.getLogger("kagent.hooks")
+logger = logging.getLogger("kagent.hooks")
 
 
 class Hooks:
@@ -145,7 +145,7 @@ class LoggingHooks(Hooks):
         self._level = level
 
     def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
-        _log.log(
+        logger.log(
             self._level,
             "[%s] Agent start: provider=%s model=%s",
             run_id,
@@ -164,7 +164,7 @@ class LoggingHooks(Hooks):
         tokens = ""
         if usage:
             tokens = f" tokens={usage.input_tokens}/{usage.output_tokens}"
-        _log.log(
+        logger.log(
             self._level,
             "[%s] Agent end: turns=%d duration=%.0fms%s",
             run_id,
@@ -174,7 +174,7 @@ class LoggingHooks(Hooks):
         )
 
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
-        _log.debug("[%s] Turn %d start", run_id, turn_index)
+        logger.debug("[%s] Turn %d start", run_id, turn_index)
 
     def on_turn_end(
         self,
@@ -191,7 +191,7 @@ class LoggingHooks(Hooks):
         if usage:
             tokens = f" tokens={usage.input_tokens}/{usage.output_tokens}"
         tools_info = f" tools={len(tool_results)}" if tool_results else ""
-        _log.log(
+        logger.log(
             self._level,
             "[%s] Turn %d end: llm=%.0fms total=%.0fms%s%s",
             run_id,
@@ -203,7 +203,7 @@ class LoggingHooks(Hooks):
         )
 
     def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
-        _log.debug("[%s] Turn %d LLM start", run_id, turn_index)
+        logger.debug("[%s] Turn %d LLM start", run_id, turn_index)
 
     def on_llm_end(
         self,
@@ -214,7 +214,7 @@ class LoggingHooks(Hooks):
         duration_ms: float,
     ) -> None:
         stop = message.stop_reason or "unknown"
-        _log.debug(
+        logger.debug(
             "[%s] Turn %d LLM end: stop=%s duration=%.0fms",
             run_id,
             turn_index,
@@ -231,7 +231,7 @@ class LoggingHooks(Hooks):
         tool_name: str,
         arguments: dict[str, Any],
     ) -> None:
-        _log.debug(
+        logger.debug(
             "[%s] Turn %d tool %s start (call_id=%s)",
             run_id,
             turn_index,
@@ -251,7 +251,7 @@ class LoggingHooks(Hooks):
         is_error: bool,
     ) -> None:
         status = "ERROR" if is_error else "ok"
-        _log.log(
+        logger.log(
             self._level,
             "[%s] Turn %d tool %s: %s duration=%.0fms",
             run_id,
