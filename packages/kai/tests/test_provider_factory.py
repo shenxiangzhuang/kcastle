@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import pytest
-from kai import ProviderProfile, ProviderRegistry, create_provider
+from kai import ProviderConfig, ProviderRegistry, create_provider
 from kai.providers.openai import OpenAICompletions, OpenAIResponses
 
 
 def test_create_provider_openai_completions() -> None:
     provider = create_provider(
-        ProviderProfile(
+        ProviderConfig(
             vendor="deepseek",
             protocol="openai-completions",
             model="deepseek-chat",
@@ -21,7 +21,7 @@ def test_create_provider_openai_completions() -> None:
 
 def test_create_provider_openai_responses() -> None:
     provider = create_provider(
-        ProviderProfile(
+        ProviderConfig(
             vendor="openai",
             protocol="openai-responses",
             model="gpt-4.1",
@@ -36,7 +36,7 @@ def test_create_provider_openai_responses() -> None:
 def test_create_provider_unknown_protocol_raises() -> None:
     with pytest.raises(ValueError, match="Unknown protocol"):
         create_provider(
-            ProviderProfile(
+            ProviderConfig(
                 vendor="x",
                 protocol="unknown-protocol",
                 model="m",
@@ -61,14 +61,14 @@ def test_provider_registry_register() -> None:
             if False:
                 yield None
 
-    def _factory(profile: ProviderProfile) -> DummyProvider:
-        assert profile.protocol == "dummy"
+    def _factory(config: ProviderConfig) -> DummyProvider:
+        assert config.protocol == "dummy"
         return DummyProvider()
 
     registry = ProviderRegistry()
     registry.register("dummy", _factory)
     provider = create_provider(
-        ProviderProfile(vendor="x", protocol="dummy", model="m"),
+        ProviderConfig(vendor="x", protocol="dummy", model="m"),
         registry=registry,
     )
     assert provider.name == "dummy"

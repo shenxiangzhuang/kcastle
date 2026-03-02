@@ -126,7 +126,7 @@ default:
     assert cfg.default_provider == "deepseek-openai-completions"
 
 
-def test_provider_config_to_profile(tmp_path: Path) -> None:
+def test_provider_entry_to_provider_config(tmp_path: Path) -> None:
     _write_config(
         tmp_path,
         """
@@ -151,15 +151,15 @@ default:
 
     cfg = load_config(home=tmp_path)
     provider = cfg.providers["deepseek-openai-completions"]
-    profile = provider.to_profile("deepseek-reasoner")
+    provider_config = provider.to_provider_config("deepseek-reasoner")
 
-    assert profile.vendor == "deepseek"
-    assert profile.protocol == "openai-completions"
-    assert profile.model == "deepseek-reasoner"
-    assert profile.base_url == "https://api.deepseek.com"
+    assert provider_config.vendor == "deepseek"
+    assert provider_config.protocol == "openai-completions"
+    assert provider_config.model == "deepseek-reasoner"
+    assert provider_config.base_url == "https://api.deepseek.com"
 
 
-def test_castle_config_provider_profile_helpers(tmp_path: Path) -> None:
+def test_castle_config_provider_config_helpers(tmp_path: Path) -> None:
     _write_config(
         tmp_path,
         """
@@ -188,9 +188,37 @@ default:
 
     cfg = load_config(home=tmp_path)
 
-    active = cfg.active_provider_profile()
-    assert active.vendor == "deepseek"
-    assert active.protocol == "anthropic"
+    active_config = cfg.active_provider_config()
+    assert active_config.vendor == "deepseek"
+    assert active_config.protocol == "anthropic"
 
-    explicit = cfg.provider_profile("deepseek-openai-completions", "deepseek-chat")
-    assert explicit.protocol == "openai-completions"
+    explicit_config = cfg.provider_config("deepseek-openai-completions", "deepseek-chat")
+    assert explicit_config.protocol == "openai-completions"
+
+
+def test_active_provider_resolves_entry(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        """
+providers:
+  deepseek:
+    protocols:
+      openai-completions:
+        api_key: sk-test
+        base_url: https://api.deepseek.com
+        models:
+          deepseek-chat:
+            active: true
+
+default:
+  provider: deepseek
+  protocol: openai-completions
+  model: deepseek-chat
+""",
+    )
+
+    cfg = load_config(home=tmp_path)
+    active = cfg.active_provider()
+
+    assert active.vendor == "deepseek"
+    assert active.protocol == "openai-completions"

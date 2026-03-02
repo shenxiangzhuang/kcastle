@@ -41,12 +41,12 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from kai import ProviderProfile
+from kai import ProviderConfig as KaiProviderConfig
 
 _DEFAULT_HOME = Path.home() / ".kcastle"
 _CONFIG_FILENAME = "config.yaml"
@@ -69,34 +69,42 @@ class ModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderConfig:
-    """Configuration for a single LLM provider.
+class ProviderEntry:
+    """Configuration entry for one provider profile.
 
-    A *provider* maps to a concrete API endpoint (e.g. DeepSeek, Kimi,
-    OpenAI, Anthropic).  The ``protocol`` field selects the kai driver
-    class (``openai-completions`` → ``OpenAICompletions``).
+    Keeps runtime provider construction fields in ``provider`` (kai-owned)
+    and catalog-only fields (model list) in this entry.
     """
 
-    name: str
-    """Provider profile name (e.g. ``deepseek-openai-completions``)."""
-
-    vendor: str = ""
-    """Provider vendor name (e.g. ``deepseek``, ``openai``, ``anthropic``)."""
-
-    protocol: str = "openai-completions"
-    """API protocol: ``openai-completions`` | ``openai-responses`` | ``anthropic``."""
-
-    api_key: str = ""
-    """API key for this provider."""
-
-    base_url: str | None = None
-    """Base URL for the API endpoint."""
+    provider: KaiProviderConfig
+    """Runtime provider config owned by kai."""
 
     models: list[ModelConfig] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     """Available models for this provider."""
 
-    extra_body: dict[str, object] | None = None
-    """Extra body parameters passed to the LLM API (e.g. ``reasoning_split``)."""
+    @property
+    def name(self) -> str:
+        return self.provider.name
+
+    @property
+    def vendor(self) -> str:
+        return self.provider.vendor
+
+    @property
+    def protocol(self) -> str:
+        return self.provider.protocol
+
+    @property
+    def api_key(self) -> str:
+        return self.provider.api_key or ""
+
+    @property
+    def base_url(self) -> str | None:
+        return self.provider.base_url
+
+    @property
+    def extra_body(self) -> dict[str, object] | None:
+        return self.provider.extra_body
 
     def active_models(self) -> list[ModelConfig]:
         """Return only active models."""
@@ -109,8 +117,8 @@ class ProviderConfig:
                 return m
         return None
 
-    def to_profile(self, model_id: str) -> ProviderProfile:
-        """Build a kai ProviderProfile for the given model.
+    def to_provider_config(self, model_id: str) -> KaiProviderConfig:
+        """Build a kai ProviderConfig for the given model.
 
         Raises:
             ValueError: If the requested model is not available in this provider.
@@ -119,13 +127,9 @@ class ProviderConfig:
         if model_cfg is None:
             raise ValueError(f"Unknown model: {model_id!r} in provider {self.name!r}")
 
-        return ProviderProfile(
-            vendor=self.vendor or self.name,
-            protocol=self.protocol,
+        return replace(
+            self.provider,
             model=model_id,
-            api_key=self.api_key or None,
-            base_url=self.base_url,
-            extra_body=self.extra_body,
             options=dict(model_cfg.options),
         )
 
@@ -151,7 +155,7 @@ class CastleConfig:
     skills_dir: Path
     """User-level skills directory."""
 
-    providers: dict[str, ProviderConfig] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
+    providers: dict[str, ProviderEntry] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
     """Configured providers keyed by name."""
 
     default_provider: str = ""
@@ -174,7 +178,7 @@ class CastleConfig:
     telegram_token: str = ""
     """Telegram bot token."""
 
-    def active_provider(self) -> ProviderConfig:
+    def active_provider(self) -> ProviderEntry:
         """Return the currently selected provider config.
 
         Raises ``ValueError`` if ``default_provider`` is not configured.
@@ -186,15 +190,15 @@ class CastleConfig:
             )
         return self.providers[self.default_provider]
 
-    def provider_profile(self, provider_name: str, model_id: str) -> ProviderProfile:
-        """Build a provider profile from explicit provider/model selection."""
+    def provider_config(self, provider_name: str, model_id: str) -> KaiProviderConfig:
+        """Build a provider config from explicit provider/model selection."""
         if provider_name not in self.providers:
             raise ValueError(f"Unknown provider: {provider_name!r}")
-        return self.providers[provider_name].to_profile(model_id)
+        return self.providers[provider_name].to_provider_config(model_id)
 
-    def active_provider_profile(self) -> ProviderProfile:
-        """Build a provider profile for the active provider/model selection."""
-        return self.active_provider().to_profile(self.default_model)
+    def active_provider_config(self) -> KaiProviderConfig:
+        """Build a provider config for the active provider/model selection."""
+        return self.active_provider().to_provider_config(self.default_model)
 
 
 def _expand_env(value: str) -> str:
@@ -284,7 +288,7 @@ def _build_provider_config(
     vendor: str,
     protocol: str,
     cfg_dict: dict[str, Any],
-) -> ProviderConfig:
+) -> ProviderEntry:
     """Build a typed provider profile from an untyped mapping."""
     base_url_val = cfg_dict.get("base_url")
     base_url: str | None = str(base_url_val) if base_url_val else None
@@ -294,23 +298,26 @@ def _build_provider_config(
         if isinstance(extra_body_val, dict)
         else None
     )
-    return ProviderConfig(
-        name=name,
-        vendor=vendor,
-        protocol=protocol,
-        api_key=str(cfg_dict.get("api_key", "")),
-        base_url=base_url,
+    return ProviderEntry(
+        provider=KaiProviderConfig(
+            vendor=vendor,
+            protocol=protocol,
+            model="",
+            api_key=str(cfg_dict.get("api_key", "")) or None,
+            base_url=base_url,
+            extra_body=extra_body,
+            options={},
+        ),
         models=_parse_models(cfg_dict.get("models")),
-        extra_body=extra_body,
     )
 
 
-def _parse_providers(data: dict[str, Any]) -> dict[str, ProviderConfig]:
+def _parse_providers(data: dict[str, Any]) -> dict[str, ProviderEntry]:
     """Parse the ``providers`` section."""
     raw: object = data.get("providers")
     if not isinstance(raw, dict):
         return {}
-    providers: dict[str, ProviderConfig] = {}
+    providers: dict[str, ProviderEntry] = {}
     for name, cfg in raw.items():  # pyright: ignore[reportUnknownVariableType]
         vendor = str(name)  # pyright: ignore[reportUnknownArgumentType]
         cfg_dict = _to_str_dict(cfg)  # pyright: ignore[reportUnknownArgumentType]

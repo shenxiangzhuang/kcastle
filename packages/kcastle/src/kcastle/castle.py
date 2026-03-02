@@ -27,8 +27,8 @@ from kcastle.tools import create_builtin_tools
 
 def _create_provider(config: CastleConfig) -> Provider:
     """Create a kai Provider from the active provider config."""
-    profile = config.active_provider_profile()
-    return create_provider(profile)
+    provider_config = config.active_provider_config()
+    return create_provider(provider_config)
 
 
 def _build_system_prompt(config: CastleConfig, skill_prompts: str = "") -> str:
@@ -156,8 +156,8 @@ class Castle:
 
     def _build_provider(self, provider_name: str, model_id: str) -> Provider:
         """Validate and build a provider instance for ``provider_name/model_id``."""
-        profile = self._config.provider_profile(provider_name, model_id)
-        return create_provider(profile)
+        provider_config = self._config.provider_config(provider_name, model_id)
+        return create_provider(provider_config)
 
     def _apply_provider_to_session(self, session_id: str, provider: Provider) -> None:
         """Hot-swap provider for one loaded session."""

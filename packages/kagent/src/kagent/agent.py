@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 
-from kai import Message, Provider, ProviderProfile, Tool, create_provider
+from kai import Message, Provider, ProviderConfig, Tool, create_provider
 
 from kagent.context import ContextBuilder
 from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, TurnEnd
@@ -95,10 +95,10 @@ class Agent:
         self._follow_up_queue: list[Message] = []
 
     @classmethod
-    def from_provider_profile(
+    def from_provider_config(
         cls,
         *,
-        provider_profile: ProviderProfile,
+        provider_config: ProviderConfig,
         system: str | None = None,
         tools: list[Tool] | None = None,
         trace: Trace | None = None,
@@ -108,12 +108,12 @@ class Agent:
         hooks: Hooks | None = None,
         max_turns: int = 100,
     ) -> Agent:
-        """Create an agent from a typed provider profile.
+        """Create an agent from a typed provider config.
 
         This offers a stable, provider-agnostic entry point that keeps
         provider construction concerns outside runtime orchestration.
         """
-        provider = create_provider(provider_profile)
+        provider = create_provider(provider_config)
         return cls(
             provider=provider,
             system=system,

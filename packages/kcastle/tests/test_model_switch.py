@@ -6,11 +6,11 @@ from typing import Any, cast
 
 import pytest
 from kagent import Agent
-from kai import Context
+from kai import Context, ProviderConfig
 from kai.chunk import Chunk
 
 from kcastle.castle import Castle
-from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderConfig
+from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderEntry
 from kcastle.session.manager import SessionManager
 
 
@@ -33,10 +33,13 @@ class DummyProvider:
 
 
 def _build_config(tmp_path: Path) -> CastleConfig:
-    provider = ProviderConfig(
-        name="mock",
-        protocol="openai-completions",
-        api_key="test-key",
+    provider = ProviderEntry(
+        provider=ProviderConfig(
+            vendor="mock",
+            protocol="openai-completions",
+            model="",
+            api_key="test-key",
+        ),
         models=[
             ModelConfig(id="model-a", active=True),
             ModelConfig(id="model-b", active=True),
