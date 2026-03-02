@@ -90,7 +90,7 @@ class AnthropicBase(ProviderBase, ABC):
     def model(self) -> str:
         return self._model
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         """Stream raw chunks from the Anthropic Messages API."""
         system = context.system or ""
         messages = _build_messages(context)
@@ -355,9 +355,3 @@ def _convert_error(error: AnthropicError) -> ProviderError:
     if isinstance(error, AnthropicTimeoutError):
         return TimeoutError(str(error))
     return ProviderError(f"Anthropic error: {error}")
-
-
-__all__ = [
-    "AnthropicBase",
-    "AnthropicMessages",
-]

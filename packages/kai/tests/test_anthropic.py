@@ -1,6 +1,6 @@
 """Tests for Anthropic provider — message serialization and stream conversion.
 
-Tests exercise the public ``stream_raw()`` method with a mocked Anthropic client.
+Tests exercise the public ``stream()`` method with a mocked Anthropic client.
 """
 
 from collections.abc import AsyncIterator
@@ -54,7 +54,7 @@ async def _stream_raw(
     events: list[Any] | None = None,
     context: Context | None = None,
 ) -> tuple[list[Chunk], dict[str, Any]]:
-    """Call ``AnthropicMessages.stream_raw()`` with a mocked client.
+    """Call ``AnthropicMessages.stream()`` with a mocked client.
 
     Returns ``(output_chunks, captured_create_kwargs)``.
     """
@@ -71,7 +71,7 @@ async def _stream_raw(
         mock_cls.return_value.messages.create = _fake_create
         provider = AnthropicMessages(model="test-model", api_key="test-key")
 
-    output = [c async for c in provider.stream_raw(context)]
+    output = [c async for c in provider.stream(context)]
     return output, captured
 
 

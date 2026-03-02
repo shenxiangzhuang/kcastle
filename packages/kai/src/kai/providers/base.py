@@ -30,5 +30,7 @@ class ProviderBase(ABC):
         """Model identifier (e.g. ``gpt-4o``, ``claude-sonnet-4-20250514``)."""
 
     @abstractmethod
-    def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         """Stream raw chunks from the provider."""
+        raise NotImplementedError  # pragma: no cover
+        yield  # pragma: no cover  # noqa: RET503

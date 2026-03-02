@@ -48,6 +48,3 @@ class MinimaxAnthropic(AnthropicBase):
             thinking=thinking,
             **client_kwargs,
         )
-
-
-__all__ = ["MinimaxOpenAI", "MinimaxAnthropic"]

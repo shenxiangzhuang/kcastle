@@ -56,7 +56,7 @@ class MockProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         for chunk in self._chunks:
             yield chunk
 
@@ -75,7 +75,7 @@ class ErrorProvider(ProviderBase):
     def model(self) -> str:
         return "error-1"
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         raise self._error
         yield  # Make it a generator  # type: ignore[misc]
 

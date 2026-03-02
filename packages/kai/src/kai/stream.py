@@ -85,7 +85,7 @@ async def stream(
     yield StartEvent()
 
     try:
-        async for chunk in llm.stream_raw(context, **kwargs):
+        async for chunk in llm.stream(context, **kwargs):
             for event in state.process_chunk(chunk):
                 yield event
     except ProviderError as e:

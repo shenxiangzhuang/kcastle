@@ -1,6 +1,6 @@
 """Tests for OpenAI Responses provider — message serialization.
 
-Tests exercise the public ``stream_raw()`` method with a mocked OpenAI client,
+Tests exercise the public ``stream()`` method with a mocked OpenAI client,
 verifying the ``input`` payload sent to the Responses API.
 """
 
@@ -20,7 +20,7 @@ def _ctx(*messages: Message, system: str | None = None) -> Context:
 async def _stream_raw(
     context: Context | None = None,
 ) -> tuple[list[Chunk], dict[str, Any]]:
-    """Call ``OpenAIResponses.stream_raw()`` with a mocked client.
+    """Call ``OpenAIResponses.stream()`` with a mocked client.
 
     The stream is always empty; only the captured ``input`` kwarg matters.
     """
@@ -42,7 +42,7 @@ async def _stream_raw(
         mock_cls.return_value.responses.create = _fake_create
         provider = OpenAIResponses(model="test-model", api_key="test-key")
 
-    output = [c async for c in provider.stream_raw(context)]
+    output = [c async for c in provider.stream(context)]
     return output, captured
 
 

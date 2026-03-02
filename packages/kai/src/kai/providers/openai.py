@@ -68,8 +68,9 @@ class OpenAIBase(ProviderBase, ABC):
         return self._model
 
     @abstractmethod
-    def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
-        raise NotImplementedError
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+        raise NotImplementedError  # pragma: no cover
+        yield  # pragma: no cover  # noqa: RET503
 
     @staticmethod
     def _convert_error(error: OpenAIError | httpx.HTTPError) -> ProviderError:
@@ -101,7 +102,7 @@ class OpenAIChatBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._extra_body = extra_body
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else None
 
@@ -146,7 +147,7 @@ class OpenAIResponsesBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._reasoning = reasoning
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         input_items = _build_input(context)
         tools = _build_tools(context.tools) if context.tools else None
 
@@ -512,13 +513,3 @@ async def _convert_responses_stream(
 
             case _:
                 pass
-
-
-__all__ = [
-    "OpenAIBase",
-    "OpenAIChatBase",
-    "OpenAIResponsesBase",
-    "OpenAIChatCompletions",
-    "OpenAIResponses",
-    "_extract_reasoning_text",
-]

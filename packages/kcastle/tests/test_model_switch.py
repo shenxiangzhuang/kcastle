@@ -29,7 +29,7 @@ class DummyProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream_raw(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
         if False:
             yield cast(Chunk, None)
 

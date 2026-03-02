@@ -32,16 +32,16 @@ from kai.errors import (
     TimeoutError,
 )
 
-# Protocol contract
-from kai.providers import ProviderBase
-from kai.providers.anthropic import AnthropicMessages
-from kai.providers.deepseek import DeepseekAnthropic, DeepseekOpenAI
-from kai.providers.minimax import MinimaxAnthropic, MinimaxOpenAI
-
-# Concrete implementations
-from kai.providers.openai import (
+# Providers
+from kai.providers import (
+    AnthropicMessages,
+    DeepseekAnthropic,
+    DeepseekOpenAI,
+    MinimaxAnthropic,
+    MinimaxOpenAI,
     OpenAIChatCompletions,
     OpenAIResponses,
+    ProviderBase,
 )
 from kai.stream import complete, stream
 
