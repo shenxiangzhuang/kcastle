@@ -11,11 +11,11 @@ Use this skill when the user asks to create, modify, optimize, or evaluate a ski
 
 - Discover candidate skills via `skills_list`; perform edits via file tools (`write_file`, `edit_file`).
 - Keep responses concise; avoid dumping long file contents unless explicitly requested.
-- Every skill must be `<skill-id>/SKILL.md` with valid frontmatter (`name`, `description`).
+- Every skill must be `<skill-folder>/SKILL.md` with valid frontmatter (`name`, `description`).
 - Agent-created skills must be managed under `~/.kcastle/skills`.
-- Use one folder per skill: `~/.kcastle/skills/<skill-id>/SKILL.md`.
+- Use one folder per skill: `~/.kcastle/skills/<skill-folder>/SKILL.md`.
 - A skill folder may also include `scripts/` for reusable helper scripts.
-- Use lowercase-hyphen IDs only (`^[a-z0-9-]{1,64}$`).
+- Use a stable, unique skill `name` in frontmatter.
 - New or updated skills should be prepared as file edits and confirmed with the user before write.
 - Treat project scope (`.skills`) as user-managed unless user explicitly asks for direct edits.
 - Prioritize clear intent and trigger conditions in `description`; avoid vague wording.
@@ -37,9 +37,9 @@ If the conversation already contains these details, summarize assumptions and as
 
 When creating:
 
-1. Choose a stable skill ID.
+1. Choose a stable skill `name`.
 2. Write frontmatter:
-	- `name`: exact skill ID
+	- `name`: exact skill name used for lookup
 	- `description`: what it does + when to trigger (be specific and slightly proactive)
 3. Write body instructions in imperative style.
 
@@ -62,8 +62,8 @@ Keep SKILL.md focused and operational. If content grows too large, split details
 
 Recommended skill layout:
 
-- `<skill-id>/SKILL.md` (required)
-- `<skill-id>/scripts/` (optional, executable helpers)
+- `<skill-folder>/SKILL.md` (required)
+- `<skill-folder>/scripts/` (optional, executable helpers)
 
 If `scripts/` is present, reference script names and expected inputs/outputs in SKILL.md so execution is predictable.
 
