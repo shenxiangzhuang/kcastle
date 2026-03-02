@@ -9,15 +9,39 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 from kcastle.config import config_file_path
 
-_VENDORS: list[tuple[str, str, str, str]] = [
-    ("DeepSeek", "DEEPSEEK_API_KEY", "deepseek-openai", "deepseek-chat"),
-    ("MiniMax", "MINIMAX_API_KEY", "minimax-openai", "MiniMax-Text-01"),
+@dataclass(frozen=True, slots=True)
+class VendorPreset:
+    """First-run provider preset driven by environment variable detection."""
+
+    display_name: str
+    env_var: str
+    provider: str
+    protocol: str
+    model: str
+
+
+_VENDOR_PRESETS: list[VendorPreset] = [
+    VendorPreset(
+        display_name="DeepSeek",
+        env_var="DEEPSEEK_API_KEY",
+        provider="deepseek",
+        protocol="openai-completions",
+        model="deepseek-chat",
+    ),
+    VendorPreset(
+        display_name="MiniMax",
+        env_var="MINIMAX_API_KEY",
+        provider="minimax",
+        protocol="openai-completions",
+        model="MiniMax-Text-01",
+    ),
 ]
 
 _BOLD = "\033[1m"
@@ -32,6 +56,51 @@ def needs_setup(home: Path | None = None) -> bool:
     return not config_file_path(home).is_file()
 
 
+def _detect_presets() -> list[VendorPreset]:
+    """Detect configured vendor presets from environment variables."""
+    print("  Detecting API keys…")
+    detected: list[VendorPreset] = []
+    for preset in _VENDOR_PRESETS:
+        if os.environ.get(preset.env_var):
+            print(f"    {_GREEN}✓{_RESET} {preset.env_var}")
+            detected.append(preset)
+        else:
+            print(f"    {_DIM}✗ {preset.env_var}{_RESET}")
+    return detected
+
+
+def _print_missing_keys_hint() -> None:
+    """Print user guidance when no vendor API key is detected."""
+    print(f"\n  {_YELLOW}No API keys found.{_RESET}")
+    print("  Set one of the above environment variables, e.g.:\n")
+    print(f'    {_DIM}export DEEPSEEK_API_KEY="sk-..."{_RESET}\n')
+    print("  Then run `k` again.\n")
+
+
+def _confirm_write(path: Path) -> bool:
+    """Ask user whether to write config file."""
+    try:
+        answer = input(f"\n  Write {_DIM}{path}{_RESET}? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return not answer or answer == "y"
+
+
+def _write_minimal_config(path: Path, preset: VendorPreset) -> None:
+    """Write minimal default config file for selected preset."""
+    config: dict[str, object] = {
+        "default": {
+            "provider": preset.provider,
+            "protocol": preset.protocol,
+            "model": preset.model,
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.dump(config, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def run_setup(home: Path | None = None) -> Path:
     """Detect API keys and write a minimal ``config.yaml``.
 
@@ -41,41 +110,23 @@ def run_setup(home: Path | None = None) -> Path:
 
     print(f"\n  {_BOLD}🏰 kcastle — first-run setup{_RESET}\n")
 
-    print("  Detecting API keys…")
-    detected: list[tuple[str, str, str, str]] = []
-    for display, env_var, provider, model in _VENDORS:
-        if os.environ.get(env_var):
-            print(f"    {_GREEN}✓{_RESET} {env_var}")
-            detected.append((display, env_var, provider, model))
-        else:
-            print(f"    {_DIM}✗ {env_var}{_RESET}")
+    detected = _detect_presets()
 
     if not detected:
-        print(f"\n  {_YELLOW}No API keys found.{_RESET}")
-        print("  Set one of the above environment variables, e.g.:\n")
-        print(f'    {_DIM}export DEEPSEEK_API_KEY="sk-..."{_RESET}\n')
-        print("  Then run `k` again.\n")
+        _print_missing_keys_hint()
         sys.exit(1)
 
-    _display, _env, provider, model = detected[0]
-    print(f"\n  Default: {_BOLD}{provider}{_RESET} ({model})")
+    chosen = detected[0]
+    print(
+        f"\n  Default: {_BOLD}{chosen.provider}/{chosen.protocol}{_RESET} "
+        f"({chosen.model})"
+    )
 
-    try:
-        answer = input(f"\n  Write {_DIM}{path}{_RESET}? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        sys.exit(0)
-
-    if answer and answer != "y":
+    if not _confirm_write(path):
         print("  Aborted.\n")
         sys.exit(0)
 
-    config: dict[str, object] = {
-        "default": {"provider": provider, "model": model},
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.dump(config, default_flow_style=False, sort_keys=False, allow_unicode=True)
-    path.write_text(text, encoding="utf-8")
+    _write_minimal_config(path, chosen)
 
     print(f"\n  {_GREEN}✓{_RESET} Done. Run {_BOLD}k{_RESET} to start.\n")
     return path

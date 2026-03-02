@@ -10,7 +10,7 @@ from conftest import (
     text_chunks,
     tool_call_chunks,
 )
-from kai import Message, ToolResult
+from kai import Message, ProviderProfile, ToolResult
 
 from kagent.agent import Agent
 from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, AgentStart, TurnEnd
@@ -125,6 +125,30 @@ class TestAgentState:
 
         with pytest.raises(RuntimeError, match="Cannot replace provider while agent is running"):
             agent.provider = provider2
+
+    def test_from_provider_profile_uses_provider_factory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        expected_provider = MockProvider([])
+
+        def _fake_create_provider(profile: ProviderProfile) -> MockProvider:
+            assert profile.vendor == "deepseek"
+            assert profile.protocol == "openai-completions"
+            assert profile.model == "deepseek-chat"
+            return expected_provider
+
+        monkeypatch.setattr("kagent.agent.create_provider", _fake_create_provider)
+
+        agent = Agent.from_provider_profile(
+            provider_profile=ProviderProfile(
+                vendor="deepseek",
+                protocol="openai-completions",
+                model="deepseek-chat",
+            )
+        )
+
+        assert agent.provider is expected_provider
 
 
 class TestAgentFollowUp:
