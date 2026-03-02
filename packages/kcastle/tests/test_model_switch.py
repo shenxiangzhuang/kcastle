@@ -35,7 +35,7 @@ class DummyProvider:
 def _build_config(tmp_path: Path) -> CastleConfig:
     provider = ProviderConfig(
         name="mock",
-        protocol="openai",
+        protocol="openai-completions",
         api_key="test-key",
         models=[
             ModelConfig(id="model-a", active=True),

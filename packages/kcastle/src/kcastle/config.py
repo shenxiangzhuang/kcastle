@@ -9,21 +9,26 @@ startup.
 Provider configuration
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Providers are defined as named entries under the top-level ``providers``
-key.  Each provider specifies an API *protocol* (``openai``,
-``openai-responses``, or ``anthropic``), endpoint, credentials, and a
-model catalogue::
+Providers are defined by *vendor* entries with nested ``protocols``
+mapping. Each protocol profile specifies API protocol
+(``openai-completions``, ``openai-responses``, or ``anthropic``), endpoint,
+credentials, and model catalogue::
 
-    providers:
-      deepseek:
-        protocol: openai
-        base_url: https://api.deepseek.com
-        api_key: ${DEEPSEEK_API_KEY}
-        models:
-          deepseek-chat:
-            active: true
-          deepseek-reasoner:
-            active: true
+providers:
+    deepseek:
+        protocols:
+            openai-completions:
+                base_url: https://api.deepseek.com
+                api_key: ${DEEPSEEK_API_KEY}
+                models:
+                    deepseek-chat:
+                        active: true
+            anthropic:
+                base_url: https://api.deepseek.com/anthropic
+                api_key: ${DEEPSEEK_API_KEY}
+                models:
+                    deepseek-chat:
+                        active: true
 
 The ``default`` section selects which provider/model to use::
 
@@ -38,9 +43,10 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
+from kai import ProviderProfile
 
 _DEFAULT_HOME = Path.home() / ".kcastle"
 _CONFIG_FILENAME = "config.yaml"
@@ -68,14 +74,17 @@ class ProviderConfig:
 
     A *provider* maps to a concrete API endpoint (e.g. DeepSeek, Kimi,
     OpenAI, Anthropic).  The ``protocol`` field selects the kai driver
-    class (``openai`` → ``OpenAICompletions``).
+    class (``openai-completions`` → ``OpenAICompletions``).
     """
 
     name: str
-    """Provider name (e.g. ``deepseek``, ``kimi``, ``openai``)."""
+    """Provider profile name (e.g. ``deepseek-openai-completions``)."""
 
-    protocol: str = "openai"
-    """API protocol: ``openai`` | ``openai-responses`` | ``anthropic``."""
+    vendor: str = ""
+    """Provider vendor name (e.g. ``deepseek``, ``openai``, ``anthropic``)."""
+
+    protocol: str = "openai-completions"
+    """API protocol: ``openai-completions`` | ``openai-responses`` | ``anthropic``."""
 
     api_key: str = ""
     """API key for this provider."""
@@ -99,6 +108,26 @@ class ProviderConfig:
             if m.id == model_id:
                 return m
         return None
+
+    def to_profile(self, model_id: str) -> ProviderProfile:
+        """Build a kai ProviderProfile for the given model.
+
+        Raises:
+            ValueError: If the requested model is not available in this provider.
+        """
+        model_cfg = self.get_model(model_id)
+        if model_cfg is None:
+            raise ValueError(f"Unknown model: {model_id!r} in provider {self.name!r}")
+
+        return ProviderProfile(
+            vendor=self.vendor or self.name,
+            protocol=self.protocol,
+            model=model_id,
+            api_key=self.api_key or None,
+            base_url=self.base_url,
+            extra_body=self.extra_body,
+            options=dict(model_cfg.options),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +185,16 @@ class CastleConfig:
                 f"Default provider {self.default_provider!r} not found. Available: {available}"
             )
         return self.providers[self.default_provider]
+
+    def provider_profile(self, provider_name: str, model_id: str) -> ProviderProfile:
+        """Build a provider profile from explicit provider/model selection."""
+        if provider_name not in self.providers:
+            raise ValueError(f"Unknown provider: {provider_name!r}")
+        return self.providers[provider_name].to_profile(model_id)
+
+    def active_provider_profile(self) -> ProviderProfile:
+        """Build a provider profile for the active provider/model selection."""
+        return self.active_provider().to_profile(self.default_model)
 
 
 def _expand_env(value: str) -> str:
@@ -234,6 +273,38 @@ def _parse_models(raw: object) -> list[ModelConfig]:
     return models
 
 
+def _provider_profile_name(vendor: str, protocol: str) -> str:
+    """Build canonical provider profile name from vendor + protocol."""
+    return f"{vendor}-{protocol.lower()}"
+
+
+def _build_provider_config(
+    *,
+    name: str,
+    vendor: str,
+    protocol: str,
+    cfg_dict: dict[str, Any],
+) -> ProviderConfig:
+    """Build a typed provider profile from an untyped mapping."""
+    base_url_val = cfg_dict.get("base_url")
+    base_url: str | None = str(base_url_val) if base_url_val else None
+    extra_body_val = cfg_dict.get("extra_body")
+    extra_body: dict[str, object] | None = (
+        _to_str_dict(extra_body_val)  # pyright: ignore[reportUnknownArgumentType]
+        if isinstance(extra_body_val, dict)
+        else None
+    )
+    return ProviderConfig(
+        name=name,
+        vendor=vendor,
+        protocol=protocol,
+        api_key=str(cfg_dict.get("api_key", "")),
+        base_url=base_url,
+        models=_parse_models(cfg_dict.get("models")),
+        extra_body=extra_body,
+    )
+
+
 def _parse_providers(data: dict[str, Any]) -> dict[str, ProviderConfig]:
     """Parse the ``providers`` section."""
     raw: object = data.get("providers")
@@ -241,27 +312,43 @@ def _parse_providers(data: dict[str, Any]) -> dict[str, ProviderConfig]:
         return {}
     providers: dict[str, ProviderConfig] = {}
     for name, cfg in raw.items():  # pyright: ignore[reportUnknownVariableType]
-        name_str = str(name)  # pyright: ignore[reportUnknownArgumentType]
+        vendor = str(name)  # pyright: ignore[reportUnknownArgumentType]
         cfg_dict = _to_str_dict(cfg)  # pyright: ignore[reportUnknownArgumentType]
         if not cfg_dict:
             continue
-        base_url_val = cfg_dict.get("base_url")
-        base_url: str | None = str(base_url_val) if base_url_val else None
-        extra_body_val = cfg_dict.get("extra_body")
-        extra_body: dict[str, object] | None = (
-            _to_str_dict(extra_body_val)  # pyright: ignore[reportUnknownArgumentType]
-            if isinstance(extra_body_val, dict)
-            else None
-        )
-        providers[name_str] = ProviderConfig(
-            name=name_str,
-            protocol=str(cfg_dict.get("protocol", "openai")),
-            api_key=str(cfg_dict.get("api_key", "")),
-            base_url=base_url,
-            models=_parse_models(cfg_dict.get("models")),
-            extra_body=extra_body,
-        )
+
+        protocols_raw = cfg_dict.get("protocols")
+        if not isinstance(protocols_raw, dict):
+            raise ValueError(
+                f"Provider vendor {vendor!r} must define a 'protocols' mapping"
+            )
+
+        common: dict[str, Any] = {
+            k: v
+            for k, v in cfg_dict.items()
+            if k != "protocols"
+        }
+        for protocol_name, protocol_cfg in protocols_raw.items():  # pyright: ignore[reportUnknownVariableType]
+            protocol = str(protocol_name).lower()  # pyright: ignore[reportUnknownArgumentType]
+            protocol_dict = _to_str_dict(protocol_cfg)  # pyright: ignore[reportUnknownArgumentType]
+            merged_cfg = {**common, **protocol_dict, "protocol": protocol}
+            profile_name = _provider_profile_name(vendor, protocol)
+            providers[profile_name] = _build_provider_config(
+                name=profile_name,
+                vendor=vendor,
+                protocol=protocol,
+                cfg_dict=merged_cfg,
+            )
     return providers
+
+
+def _resolve_default_provider_name(provider_value: str, protocol_value: str) -> str:
+    """Resolve default provider profile from vendor + protocol."""
+    provider_name = provider_value.strip()
+    if not provider_name:
+        return ""
+    protocol_name = protocol_value.strip().lower() or "openai-completions"
+    return _provider_profile_name(provider_name, protocol_name)
 
 
 def _parse_channel(
@@ -301,33 +388,33 @@ def _builtin_provider_dicts() -> dict[str, dict[str, Any]]:
         "MiniMax-M2": {"active": True},
     }
     return {
-        "deepseek-openai": {
-            "protocol": "openai",
-            "base_url": "https://api.deepseek.com",
+        "deepseek": {
             "api_key": "${DEEPSEEK_API_KEY}",
             "models": dict(ds_models),
+            "protocols": {
+                "openai-completions": {
+                    "base_url": "https://api.deepseek.com",
+                },
+                "anthropic": {
+                    "base_url": "https://api.deepseek.com/anthropic",
+                },
+            },
         },
-        "deepseek-anthropic": {
-            "protocol": "anthropic",
-            "base_url": "https://api.deepseek.com/anthropic",
-            "api_key": "${DEEPSEEK_API_KEY}",
-            "models": dict(ds_models),
-        },
-        "minimax-openai": {
-            "protocol": "openai",
-            "base_url": "https://api.minimaxi.com/v1",
+        "minimax": {
             "api_key": "${MINIMAX_API_KEY}",
             "models": dict(mm_models),
-            # MiniMax OpenAI endpoint embeds thinking as <think> tags in
-            # content by default.  Setting reasoning_split=True instructs
-            # the API to separate thinking into the reasoning_details field.
-            "extra_body": {"reasoning_split": True},
-        },
-        "minimax-anthropic": {
-            "protocol": "anthropic",
-            "base_url": "https://api.minimaxi.com/anthropic",
-            "api_key": "${MINIMAX_API_KEY}",
-            "models": dict(mm_models),
+            "protocols": {
+                "openai-completions": {
+                    "base_url": "https://api.minimaxi.com/v1",
+                    # MiniMax OpenAI endpoint embeds thinking as <think> tags in
+                    # content by default.  Setting reasoning_split=True instructs
+                    # the API to separate thinking into the reasoning_details field.
+                    "extra_body": {"reasoning_split": True},
+                },
+                "anthropic": {
+                    "base_url": "https://api.minimaxi.com/anthropic",
+                },
+            },
         },
     }
 
@@ -338,18 +425,46 @@ def _merge_builtin_providers(data: dict[str, Any]) -> None:
     Builtins form the base; user-provided providers override individual
     fields.  New user-defined providers are added as-is.
     """
-    merged = _builtin_provider_dicts()
+    merged: dict[str, dict[str, Any]] = _builtin_provider_dicts()
     user_providers: object = data.get("providers")
     if isinstance(user_providers, dict):
-        for name, cfg in user_providers.items():  # pyright: ignore[reportUnknownVariableType]
-            ns = str(name)  # pyright: ignore[reportUnknownArgumentType]
-            if ns in merged and isinstance(cfg, dict):
-                merged[ns] = {
-                    **merged[ns],
-                    **_to_str_dict(cfg),  # pyright: ignore[reportUnknownArgumentType]
+        for vendor, cfg in user_providers.items():  # pyright: ignore[reportUnknownVariableType]
+            vendor_name = str(vendor)  # pyright: ignore[reportUnknownArgumentType]
+            if not isinstance(cfg, dict):
+                continue
+
+            user_cfg = _to_str_dict(cfg)  # pyright: ignore[reportUnknownArgumentType]
+            if vendor_name not in merged:
+                merged[vendor_name] = user_cfg
+                continue
+
+            base_cfg = merged[vendor_name]
+            merged_vendor: dict[str, Any] = {
+                **base_cfg,
+                **{k: v for k, v in user_cfg.items() if k != "protocols"},
+            }
+
+            base_protocols = _to_str_dict(base_cfg.get("protocols"))
+            user_protocols_raw = user_cfg.get("protocols")
+            if isinstance(user_protocols_raw, dict):
+                user_protocols = {
+                    str(k): v
+                    for k, v in cast(dict[object, object], user_protocols_raw).items()
                 }
-            elif isinstance(cfg, dict):
-                merged[ns] = _to_str_dict(cfg)  # pyright: ignore[reportUnknownArgumentType]
+                protocol_names = set(base_protocols.keys()) | set(user_protocols.keys())
+                merged_protocols: dict[str, Any] = {}
+                for protocol_name in protocol_names:
+                    base_protocol_cfg = _to_str_dict(base_protocols.get(protocol_name))
+                    user_protocol_cfg = _to_str_dict(user_protocols.get(protocol_name))
+                    merged_protocols[protocol_name] = {
+                        **base_protocol_cfg,
+                        **user_protocol_cfg,
+                    }
+                merged_vendor["protocols"] = merged_protocols
+            else:
+                merged_vendor["protocols"] = base_protocols
+
+            merged[vendor_name] = merged_vendor
     data["providers"] = merged
 
 
@@ -384,10 +499,13 @@ def load_config(home: Path | None = None) -> CastleConfig:
 
     default_section = _to_str_dict(data.get("default"))
     default_provider = str(default_section.get("provider", ""))
+    default_protocol = str(default_section.get("protocol", ""))
     default_model = str(default_section.get("model", ""))
 
     default_provider = os.environ.get("KCASTLE_PROVIDER", default_provider) or default_provider
+    default_protocol = os.environ.get("KCASTLE_PROTOCOL", default_protocol) or default_protocol
     default_model = os.environ.get("KCASTLE_MODEL", default_model) or default_model
+    default_provider = _resolve_default_provider_name(default_provider, default_protocol)
 
     agent = _to_str_dict(data.get("agent"))
     system_prompt = str(agent.get("system_prompt", _DEFAULT_SYSTEM_PROMPT))

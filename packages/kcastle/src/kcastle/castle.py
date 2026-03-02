@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from kagent import Agent, Trace
-from kai import Provider, Tool
+from kai import Provider, Tool, create_provider
 
 from kcastle.channels import Channel
 from kcastle.channels.cli import CLIChannel
@@ -26,37 +26,9 @@ from kcastle.tools import create_builtin_tools
 
 
 def _create_provider(config: CastleConfig) -> Provider:
-    """Create a kai Provider from the active provider config.
-
-    Looks up ``config.active_provider()``, selects the kai driver class
-    based on ``protocol``, and forwards any model-specific options.
-    """
-    from kai import Anthropic, OpenAICompletions, OpenAIResponses
-
-    provider_cfg = config.active_provider()
-
-    kwargs: dict[str, object] = {"model": config.default_model}
-    if provider_cfg.api_key:
-        kwargs["api_key"] = provider_cfg.api_key
-    if provider_cfg.base_url:
-        kwargs["base_url"] = provider_cfg.base_url
-    if provider_cfg.extra_body:
-        kwargs["extra_body"] = provider_cfg.extra_body
-
-    # Merge model-specific options (max_tokens, reasoning, thinking, …)
-    model_cfg = provider_cfg.get_model(config.default_model)
-    if model_cfg:
-        kwargs.update(model_cfg.options)
-
-    protocol = provider_cfg.protocol.lower()
-    if protocol in ("openai", "openai-completions"):
-        return OpenAICompletions(**kwargs)  # type: ignore[arg-type]
-    if protocol == "openai-responses":
-        return OpenAIResponses(**kwargs)  # type: ignore[arg-type]
-    if protocol == "anthropic":
-        return Anthropic(**kwargs)  # type: ignore[arg-type]
-
-    raise ValueError(f"Unknown protocol: {provider_cfg.protocol!r}")
+    """Create a kai Provider from the active provider config."""
+    profile = config.active_provider_profile()
+    return create_provider(profile)
 
 
 def _build_system_prompt(config: CastleConfig, skill_prompts: str = "") -> str:
@@ -184,21 +156,8 @@ class Castle:
 
     def _build_provider(self, provider_name: str, model_id: str) -> Provider:
         """Validate and build a provider instance for ``provider_name/model_id``."""
-        from dataclasses import replace
-
-        if provider_name not in self._config.providers:
-            raise ValueError(f"Unknown provider: {provider_name!r}")
-
-        pcfg = self._config.providers[provider_name]
-        if pcfg.get_model(model_id) is None:
-            raise ValueError(f"Unknown model: {model_id!r} in provider {provider_name!r}")
-
-        new_config = replace(
-            self._config,
-            default_provider=provider_name,
-            default_model=model_id,
-        )
-        return _create_provider(new_config)
+        profile = self._config.provider_profile(provider_name, model_id)
+        return create_provider(profile)
 
     def _apply_provider_to_session(self, session_id: str, provider: Provider) -> None:
         """Hot-swap provider for one loaded session."""
