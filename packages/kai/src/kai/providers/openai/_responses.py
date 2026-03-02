@@ -169,7 +169,7 @@ def _convert_message(message: Message) -> list[ResponseInputItemParam]:
                 "name": tc.name,
                 "arguments": tc.arguments,
             }
-        )  # type: ignore[arg-type]
+        )
 
     return result
 

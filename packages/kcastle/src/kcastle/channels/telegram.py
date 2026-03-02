@@ -22,6 +22,22 @@ from kagent import (
     StreamChunk,
 )
 from kai import TextDeltaEvent
+from kai.errors import KaiError
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.constants import ChatAction
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
+from telegramify_markdown import markdownify  # pyright: ignore[reportMissingTypeStubs]
 
 from kcastle.log import logger
 
@@ -71,43 +87,23 @@ class TelegramChannel:
 
     async def start(self, castle: Castle) -> None:
         """Start the Telegram bot (long-polling)."""
-        try:
-            from telegram.ext import (  # type: ignore[import-untyped]
-                Application,  # pyright: ignore[reportUnknownVariableType]
-                CallbackQueryHandler,  # pyright: ignore[reportUnknownVariableType]
-                CommandHandler,  # pyright: ignore[reportUnknownVariableType]
-                MessageHandler,  # pyright: ignore[reportUnknownVariableType]
-                filters,  # pyright: ignore[reportUnknownVariableType]
-            )
-        except ImportError:
-            logger.error(
-                "python-telegram-bot is not installed. "
-                "Install it with: pip install python-telegram-bot"
-            )
-            return
-
         self._castle = castle
 
-        self._app = Application.builder().token(self._token).build()  # type: ignore[reportUnknownMemberType]
+        self._app = Application.builder().token(self._token).build()
 
-        self._app.add_handler(CommandHandler("start", self._cmd_start))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(CommandHandler("new", self._cmd_new))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(CommandHandler("model", self._cmd_model))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(CommandHandler("sessions", self._cmd_sessions))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(CommandHandler("help", self._cmd_help))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(CallbackQueryHandler(self._on_model_selected, pattern=r"^model:"))  # type: ignore[reportUnknownMemberType]
-        self._app.add_handler(  # type: ignore[reportUnknownMemberType]
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message)  # type: ignore[reportUnknownMemberType]
-        )
+        self._app.add_handler(CommandHandler("start", self._cmd_start))
+        self._app.add_handler(CommandHandler("new", self._cmd_new))
+        self._app.add_handler(CommandHandler("model", self._cmd_model))
+        self._app.add_handler(CommandHandler("sessions", self._cmd_sessions))
+        self._app.add_handler(CommandHandler("help", self._cmd_help))
+        self._app.add_handler(CallbackQueryHandler(self._on_model_selected, pattern=r"^model:"))
+        self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_message))
 
         logger.info("Starting Telegram bot")
-        await self._app.initialize()  # type: ignore[reportUnknownMemberType]
-        await self._app.start()  # type: ignore[reportUnknownMemberType]
+        await self._app.initialize()
+        await self._app.start()
 
-        # Register command menu so Telegram shows suggestions on "/"
-        from telegram import BotCommand  # type: ignore[import-untyped]
-
-        await self._app.bot.set_my_commands(  # type: ignore[reportUnknownMemberType]
+        await self._app.bot.set_my_commands(
             [
                 BotCommand("new", "Start a new session"),
                 BotCommand("model", "Switch model"),
@@ -116,7 +112,7 @@ class TelegramChannel:
             ]
         )
 
-        await self._app.updater.start_polling()  # type: ignore[union-attr]
+        await self._app.updater.start_polling()
 
         try:
             while True:
@@ -128,7 +124,7 @@ class TelegramChannel:
         """Stop the Telegram bot."""
         if self._app is not None:
             logger.info("Stopping Telegram bot")
-            await self._app.updater.stop()  # type: ignore[union-attr]
+            await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
 
@@ -196,11 +192,6 @@ class TelegramChannel:
         sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
 
         self._castle.session_manager.get_or_create(sid)
-
-        from telegram import (  # type: ignore[import-untyped]
-            InlineKeyboardButton,
-            InlineKeyboardMarkup,
-        )
 
         models = self._castle.available_models()
         if not models:
@@ -294,14 +285,14 @@ class TelegramChannel:
             prepared_input = self._castle.prepare_user_input(message_text)
             async for event in session.run(prepared_input):
                 collected_events.append(event)
-        except Exception as e:
+        except (KaiError, RuntimeError, ValueError, KeyError, OSError) as e:
             logger.exception("Error in session %s", sid)
             await update.message.reply_text(f"\u274c Error: {e}")
             return
         finally:
             typing_task.cancel()
 
-        response = _render_events_to_text(collected_events)  # pyright: ignore[reportUnknownArgumentType]
+        response = _render_events_to_text(collected_events)
         if response:
             await self._send_markdown(update.message, response)
 
@@ -313,12 +304,8 @@ class TelegramChannel:
         """
         converted: str | None = None
         try:
-            from telegramify_markdown import markdownify  # type: ignore[import-untyped]
-
-            converted = str(markdownify(text))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
-        except ImportError:
-            logger.debug("telegramify-markdown not installed — sending plain text")
-        except Exception:
+            converted = str(markdownify(text))
+        except (TypeError, ValueError, RuntimeError):
             logger.debug("Markdown conversion failed — sending plain text", exc_info=True)
 
         if converted:
@@ -327,7 +314,7 @@ class TelegramChannel:
                     chunk = converted[i : i + 4096]
                     await message.reply_text(chunk, parse_mode="MarkdownV2")
                 return
-            except Exception:
+            except (TelegramError, OSError, RuntimeError, ValueError):
                 logger.debug("MarkdownV2 send failed — falling back to plain text", exc_info=True)
 
         for i in range(0, len(text), 4096):
@@ -341,15 +328,13 @@ class TelegramChannel:
         re-send it every 4 seconds to keep it alive.
         """
         try:
-            from telegram.constants import ChatAction  # type: ignore[import-untyped]
-
             while True:
-                await self._app.bot.send_chat_action(  # type: ignore[union-attr]
+                await self._app.bot.send_chat_action(
                     chat_id=chat_id,
-                    action=ChatAction.TYPING,  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+                    action=ChatAction.TYPING,
                 )
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
-        except Exception:
+        except (TelegramError, OSError, RuntimeError):
             logger.debug("Typing indicator error (non-fatal)", exc_info=True)

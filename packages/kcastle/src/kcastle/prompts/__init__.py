@@ -22,7 +22,7 @@ from pathlib import Path
 def load_identity_prompt() -> str:
     """Load the built-in identity prompt for agent k."""
     ref = resources.files("kcastle.prompts").joinpath("identity.md")
-    return ref.read_text(encoding="utf-8")  # pyright: ignore[reportUnknownMemberType]
+    return ref.read_text(encoding="utf-8")
 
 
 def build_runtime_context() -> str:

@@ -225,10 +225,7 @@ def _parse_models(raw: object) -> list[ModelConfig]:
         if isinstance(model_cfg, dict):
             mc = _to_str_dict(model_cfg)  # pyright: ignore[reportUnknownArgumentType]
             active = bool(mc.pop("active", True))
-            options: dict[str, object] = {
-                str(k): v
-                for k, v in mc.items()  # pyright: ignore[reportUnknownVariableType]
-            }
+            options: dict[str, object] = {str(k): v for k, v in mc.items()}
             models.append(ModelConfig(id=mid, active=active, options=options))
         else:
             # Bare entry or ``model_id: true/false``
@@ -401,7 +398,7 @@ def load_config(home: Path | None = None) -> CastleConfig:
 
     # Telegram token: channel option → env var
     tg_token_opt: object = tg_cfg.options.get("token")
-    tg_token = str(tg_token_opt) if tg_token_opt else ""  # pyright: ignore[reportUnknownArgumentType]
+    tg_token = str(tg_token_opt) if tg_token_opt else ""
     tg_token = os.environ.get("KCASTLE_TG_TOKEN", tg_token) or tg_token
 
     return CastleConfig(

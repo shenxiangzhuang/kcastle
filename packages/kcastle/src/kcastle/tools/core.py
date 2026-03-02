@@ -81,7 +81,7 @@ class ReadFileTool(_WorkspaceTool):
             end = params.end_line if params.end_line is not None else len(lines)
             selected = "\n".join(lines[start:end])
             return ToolResult(output=_truncate(selected, _MAX_READ_CHARS))
-        except Exception as e:
+        except (OSError, ValueError, UnicodeError) as e:
             return ToolResult.error(str(e))
 
 
@@ -101,7 +101,7 @@ class WriteFileTool(_WorkspaceTool):
                 path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(params.content, encoding="utf-8")
             return ToolResult(output=f"Wrote {params.path}")
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ToolResult.error(str(e))
 
 
@@ -135,7 +135,7 @@ class EditFileTool(_WorkspaceTool):
             path.write_text(new_content, encoding="utf-8")
             replaced = count if params.replace_all else 1
             return ToolResult(output=f"Edited {params.path} (replaced {replaced} occurrence(s))")
-        except Exception as e:
+        except (OSError, ValueError, UnicodeError) as e:
             return ToolResult.error(str(e))
 
 
@@ -159,7 +159,7 @@ class ListDirTool(_WorkspaceTool):
                 shown = self._display_path(item)
                 out.append(f"{shown}/" if item.is_dir() else shown)
             return ToolResult(output="\n".join(out) if out else "(empty)")
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ToolResult.error(str(e))
 
 
@@ -184,7 +184,7 @@ class FindFilesTool(_WorkspaceTool):
                 if len(results) >= params.max_results:
                     break
             return ToolResult(output="\n".join(results) if results else "(no matches)")
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ToolResult.error(str(e))
 
 
@@ -212,7 +212,7 @@ class GrepTool(_WorkspaceTool):
                     continue
                 try:
                     text = _safe_text(file_path)
-                except Exception:
+                except (OSError, UnicodeError):
                     continue
                 for line_no, line in enumerate(text.splitlines(), start=1):
                     ok = bool(needle.search(line)) if needle else params.query in line
@@ -222,7 +222,7 @@ class GrepTool(_WorkspaceTool):
                         if len(matches) >= params.max_results:
                             return ToolResult(output="\n".join(matches))
             return ToolResult(output="\n".join(matches) if matches else "(no matches)")
-        except Exception as e:
+        except (OSError, ValueError, re.error) as e:
             return ToolResult.error(str(e))
 
 
@@ -262,7 +262,7 @@ class BashTool(_WorkspaceTool):
             if proc.returncode and proc.returncode != 0:
                 return ToolResult.error(f"exit={proc.returncode}\n{text}")
             return ToolResult(output=text or "(no output)")
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             return ToolResult.error(str(e))
 
 

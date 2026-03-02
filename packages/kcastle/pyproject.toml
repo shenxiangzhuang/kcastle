@@ -10,14 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
     "kagent",
     "pyyaml>=6.0",
+    "python-telegram-bot>=21.0",
+    "telegramify-markdown>=0.5.4",
 ]
 
 [project.scripts]
 k = "kcastle.cli:main"
-
-[project.optional-dependencies]
-telegram = ["python-telegram-bot>=21.0", "telegramify-markdown>=0.5.4"]
-all = ["python-telegram-bot>=21.0", "telegramify-markdown>=0.5.4"]
 
 [dependency-groups]
 dev = [
@@ -53,6 +51,7 @@ select = [
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
+reportUnnecessaryTypeIgnoreComment = "warning"
 include = [
     "src/**/*.py",
     "tests/**/*.py",

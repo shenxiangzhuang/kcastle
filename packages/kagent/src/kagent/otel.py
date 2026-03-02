@@ -46,7 +46,7 @@ def _get_otel_trace() -> Any:
     Raises ``ImportError`` with a helpful message if not installed.
     """
     try:
-        import opentelemetry.trace as _trace  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]
+        import opentelemetry.trace as _trace  # type: ignore[import-not-found]
     except ImportError:
         raise ImportError(
             "opentelemetry-api is required for OTelHooks. "

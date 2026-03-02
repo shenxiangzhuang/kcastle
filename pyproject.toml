@@ -47,6 +47,7 @@ asyncio_mode = "auto"
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
+reportUnnecessaryTypeIgnoreComment = "warning"
 include = [
     "packages/*/src/**/*.py",
     "packages/*/tests/**/*.py",
