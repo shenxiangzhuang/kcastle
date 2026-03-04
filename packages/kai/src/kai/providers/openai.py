@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 import httpx
@@ -24,6 +24,7 @@ from openai.types.responses import (
 
 from kai.errors import ErrorKind, KaiError
 from kai.providers.base import ProviderBase
+from kai.tool import Tool
 from kai.types.message import (
     ContentPart,
     Context,
@@ -108,17 +109,11 @@ class OpenAIChatBase(OpenAIBase, ABC):
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else None
 
-        api_kwargs: dict[str, Any] = {}
+        api_kwargs: dict[str, Any] = {
+            k: kwargs[k] for k in ("temperature", "max_tokens", "top_p", "stop") if k in kwargs
+        }
         if tools:
             api_kwargs["tools"] = tools
-        if "temperature" in kwargs:
-            api_kwargs["temperature"] = kwargs["temperature"]
-        if "max_tokens" in kwargs:
-            api_kwargs["max_tokens"] = kwargs["max_tokens"]
-        if "top_p" in kwargs:
-            api_kwargs["top_p"] = kwargs["top_p"]
-        if "stop" in kwargs:
-            api_kwargs["stop"] = kwargs["stop"]
         if self._extra_body:
             api_kwargs["extra_body"] = self._extra_body
 
@@ -153,15 +148,14 @@ class OpenAIResponsesBase(OpenAIBase, ABC):
         input_items = _build_input(context)
         tools = _build_tools(context.tools) if context.tools else None
 
-        api_kwargs: dict[str, Any] = {"store": False}
+        api_kwargs: dict[str, Any] = {
+            "store": False,
+            **{k: kwargs[k] for k in ("temperature", "top_p") if k in kwargs},
+        }
         if tools:
             api_kwargs["tools"] = tools
-        if "temperature" in kwargs:
-            api_kwargs["temperature"] = kwargs["temperature"]
         if "max_tokens" in kwargs:
             api_kwargs["max_output_tokens"] = kwargs["max_tokens"]
-        if "top_p" in kwargs:
-            api_kwargs["top_p"] = kwargs["top_p"]
 
         reasoning = kwargs.get("reasoning", self._reasoning)
         if reasoning:
@@ -217,7 +211,7 @@ class OpenAIResponses(OpenAIResponsesBase):
         )
 
 
-def _build_tools(tools: Any) -> list[ChatCompletionToolParam]:
+def _build_tools(tools: Sequence[Tool]) -> list[ChatCompletionToolParam]:
     return [
         {
             "type": "function",

@@ -20,7 +20,6 @@ Example::
 """
 
 from kai.errors import ErrorKind, KaiError
-
 from kai.providers import (
     AnthropicMessages,
     DeepseekAnthropic,
@@ -32,9 +31,7 @@ from kai.providers import (
     ProviderBase,
 )
 from kai.stream import complete, stream
-
 from kai.tool import Tool, ToolResult
-
 from kai.types.message import (
     ContentPart,
     Context,

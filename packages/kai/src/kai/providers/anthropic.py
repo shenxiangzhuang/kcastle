@@ -98,15 +98,10 @@ class AnthropicBase(ProviderBase, ABC):
 
         api_kwargs: dict[str, Any] = {
             "max_tokens": kwargs.get("max_tokens", self._max_tokens),
+            **{k: kwargs[k] for k in ("temperature", "top_p", "top_k") if k in kwargs},
         }
         if self._thinking:
             api_kwargs["thinking"] = self._thinking
-        if "temperature" in kwargs:
-            api_kwargs["temperature"] = kwargs["temperature"]
-        if "top_p" in kwargs:
-            api_kwargs["top_p"] = kwargs["top_p"]
-        if "top_k" in kwargs:
-            api_kwargs["top_k"] = kwargs["top_k"]
 
         try:
             response = await self._client.messages.create(
@@ -245,7 +240,7 @@ def _convert_message(message: Message) -> MessageParam:
     return MessageParam(role="assistant", content=blocks)
 
 
-_ANTHROPIC_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+_ANTHROPIC_MEDIA_TYPES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
 def _image_to_anthropic(part: ImagePart) -> ImageBlockParam:
@@ -287,49 +282,49 @@ async def _convert_stream(
 
     async with response as stream:
         async for event in stream:
-            if isinstance(event, MessageStartEvent):
-                usage = event.message.usage
-                input_tokens = usage.input_tokens or 0
-                output_tokens = usage.output_tokens or 0
-                cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-                cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            match event:
+                case MessageStartEvent(message=msg):
+                    usage = msg.usage
+                    input_tokens = usage.input_tokens or 0
+                    output_tokens = usage.output_tokens or 0
+                    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+                    cache_write = getattr(usage, "cache_creation_input_tokens", 0) or 0
 
-            elif isinstance(event, RawContentBlockStartEvent):
-                block = event.content_block
-                match block.type:
-                    case "text":
-                        if block.text:
-                            yield TextDelta(delta=block.text)
-                    case "thinking":
-                        if hasattr(block, "thinking") and block.thinking:
-                            yield ThinkDelta(delta=block.thinking)
-                    case "tool_use":
-                        if active_tool:
-                            yield ToolCallEnd()
-                        active_tool = True
-                        yield ToolCallBegin(id=block.id, name=block.name)
-                    case _:
-                        pass
+                case RawContentBlockStartEvent(content_block=block):
+                    match block.type:
+                        case "text":
+                            if block.text:
+                                yield TextDelta(delta=block.text)
+                        case "thinking":
+                            if hasattr(block, "thinking") and block.thinking:
+                                yield ThinkDelta(delta=block.thinking)
+                        case "tool_use":
+                            if active_tool:
+                                yield ToolCallEnd()
+                            active_tool = True
+                            yield ToolCallBegin(id=block.id, name=block.name)
+                        case _:
+                            pass
 
-            elif isinstance(event, RawContentBlockDeltaEvent):
-                delta = event.delta
-                match delta.type:
-                    case "text_delta":
-                        yield TextDelta(delta=delta.text)
-                    case "thinking_delta":
-                        yield ThinkDelta(delta=delta.thinking)
-                    case "input_json_delta":
-                        yield ToolCallDelta(arguments=delta.partial_json)
-                    case "signature_delta":
-                        yield ThinkSignature(signature=delta.signature)
-                    case _:
-                        pass
+                case RawContentBlockDeltaEvent(delta=delta):
+                    match delta.type:
+                        case "text_delta":
+                            yield TextDelta(delta=delta.text)
+                        case "thinking_delta":
+                            yield ThinkDelta(delta=delta.thinking)
+                        case "input_json_delta":
+                            yield ToolCallDelta(arguments=delta.partial_json)
+                        case "signature_delta":
+                            yield ThinkSignature(signature=delta.signature)
+                        case _:
+                            pass
 
-            elif isinstance(event, MessageDeltaEvent):
-                if event.usage:
-                    delta_usage = event.usage
+                case MessageDeltaEvent(usage=delta_usage) if delta_usage:
                     if hasattr(delta_usage, "output_tokens") and delta_usage.output_tokens:
                         output_tokens = delta_usage.output_tokens
+
+                case _:
+                    pass
 
     # Close any active tool call
     if active_tool:
