@@ -21,7 +21,7 @@ from kagent import (
     AgentEvent,
     StreamChunk,
 )
-from kai import TextDeltaEvent
+from kai import TextDelta
 from kai.errors import KaiError
 from telegram import (
     BotCommand,
@@ -63,7 +63,7 @@ def _render_events_to_text(events: list[AgentEvent]) -> str:
     for event in events:
         match event:
             case StreamChunk(event=stream_event):
-                if isinstance(stream_event, TextDeltaEvent):
+                if isinstance(stream_event, TextDelta):
                     parts.append(stream_event.delta)
             case AgentError(error=err):
                 parts.append(f"\n❌ Error: {err}")

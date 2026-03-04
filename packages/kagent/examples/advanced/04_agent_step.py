@@ -21,7 +21,7 @@ import asyncio
 import os
 
 from kai import AnthropicMessages, Context, Message, Tool, ToolResult
-from kai.types.stream import TextDeltaEvent
+from kai.types.stream import TextDelta
 from pydantic import BaseModel, Field
 
 from kagent import agent_step
@@ -90,7 +90,7 @@ async def run_step(
 
     async for event in agent_step(llm=provider, context=context, tools=tools):
         match event:
-            case StreamChunk(event=e) if isinstance(e, TextDeltaEvent):
+            case StreamChunk(event=e) if isinstance(e, TextDelta):
                 print(e.delta, end="", flush=True)
 
             case ToolExecStart(tool_name=name, arguments=args):

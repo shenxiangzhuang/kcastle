@@ -2,7 +2,7 @@
 
 Re-exports all types from submodules for convenience:
 - ``message``: Message, Context, ContentPart, ToolCall, etc.
-- ``stream``: Raw Chunk types and high-level StreamEvent types.
+- ``stream``: StreamEvent union and individual event types.
 - ``usage``: TokenUsage statistics.
 """
 
@@ -16,27 +16,16 @@ from kai.types.message import (
     ToolCall,
 )
 from kai.types.stream import (
-    Chunk,
-    DoneEvent,
-    ErrorEvent,
-    StartEvent,
+    Done,
+    Error,
     StreamEvent,
-    TextChunk,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
-    ThinkChunk,
-    ThinkDeltaEvent,
-    ThinkEndEvent,
-    ThinkSignatureChunk,
-    ThinkStartEvent,
+    TextDelta,
+    ThinkDelta,
+    ThinkSignature,
+    ToolCallBegin,
     ToolCallDelta,
-    ToolCallDeltaEvent,
     ToolCallEnd,
-    ToolCallEndEvent,
-    ToolCallStart,
-    ToolCallStartEvent,
-    UsageChunk,
+    Usage,
 )
 from kai.types.usage import TokenUsage
 
@@ -49,29 +38,17 @@ __all__ = [
     "ImagePart",
     "ToolCall",
     "Context",
-    # Stream chunks
-    "Chunk",
-    "TextChunk",
-    "ThinkChunk",
-    "ThinkSignatureChunk",
-    "ToolCallStart",
-    "ToolCallDelta",
-    "ToolCallEnd",
-    "UsageChunk",
     # Stream events
     "StreamEvent",
-    "StartEvent",
-    "TextStartEvent",
-    "TextDeltaEvent",
-    "TextEndEvent",
-    "ThinkStartEvent",
-    "ThinkDeltaEvent",
-    "ThinkEndEvent",
-    "ToolCallStartEvent",
-    "ToolCallDeltaEvent",
-    "ToolCallEndEvent",
-    "DoneEvent",
-    "ErrorEvent",
+    "TextDelta",
+    "ThinkDelta",
+    "ThinkSignature",
+    "ToolCallBegin",
+    "ToolCallDelta",
+    "ToolCallEnd",
+    "Usage",
+    "Done",
+    "Error",
     # Usage
     "TokenUsage",
 ]

@@ -7,21 +7,28 @@ from typing import Any
 
 from kai import Context, Tool, ToolResult
 from kai.providers.base import ProviderBase
-from kai.types.stream import Chunk, TextChunk, ToolCallDelta, ToolCallEnd, ToolCallStart, UsageChunk
+from kai.types.stream import (
+    StreamEvent,
+    TextDelta,
+    ToolCallBegin,
+    ToolCallDelta,
+    ToolCallEnd,
+    Usage,
+)
 from kai.types.usage import TokenUsage
 from pydantic import BaseModel, Field
 
 
 class MockProvider(ProviderBase):
-    """A mock provider that yields pre-configured chunks.
+    """A mock provider that yields pre-configured events.
 
-    Supports multiple turns via a list of chunk sequences.
+    Supports multiple turns via a list of event sequences.
     The first call to stream returns the first sequence, etc.
     """
 
     def __init__(
         self,
-        turns: Sequence[Sequence[Chunk]],
+        turns: Sequence[Sequence[StreamEvent]],
         *,
         name: str = "mock",
         model: str = "mock-1",
@@ -39,13 +46,13 @@ class MockProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         if self._call_index >= len(self._turns):
             raise RuntimeError("MockProvider exhausted: no more turns configured")
-        chunks = self._turns[self._call_index]
+        events = self._turns[self._call_index]
         self._call_index += 1
-        for chunk in chunks:
-            yield chunk
+        for event in events:
+            yield event
 
 
 class ErrorProvider(ProviderBase):
@@ -64,26 +71,26 @@ class ErrorProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         raise self._error
         # Make this a valid async generator
         yield  # type: ignore[misc]  # pragma: no cover
 
 
-def text_chunks(*texts: str) -> list[Chunk]:
-    """Create chunks for a simple text response."""
-    result: list[Chunk] = [TextChunk(text=t) for t in texts]
-    result.append(UsageChunk(usage=TokenUsage(input_tokens=10, output_tokens=5)))
+def text_chunks(*texts: str) -> list[StreamEvent]:
+    """Create events for a simple text response."""
+    result: list[StreamEvent] = [TextDelta(delta=t) for t in texts]
+    result.append(Usage(usage=TokenUsage(input_tokens=10, output_tokens=5)))
     return result
 
 
-def tool_call_chunks(tool_id: str, tool_name: str, arguments_json: str) -> list[Chunk]:
-    """Create chunks for a tool call response."""
+def tool_call_chunks(tool_id: str, tool_name: str, arguments_json: str) -> list[StreamEvent]:
+    """Create events for a tool call response."""
     return [
-        ToolCallStart(id=tool_id, name=tool_name),
+        ToolCallBegin(id=tool_id, name=tool_name),
         ToolCallDelta(arguments=arguments_json),
         ToolCallEnd(),
-        UsageChunk(usage=TokenUsage(input_tokens=10, output_tokens=5)),
+        Usage(usage=TokenUsage(input_tokens=10, output_tokens=5)),
     ]
 
 

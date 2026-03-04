@@ -1,29 +1,31 @@
-"""Provider-agnostic error hierarchy."""
+"""Provider-agnostic error type for kai."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from enum import StrEnum
 
 
+class ErrorKind(StrEnum):
+    """Stable error categories for caller decisions."""
+
+    CONNECTION = "connection"
+    TIMEOUT = "timeout"
+    STATUS = "status"
+    EMPTY_RESPONSE = "empty_response"
+    PROVIDER = "provider"
+
+
+@dataclass(frozen=True)
 class KaiError(Exception):
-    """Base error for all kai errors."""
+    """Single error type for all kai errors."""
 
+    kind: ErrorKind
+    message: str
+    cause: Exception | None = None
 
-class ProviderError(KaiError):
-    """Base error for all provider-related errors."""
+    def __str__(self) -> str:
+        return f"[{self.kind}] {self.message}"
 
-
-class ConnectionError(ProviderError):
-    """The API connection failed."""
-
-
-class TimeoutError(ProviderError):
-    """The API request timed out."""
-
-
-class StatusError(ProviderError):
-    """The API returned an HTTP error status."""
-
-    def __init__(self, status_code: int, message: str) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-
-
-class EmptyResponseError(ProviderError):
-    """The API returned an empty response."""
+    def with_cause(self, cause: Exception) -> KaiError:
+        return replace(self, cause=cause)

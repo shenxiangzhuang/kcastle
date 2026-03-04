@@ -17,12 +17,12 @@ from kai.providers.openai import (
 )
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
-    Chunk,
-    TextChunk,
+    StreamEvent,
+    TextDelta,
+    ToolCallBegin,
     ToolCallDelta,
     ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
+    Usage,
 )
 
 
@@ -81,10 +81,10 @@ def _chunk(
 async def _stream_raw(
     api_chunks: list[ChatCompletionChunk],
     context: Context | None = None,
-) -> tuple[list[Chunk], dict[str, Any]]:
+) -> tuple[list[StreamEvent], dict[str, Any]]:
     """Call ``OpenAIChatCompletions.stream()`` with a mocked client.
 
-    Returns ``(output_chunks, captured_create_kwargs)``.
+    Returns ``(output_events, captured_create_kwargs)``.
     """
     if context is None:
         context = _ctx(Message(role="user", content="hello"))
@@ -242,7 +242,7 @@ class TestMessageSerialization:
 
 
 class TestStreamConversion:
-    """ChatCompletionChunk stream → kai Chunk sequence."""
+    """ChatCompletionChunk stream → kai StreamEvent sequence."""
 
     async def test_text_chunks(self) -> None:
         chunks, _ = await _stream_raw(
@@ -251,10 +251,10 @@ class TestStreamConversion:
                 _chunk(content=" world"),
             ]
         )
-        texts = [c for c in chunks if isinstance(c, TextChunk)]
+        texts = [c for c in chunks if isinstance(c, TextDelta)]
         assert len(texts) == 2
-        assert texts[0].text == "Hello"
-        assert texts[1].text == " world"
+        assert texts[0].delta == "Hello"
+        assert texts[1].delta == " world"
 
     async def test_single_tool_call(self) -> None:
         chunks, _ = await _stream_raw(
@@ -267,7 +267,7 @@ class TestStreamConversion:
                 _chunk(tool_calls=[{"index": 0, "arguments": '{"q": "test"}'}]),
             ]
         )
-        assert isinstance(chunks[0], ToolCallStart)
+        assert isinstance(chunks[0], ToolCallBegin)
         assert chunks[0].id == "call_1"
         assert chunks[0].name == "search"
         assert isinstance(chunks[1], ToolCallDelta)
@@ -300,11 +300,11 @@ class TestStreamConversion:
                 ),
             ]
         )
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         ends = [c for c in chunks if isinstance(c, ToolCallEnd)]
         assert len(starts) == 3
         assert len(ends) == 3
-        si = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallStart)]
+        si = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallBegin)]
         ei = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallEnd)]
         assert ei[0] < si[1]
         assert ei[1] < si[2]
@@ -324,7 +324,7 @@ class TestStreamConversion:
                 ),
             ]
         )
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         assert starts[0].id == "call_a"
         assert starts[0].name == "tool_a"
         assert starts[1].id == "call_b"
@@ -349,7 +349,7 @@ class TestStreamConversion:
                 _chunk(tool_calls=[{"index": 1, "arguments": '{"id": 1}'}]),
             ]
         )
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         ends = [c for c in chunks if isinstance(c, ToolCallEnd)]
         deltas = [c for c in chunks if isinstance(c, ToolCallDelta)]
         assert len(starts) == 2
@@ -357,7 +357,7 @@ class TestStreamConversion:
         assert len(deltas) == 3
         end0 = next(i for i, c in enumerate(chunks) if isinstance(c, ToolCallEnd))
         start1 = next(
-            i for i, c in enumerate(chunks) if isinstance(c, ToolCallStart) and c.name == "lookup"
+            i for i, c in enumerate(chunks) if isinstance(c, ToolCallBegin) and c.name == "lookup"
         )
         assert end0 < start1
 
@@ -373,13 +373,13 @@ class TestStreamConversion:
                 ),
             ]
         )
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         ends = [c for c in chunks if isinstance(c, ToolCallEnd)]
         assert len(starts) == 2
         assert len(ends) == 2
         end0 = next(i for i, c in enumerate(chunks) if isinstance(c, ToolCallEnd))
         start1 = next(
-            i for i, c in enumerate(chunks) if isinstance(c, ToolCallStart) and c.id == "call_2"
+            i for i, c in enumerate(chunks) if isinstance(c, ToolCallBegin) and c.id == "call_2"
         )
         assert end0 < start1
 
@@ -395,7 +395,7 @@ class TestStreamConversion:
                 ),
             ]
         )
-        u = [c for c in chunks if isinstance(c, UsageChunk)]
+        u = [c for c in chunks if isinstance(c, Usage)]
         assert len(u) == 1
         assert u[0].usage.input_tokens == 10
         assert u[0].usage.output_tokens == 5

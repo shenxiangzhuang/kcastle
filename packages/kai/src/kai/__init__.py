@@ -23,14 +23,7 @@ import logging as _logging
 
 # Core functions
 # Errors
-from kai.errors import (
-    ConnectionError,
-    EmptyResponseError,
-    KaiError,
-    ProviderError,
-    StatusError,
-    TimeoutError,
-)
+from kai.errors import ErrorKind, KaiError
 
 # Providers
 from kai.providers import (
@@ -59,27 +52,16 @@ from kai.types.message import (
     ToolCall,
 )
 from kai.types.stream import (
-    Chunk,
-    DoneEvent,
-    ErrorEvent,
-    StartEvent,
+    Done,
+    Error,
     StreamEvent,
-    TextChunk,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
-    ThinkChunk,
-    ThinkDeltaEvent,
-    ThinkEndEvent,
-    ThinkSignatureChunk,
-    ThinkStartEvent,
+    TextDelta,
+    ThinkDelta,
+    ThinkSignature,
+    ToolCallBegin,
     ToolCallDelta,
-    ToolCallDeltaEvent,
     ToolCallEnd,
-    ToolCallEndEvent,
-    ToolCallStart,
-    ToolCallStartEvent,
-    UsageChunk,
+    Usage,
 )
 from kai.types.usage import TokenUsage
 
@@ -98,40 +80,24 @@ __all__ = [
     # Tool
     "Tool",
     "ToolResult",
-    # Stream chunks
-    "Chunk",
-    "TextChunk",
-    "ThinkChunk",
-    "ThinkSignatureChunk",
-    "ToolCallStart",
-    "ToolCallDelta",
-    "ToolCallEnd",
-    "UsageChunk",
     # Stream events
     "StreamEvent",
-    "StartEvent",
-    "TextStartEvent",
-    "TextDeltaEvent",
-    "TextEndEvent",
-    "ThinkStartEvent",
-    "ThinkDeltaEvent",
-    "ThinkEndEvent",
-    "ToolCallStartEvent",
-    "ToolCallDeltaEvent",
-    "ToolCallEndEvent",
-    "DoneEvent",
-    "ErrorEvent",
+    "TextDelta",
+    "ThinkDelta",
+    "ThinkSignature",
+    "ToolCallBegin",
+    "ToolCallDelta",
+    "ToolCallEnd",
+    "Usage",
+    "Done",
+    "Error",
     # Protocol
     "ProviderBase",
     # Usage
     "TokenUsage",
     # Errors
     "KaiError",
-    "ProviderError",
-    "ConnectionError",
-    "TimeoutError",
-    "StatusError",
-    "EmptyResponseError",
+    "ErrorKind",
     # Implementations
     "OpenAIChatCompletions",
     "OpenAIResponses",

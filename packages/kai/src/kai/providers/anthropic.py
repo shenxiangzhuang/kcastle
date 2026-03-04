@@ -39,19 +39,19 @@ from anthropic.types import (
     ToolUseBlockParam,
 )
 
-from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
+from kai.errors import ErrorKind, KaiError
 from kai.providers.base import ProviderBase
 from kai.tool import Tool
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart
 from kai.types.stream import (
-    Chunk,
-    TextChunk,
-    ThinkChunk,
-    ThinkSignatureChunk,
+    StreamEvent,
+    TextDelta,
+    ThinkDelta,
+    ThinkSignature,
+    ToolCallBegin,
     ToolCallDelta,
     ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
+    Usage,
 )
 from kai.types.usage import TokenUsage
 
@@ -90,8 +90,8 @@ class AnthropicBase(ProviderBase, ABC):
     def model(self) -> str:
         return self._model
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
-        """Stream raw chunks from the Anthropic Messages API."""
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+        """Stream raw events from the Anthropic Messages API."""
         system = context.system or ""
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else []
@@ -117,8 +117,8 @@ class AnthropicBase(ProviderBase, ABC):
                 stream=True,
                 **api_kwargs,
             )
-            async for chunk in _convert_stream(response):
-                yield chunk
+            async for event in _convert_stream(response):
+                yield event
         except AnthropicError as e:
             raise _convert_error(e) from e
 
@@ -172,7 +172,7 @@ def _build_messages(context: Context) -> list[MessageParam]:
             while i < len(msgs) and msgs[i].role == "tool":
                 tm = msgs[i]
                 if tm.tool_call_id is None:
-                    raise ProviderError("Tool result message missing tool_call_id.")
+                    raise KaiError(ErrorKind.PROVIDER, "Tool result message missing tool_call_id.")
                 tool_blocks.append(
                     ToolResultBlockParam(
                         type="tool_result",
@@ -192,7 +192,7 @@ def _convert_message(message: Message) -> MessageParam:
     """Convert a single kai Message to the Anthropic wire format."""
     if message.role == "tool":
         if message.tool_call_id is None:
-            raise ProviderError("Tool result message missing tool_call_id.")
+            raise KaiError(ErrorKind.PROVIDER, "Tool result message missing tool_call_id.")
         block = ToolResultBlockParam(
             type="tool_result",
             tool_use_id=message.tool_call_id,
@@ -229,9 +229,9 @@ def _convert_message(message: Message) -> MessageParam:
         try:
             raw: object = json.loads(tc.arguments) if tc.arguments else {}
         except json.JSONDecodeError as e:
-            raise ProviderError("Tool call arguments must be valid JSON.") from e
+            raise KaiError(ErrorKind.PROVIDER, "Tool call arguments must be valid JSON.") from e
         if not isinstance(raw, dict):
-            raise ProviderError("Tool call arguments must be a JSON object.")
+            raise KaiError(ErrorKind.PROVIDER, "Tool call arguments must be a JSON object.")
         tool_input = cast(dict[str, object], raw)
         blocks.append(
             ToolUseBlockParam(
@@ -251,7 +251,7 @@ _ANTHROPIC_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 def _image_to_anthropic(part: ImagePart) -> ImageBlockParam:
     """Convert an ImagePart to Anthropic's image block format."""
     if part.mime_type not in _ANTHROPIC_MEDIA_TYPES:
-        raise ProviderError(f"Unsupported image type: {part.mime_type}")
+        raise KaiError(ErrorKind.PROVIDER, f"Unsupported image type: {part.mime_type}")
     media_type = cast(Any, part.mime_type)
     return ImageBlockParam(
         type="image",
@@ -277,8 +277,8 @@ def _build_tools(tools: Sequence[Tool]) -> list[ToolParam]:
 
 async def _convert_stream(
     response: AsyncStream[RawMessageStreamEvent],
-) -> AsyncIterator[Chunk]:
-    """Convert Anthropic stream events to kai Chunks."""
+) -> AsyncIterator[StreamEvent]:
+    """Convert Anthropic stream events to kai StreamEvents."""
     input_tokens = 0
     output_tokens = 0
     cache_read = 0
@@ -299,15 +299,15 @@ async def _convert_stream(
                 match block.type:
                     case "text":
                         if block.text:
-                            yield TextChunk(text=block.text)
+                            yield TextDelta(delta=block.text)
                     case "thinking":
                         if hasattr(block, "thinking") and block.thinking:
-                            yield ThinkChunk(text=block.thinking)
+                            yield ThinkDelta(delta=block.thinking)
                     case "tool_use":
                         if active_tool:
                             yield ToolCallEnd()
                         active_tool = True
-                        yield ToolCallStart(id=block.id, name=block.name)
+                        yield ToolCallBegin(id=block.id, name=block.name)
                     case _:
                         pass
 
@@ -315,13 +315,13 @@ async def _convert_stream(
                 delta = event.delta
                 match delta.type:
                     case "text_delta":
-                        yield TextChunk(text=delta.text)
+                        yield TextDelta(delta=delta.text)
                     case "thinking_delta":
-                        yield ThinkChunk(text=delta.thinking)
+                        yield ThinkDelta(delta=delta.thinking)
                     case "input_json_delta":
                         yield ToolCallDelta(arguments=delta.partial_json)
                     case "signature_delta":
-                        yield ThinkSignatureChunk(signature=delta.signature)
+                        yield ThinkSignature(signature=delta.signature)
                     case _:
                         pass
 
@@ -336,7 +336,7 @@ async def _convert_stream(
         yield ToolCallEnd()
 
     # Emit final usage
-    yield UsageChunk(
+    yield Usage(
         usage=TokenUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -346,12 +346,14 @@ async def _convert_stream(
     )
 
 
-def _convert_error(error: AnthropicError) -> ProviderError:
+def _convert_error(error: AnthropicError) -> KaiError:
     """Convert Anthropic errors to kai errors."""
-    if isinstance(error, AnthropicStatusError):
-        return StatusError(error.status_code, str(error))
-    if isinstance(error, AnthropicConnectionError):
-        return ConnectionError(str(error))
-    if isinstance(error, AnthropicTimeoutError):
-        return TimeoutError(str(error))
-    return ProviderError(f"Anthropic error: {error}")
+    match error:
+        case AnthropicStatusError(status_code=code):
+            return KaiError(ErrorKind.STATUS, f"HTTP {code}: {error}")
+        case AnthropicConnectionError():
+            return KaiError(ErrorKind.CONNECTION, str(error))
+        case AnthropicTimeoutError():
+            return KaiError(ErrorKind.TIMEOUT, str(error))
+        case _:
+            return KaiError(ErrorKind.PROVIDER, f"Anthropic error: {error}")

@@ -10,13 +10,14 @@ import asyncio
 
 from kai import (
     Context,
-    DoneEvent,
-    ErrorEvent,
+    Done,
+    Error,
+    ErrorKind,
+    KaiError,
     Message,
     OpenAIChatCompletions,
     stream,
 )
-from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
 
 
 async def example_complete_error_handling() -> None:
@@ -36,18 +37,20 @@ async def example_complete_error_handling() -> None:
     try:
         message = await complete(provider, context)
         print(message.extract_text())
-    except StatusError as e:
-        print(f"HTTP {e.status_code}: {e}")
-    except ConnectionError:
-        print("Could not connect to the API")
-    except TimeoutError:
-        print("Request timed out")
-    except ProviderError as e:
-        print(f"Provider error: {e}")
+    except KaiError as e:
+        match e.kind:
+            case ErrorKind.STATUS:
+                print(f"Status error: {e}")
+            case ErrorKind.CONNECTION:
+                print("Could not connect to the API")
+            case ErrorKind.TIMEOUT:
+                print("Request timed out")
+            case _:
+                print(f"Provider error: {e}")
 
 
 async def example_stream_error_handling() -> None:
-    """Error handling with stream() — errors arrive as ErrorEvent."""
+    """Error handling with stream() — errors arrive as Error event."""
     # provider = OpenAIChatCompletions(model="gpt-4o", api_key="invalid-key")
     provider = OpenAIChatCompletions(
         model="deepseek-chat",
@@ -60,10 +63,9 @@ async def example_stream_error_handling() -> None:
 
     async for event in stream(provider, context):
         match event:
-            case ErrorEvent(error=error):
+            case Error(error=error):
                 print(f"Stream error: {error}")
-                # error.partial contains the partial message accumulated so far
-            case DoneEvent(message=msg):
+            case Done(message=msg):
                 print(msg.extract_text())
             case _:
                 pass

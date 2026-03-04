@@ -1,45 +1,41 @@
 """Core streaming API — stream() and complete().
 
-stream() consumes raw Chunks from an LLM implementation, accumulates an assistant Message,
-and yields rich StreamEvent objects with partial message snapshots.
+``stream()`` consumes events from a Provider, forwards them to the caller,
+and accumulates an assistant Message that is yielded as the final ``Done`` event.
 
-complete() is a convenience wrapper that collects the full message.
+``complete()`` is a convenience wrapper that collects the full message.
 """
+
+from __future__ import annotations
 
 import logging
 import time
-from collections.abc import AsyncIterator
-from typing import Any, cast
+from collections.abc import AsyncIterator, Sequence
+from typing import Any
 
-from kai.errors import EmptyResponseError, ProviderError
+from kai.errors import ErrorKind, KaiError
 from kai.providers import ProviderBase
 from kai.types.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
-    Chunk,
-    DoneEvent,
-    ErrorEvent,
-    StartEvent,
+    Done,
+    Error,
     StreamEvent,
-    TextChunk,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
-    ThinkChunk,
-    ThinkDeltaEvent,
-    ThinkEndEvent,
-    ThinkSignatureChunk,
-    ThinkStartEvent,
+    TextDelta,
+    ThinkDelta,
+    ThinkSignature,
+    ToolCallBegin,
     ToolCallDelta,
-    ToolCallDeltaEvent,
     ToolCallEnd,
-    ToolCallEndEvent,
-    ToolCallStart,
-    ToolCallStartEvent,
-    UsageChunk,
+    Usage,
 )
 from kai.types.usage import TokenUsage
 
 logger = logging.getLogger("kai.stream")
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 async def stream(
@@ -49,24 +45,17 @@ async def stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream events from an LLM.
 
-    Consumes raw chunks from the LLM implementation and yields rich stream events,
-    each carrying an accumulated partial assistant message.
-
-    Args:
-        llm: The LLM implementation to use.
-        context: Conversation context (system prompt, messages, tools).
-        **kwargs: API-specific options (temperature, max_tokens, etc.).
-
-    Yields:
-        StreamEvent objects. The final event is always DoneEvent or ErrorEvent.
+    Provider events are forwarded directly to callers.  In addition, a final
+    ``Done`` or ``Error`` event is appended carrying the accumulated assistant
+    message.
 
     Example::
 
         async for event in stream(llm, context):
             match event:
-                case TextDeltaEvent(delta=text):
+                case TextDelta(delta=text):
                     print(text, end="")
-                case DoneEvent(message=msg):
+                case Done(message=msg):
                     print(f"\\nDone. Tokens: {msg.usage}")
     """
     msg_count = len(context.messages) if context.messages else 0
@@ -80,64 +69,32 @@ async def stream(
     )
     t0 = time.perf_counter()
 
-    state = _StreamState()
-
-    yield StartEvent()
+    events: list[StreamEvent] = []
 
     try:
-        async for chunk in llm.stream(context, **kwargs):
-            for event in state.process_chunk(chunk):
-                yield event
-    except ProviderError as e:
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.error(
-            "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
-            llm.provider,
-            llm.model,
-            e,
-            duration_ms,
-        )
-        yield ErrorEvent(error=e, partial=state.build_partial())
+        async for event in llm.stream(context, **kwargs):
+            events.append(event)
+            yield event
+    except KaiError as e:
+        _log_error(llm, t0, e)
+        yield Error(error=e)
         return
     except Exception as e:
-        # Intentional recovery boundary:
-        # unknown exceptions are converted into ErrorEvent so callers
-        # receive a unified stream contract instead of raised exceptions.
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.exception(
-            "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
-            llm.provider,
-            llm.model,
-            e,
-            duration_ms,
-        )
-        yield ErrorEvent(error=e, partial=state.build_partial())
+        _log_error(llm, t0, e, unexpected=True)
+        yield Error(error=e)
         return
 
-    # Flush any pending block
-    for event in state.flush_pending():
-        yield event
+    message = _build_message(events)
 
-    # Determine stop reason
-    stop_reason = "tool_use" if state.tool_calls else "stop"
-    final = state.build_final(stop_reason=stop_reason)
-
-    if not final.content and not final.tool_calls:
-        duration_ms = (time.perf_counter() - t0) * 1000
-        logger.error(
-            "LLM stream empty response: provider=%s model=%s duration=%.0fms",
-            llm.provider,
-            llm.model,
-            duration_ms,
-        )
-        yield ErrorEvent(
-            error=EmptyResponseError("The LLM returned an empty response."),
-            partial=final,
-        )
+    if not message.content and not message.tool_calls:
+        err = KaiError(ErrorKind.EMPTY_RESPONSE, "The LLM returned an empty response.")
+        _log_error(llm, t0, err)
+        yield Error(error=err)
         return
 
+    stop_reason = "tool_use" if message.tool_calls else "stop"
     duration_ms = (time.perf_counter() - t0) * 1000
-    usage = final.usage
+    usage = message.usage
     logger.info(
         "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
         llm.provider,
@@ -148,7 +105,7 @@ async def stream(
         duration_ms,
     )
 
-    yield DoneEvent(message=final)
+    yield Done(message=message)
 
 
 async def complete(
@@ -158,287 +115,120 @@ async def complete(
 ) -> Message:
     """Get a complete response from an LLM.
 
-    Convenience wrapper around stream() that collects all events and returns
-    the final assistant message.
-
-    Args:
-        llm: The LLM implementation to use.
-        context: Conversation context (system prompt, messages, tools).
-        **kwargs: API-specific options (temperature, max_tokens, etc.).
-
-    Returns:
-        The complete assistant Message with content, tool_calls, and usage.
+    Convenience wrapper around ``stream()`` that returns the final message.
 
     Raises:
-        ProviderError: If the LLM call encounters an error.
-        EmptyResponseError: If the LLM returns no content.
+        KaiError: If the LLM call encounters an error or returns no content.
     """
     async for event in stream(llm, context, **kwargs):
         match event:
-            case DoneEvent(message=message):
+            case Done(message=message):
                 return message
-            case ErrorEvent(error=error):
+            case Error(error=error):
                 raise error
             case _:
                 pass
 
-    raise EmptyResponseError("Stream ended without a done or error event.")
+    raise KaiError(ErrorKind.EMPTY_RESPONSE, "Stream ended without a done or error event.")
 
 
-class _StreamState:
-    """Mutable state for the stream accumulation state machine.
+# ---------------------------------------------------------------------------
+# Build message from events — pure function, no class
+# ---------------------------------------------------------------------------
 
-    All chunk processing and flushing logic lives inside this class
-    to keep protected attributes internal.
-    """
 
-    __slots__ = (
-        "content_parts",
-        "tool_calls",
-        "usage",
-        "content_index",
-        "_text",
-        "_think",
-        "_think_sig",
-        "_tool_id",
-        "_tool_name",
-        "_tool_args",
+def _build_message(events: Sequence[StreamEvent]) -> Message:  # noqa: C901
+    """Build an assistant ``Message`` from a sequence of stream events."""
+    parts: list[ContentPart] = []
+    tool_calls: list[ToolCall] = []
+    usage: TokenUsage | None = None
+
+    text_buf: list[str] = []
+    think_buf: list[str] = []
+    think_sig: str | None = None
+
+    tool_id: str | None = None
+    tool_name: str | None = None
+    tool_args: list[str] = []
+
+    def flush_text() -> None:
+        if text_buf:
+            parts.append(TextPart(text="".join(text_buf)))
+            text_buf.clear()
+
+    def flush_think() -> None:
+        nonlocal think_sig
+        if think_buf:
+            parts.append(ThinkPart(text="".join(think_buf), signature=think_sig))
+            think_buf.clear()
+            think_sig = None
+
+    def flush_tool() -> None:
+        nonlocal tool_id, tool_name
+        if tool_id is not None and tool_name is not None:
+            tool_calls.append(ToolCall(id=tool_id, name=tool_name, arguments="".join(tool_args)))
+            tool_id = None
+            tool_name = None
+            tool_args.clear()
+
+    for event in events:
+        match event:
+            case TextDelta(delta=text):
+                flush_think()
+                text_buf.append(text)
+            case ThinkDelta(delta=text):
+                flush_text()
+                think_buf.append(text)
+            case ThinkSignature(signature=sig):
+                think_sig = sig
+            case ToolCallBegin(id=tid, name=name):
+                flush_text()
+                flush_think()
+                tool_id = tid
+                tool_name = name
+                tool_args.clear()
+            case ToolCallDelta(arguments=args):
+                tool_args.append(args)
+            case ToolCallEnd():
+                flush_tool()
+            case Usage(usage=u):
+                usage = u
+            case Done() | Error():
+                pass
+
+    flush_text()
+    flush_think()
+    flush_tool()
+
+    return Message(
+        role="assistant",
+        content=parts or None,
+        tool_calls=tool_calls or None,
+        usage=usage,
+        stop_reason="tool_use" if tool_calls else "stop",
     )
 
-    def __init__(self) -> None:
-        self.content_parts: list[ContentPart] = []
-        self.tool_calls: list[ToolCall] = []
-        self.usage: TokenUsage | None = None
-        self.content_index: int = 0
 
-        # Accumulation buffers for the current block
-        self._text: str | None = None
-        self._think: str | None = None
-        self._think_sig: str | None = None
-        self._tool_id: str | None = None
-        self._tool_name: str | None = None
-        self._tool_args: str = ""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    def build_partial(self) -> Message:
-        """Build the current partial message snapshot."""
-        parts: list[ContentPart] = list(self.content_parts)
 
-        # Include in-progress blocks
-        if self._think is not None:
-            parts.append(
-                ThinkPart(
-                    text=self._think,
-                    signature=self._think_sig,
-                )
-            )
-        if self._text is not None:
-            parts.append(TextPart(text=self._text))
-
-        tool_calls = list(self.tool_calls)
-        if self._tool_id is not None and self._tool_name is not None:
-            tool_calls.append(
-                ToolCall(
-                    id=self._tool_id,
-                    name=self._tool_name,
-                    arguments=self._tool_args,
-                )
-            )
-
-        return Message(
-            role="assistant",
-            content=parts or None,
-            tool_calls=tool_calls or None,
-            usage=self.usage,
+def _log_error(llm: ProviderBase, t0: float, error: Exception, *, unexpected: bool = False) -> None:
+    duration_ms = (time.perf_counter() - t0) * 1000
+    if unexpected:
+        logger.exception(
+            "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
+            llm.provider,
+            llm.model,
+            error,
+            duration_ms,
         )
-
-    def build_final(self, *, stop_reason: str = "stop") -> Message:
-        """Build the final complete message."""
-        parts: list[ContentPart] = list(self.content_parts)
-        sr = cast(
-            Any,
-            stop_reason if stop_reason in ("stop", "length", "tool_use", "error") else "stop",
+    else:
+        logger.error(
+            "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
+            llm.provider,
+            llm.model,
+            error,
+            duration_ms,
         )
-
-        return Message(
-            role="assistant",
-            content=parts or None,
-            tool_calls=self.tool_calls or None,
-            usage=self.usage,
-            stop_reason=sr,
-        )
-
-    def process_chunk(self, chunk: Chunk) -> list[StreamEvent]:
-        """Process a single chunk and return events to emit."""
-        events: list[StreamEvent] = []
-
-        match chunk:
-            case TextChunk(text=text):
-                if self._think is not None:
-                    events.extend(self.flush_think())
-                if self._text is None:
-                    self._text = text
-                    self.content_index = len(self.content_parts)
-                    partial = self.build_partial()
-                    events.append(
-                        TextStartEvent(
-                            content_index=self.content_index,
-                            partial=partial,
-                        )
-                    )
-                else:
-                    self._text += text
-                partial = self.build_partial()
-                events.append(
-                    TextDeltaEvent(
-                        content_index=self.content_index,
-                        delta=text,
-                        partial=partial,
-                    )
-                )
-
-            case ThinkChunk(text=text):
-                if self._text is not None:
-                    events.extend(self.flush_text())
-                if self._think is None:
-                    self._think = text
-                    self.content_index = len(self.content_parts)
-                    partial = self.build_partial()
-                    events.append(
-                        ThinkStartEvent(
-                            content_index=self.content_index,
-                            partial=partial,
-                        )
-                    )
-                else:
-                    self._think += text
-                partial = self.build_partial()
-                events.append(
-                    ThinkDeltaEvent(
-                        content_index=self.content_index,
-                        delta=text,
-                        partial=partial,
-                    )
-                )
-
-            case ThinkSignatureChunk(signature=sig):
-                self._think_sig = sig
-
-            case ToolCallStart(id=tool_id, name=name):
-                if self._text is not None:
-                    events.extend(self.flush_text())
-                if self._think is not None:
-                    events.extend(self.flush_think())
-
-                self._tool_id = tool_id
-                self._tool_name = name
-                self._tool_args = ""
-
-                partial = self.build_partial()
-                events.append(
-                    ToolCallStartEvent(
-                        content_index=len(self.content_parts),
-                        id=tool_id,
-                        name=name,
-                        partial=partial,
-                    )
-                )
-
-            case ToolCallDelta(arguments=args):
-                self._tool_args += args
-                partial = self.build_partial()
-                events.append(
-                    ToolCallDeltaEvent(
-                        content_index=len(self.content_parts),
-                        arguments_delta=args,
-                        partial=partial,
-                    )
-                )
-
-            case ToolCallEnd():
-                if self._tool_id is not None and self._tool_name is not None:
-                    tool_call = ToolCall(
-                        id=self._tool_id,
-                        name=self._tool_name,
-                        arguments=self._tool_args,
-                    )
-                    self.tool_calls.append(tool_call)
-                    partial = self.build_partial()
-                    events.append(
-                        ToolCallEndEvent(
-                            content_index=len(self.content_parts),
-                            tool_call=tool_call,
-                            partial=partial,
-                        )
-                    )
-                    self._tool_id = None
-                    self._tool_name = None
-                    self._tool_args = ""
-
-            case UsageChunk(usage=usage):
-                self.usage = usage
-
-        return events
-
-    def flush_text(self) -> list[StreamEvent]:
-        """Flush the current text block into content_parts."""
-        events: list[StreamEvent] = []
-        if self._text is not None:
-            text = self._text
-            part = TextPart(text=text)
-            self.content_parts.append(part)
-            self._text = None
-            partial = self.build_partial()
-            events.append(
-                TextEndEvent(
-                    content_index=len(self.content_parts) - 1,
-                    text=text,
-                    partial=partial,
-                )
-            )
-        return events
-
-    def flush_think(self) -> list[StreamEvent]:
-        """Flush the current think block into content_parts."""
-        events: list[StreamEvent] = []
-        if self._think is not None:
-            text = self._think
-            part = ThinkPart(text=text, signature=self._think_sig)
-            self.content_parts.append(part)
-            self._think = None
-            self._think_sig = None
-            partial = self.build_partial()
-            events.append(
-                ThinkEndEvent(
-                    content_index=len(self.content_parts) - 1,
-                    text=text,
-                    partial=partial,
-                )
-            )
-        return events
-
-    def flush_pending(self) -> list[StreamEvent]:
-        """Flush any pending blocks."""
-        events: list[StreamEvent] = []
-        events.extend(self.flush_think())
-        events.extend(self.flush_text())
-
-        if self._tool_id is not None and self._tool_name is not None:
-            tool_call = ToolCall(
-                id=self._tool_id,
-                name=self._tool_name,
-                arguments=self._tool_args,
-            )
-            self.tool_calls.append(tool_call)
-            partial = self.build_partial()
-            events.append(
-                ToolCallEndEvent(
-                    content_index=len(self.content_parts),
-                    tool_call=tool_call,
-                    partial=partial,
-                )
-            )
-            self._tool_id = None
-            self._tool_name = None
-            self._tool_args = ""
-
-        return events

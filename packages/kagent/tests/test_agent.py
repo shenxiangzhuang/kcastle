@@ -244,22 +244,22 @@ class TestAgentErrorPropagation:
     @pytest.mark.asyncio
     async def test_complete_raises_on_provider_error(self) -> None:
         """complete() should raise RuntimeError with the original error as cause."""
-        from kai.errors import ProviderError
+        from kai.errors import ErrorKind, KaiError
 
-        provider = ErrorProvider(ProviderError("API connection failed"))
+        provider = ErrorProvider(KaiError(ErrorKind.PROVIDER, "API connection failed"))
         agent = Agent(llm=provider, system="test")
 
         with pytest.raises(RuntimeError, match="API connection failed") as exc_info:
             await agent.complete("Hello")
 
-        assert isinstance(exc_info.value.__cause__, ProviderError)
+        assert isinstance(exc_info.value.__cause__, KaiError)
 
     @pytest.mark.asyncio
     async def test_run_yields_agent_error_on_provider_error(self) -> None:
         """run() should yield AgentError when the provider raises."""
-        from kai.errors import ProviderError
+        from kai.errors import ErrorKind, KaiError
 
-        provider = ErrorProvider(ProviderError("stream broke"))
+        provider = ErrorProvider(KaiError(ErrorKind.PROVIDER, "stream broke"))
         agent = Agent(llm=provider, system="test")
 
         events = [e async for e in agent.run("Hello")]
@@ -274,11 +274,11 @@ class TestAgentErrorPropagation:
     @pytest.mark.asyncio
     async def test_complete_raises_on_empty_response(self) -> None:
         """complete() should raise when the provider returns no content."""
-        from kai.types.stream import UsageChunk
+        from kai.types.stream import Usage
         from kai.types.usage import TokenUsage
 
-        # A provider that returns only a usage chunk (no text, no tool call).
-        provider = MockProvider([[UsageChunk(usage=TokenUsage(input_tokens=0, output_tokens=0))]])
+        # A provider that returns only a usage event (no text, no tool call).
+        provider = MockProvider([[Usage(usage=TokenUsage(input_tokens=0, output_tokens=0))]])
         agent = Agent(llm=provider, system="test")
 
         with pytest.raises(RuntimeError, match="Agent loop failed"):

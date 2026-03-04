@@ -12,7 +12,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 
-from kai import Context, DoneEvent, ErrorEvent, Message, ProviderBase, Tool, ToolResult, stream
+from kai import Context, Done, Error, Message, ProviderBase, Tool, ToolResult, stream
 from kai.tool import get_params_class
 from pydantic import ValidationError
 
@@ -97,9 +97,9 @@ async def agent_step(
         yield StreamChunk(event=stream_event)
 
         match stream_event:
-            case DoneEvent(message=msg):
+            case Done(message=msg):
                 assistant_msg = msg
-            case ErrorEvent(error=err):
+            case Error(error=err):
                 logger.error("LLM stream error in agent_step: %s", err)
                 yield AgentError(error=err)
                 return
@@ -109,8 +109,8 @@ async def agent_step(
     llm_duration_ms = (time.perf_counter() - llm_t0) * 1000
 
     if assistant_msg is None:
-        logger.error("Stream ended without DoneEvent or ErrorEvent")
-        yield AgentError(error=RuntimeError("Stream ended without DoneEvent or ErrorEvent"))
+        logger.error("Stream ended without Done or Error")
+        yield AgentError(error=RuntimeError("Stream ended without Done or Error"))
         return
 
     # Execute tool calls (if any)
