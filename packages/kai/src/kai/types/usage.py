@@ -1,5 +1,7 @@
 """Token usage statistics."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 
@@ -29,7 +31,7 @@ class TokenUsage:
         """Total tokens (input + output)."""
         return self.total_input_tokens + self.output_tokens
 
-    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+    def __add__(self, other: TokenUsage) -> TokenUsage:
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,

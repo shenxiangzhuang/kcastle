@@ -148,8 +148,14 @@ class Message(BaseModel):
             content: The result content (string or content parts).
             is_error: Whether this result represents an error.
         """
-        if isinstance(content, str) and is_error:
-            content = f"Error: {content}"
+        if is_error:
+            if isinstance(content, str):
+                content = f"Error: {content}"
+            else:
+                content = [
+                    TextPart(text=f"Error: {p.text}") if isinstance(p, TextPart) else p
+                    for p in content
+                ]
         return Message(role="tool", content=content, tool_call_id=tool_call_id)
 
 
