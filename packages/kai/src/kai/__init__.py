@@ -19,13 +19,8 @@ Example::
     print(message.extract_text())
 """
 
-import logging as _logging
-
-# Core functions
-# Errors
 from kai.errors import ErrorKind, KaiError
 
-# Providers
 from kai.providers import (
     AnthropicMessages,
     DeepseekAnthropic,
@@ -38,10 +33,8 @@ from kai.providers import (
 )
 from kai.stream import complete, stream
 
-# Tool definition
 from kai.tool import Tool, ToolResult
 
-# Types
 from kai.types.message import (
     ContentPart,
     Context,
@@ -107,5 +100,3 @@ __all__ = [
     "DeepseekAnthropic",
     "MinimaxAnthropic",
 ]
-
-_logging.getLogger("kai").addHandler(_logging.NullHandler())

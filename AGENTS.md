@@ -67,7 +67,8 @@ k/
 
 ## Conventions and quality
 
-- Python >=3.12; line length 100.
+- Python >=3.12; use modern Python style (type union `X | Y`, `match/case`, `StrEnum`, `dataclass(slots=True)`, etc.).
+- Line length 100.
 - Ruff handles lint + format (rules: E, F, UP, B, SIM, I).
 - Pyright strict mode for type checks.
 - `kai` and `kagent` are typed library packages (include `py.typed`).

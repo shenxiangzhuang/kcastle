@@ -10,10 +10,6 @@ from dataclasses import dataclass
 from kai.types.message import Message
 from kai.types.usage import TokenUsage
 
-# ---------------------------------------------------------------------------
-# Stream events — produced by providers *and* consumed by callers
-# ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:

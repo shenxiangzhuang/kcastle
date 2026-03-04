@@ -30,7 +30,7 @@ from kai.types.stream import (
 )
 from kai.types.usage import TokenUsage
 
-logger = logging.getLogger("kai.stream")
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -76,11 +76,18 @@ async def stream(
             events.append(event)
             yield event
     except KaiError as e:
-        _log_error(llm, t0, e)
+        logger.error("LLM stream error: %s/%s %s %.0fms", llm.provider, llm.model, e, _ms(t0))
         yield Error(error=e)
         return
     except Exception as e:
-        _log_error(llm, t0, e, unexpected=True)
+        logger.error(
+            "LLM stream error: %s/%s %s %.0fms",
+            llm.provider,
+            llm.model,
+            e,
+            _ms(t0),
+            exc_info=True,
+        )
         yield Error(error=e)
         return
 
@@ -88,21 +95,20 @@ async def stream(
 
     if not message.content and not message.tool_calls:
         err = KaiError(ErrorKind.EMPTY_RESPONSE, "The LLM returned an empty response.")
-        _log_error(llm, t0, err)
+        logger.error("LLM stream error: %s/%s %s %.0fms", llm.provider, llm.model, err, _ms(t0))
         yield Error(error=err)
         return
 
-    stop_reason = "tool_use" if message.tool_calls else "stop"
-    duration_ms = (time.perf_counter() - t0) * 1000
     usage = message.usage
+    stop = "tool_use" if message.tool_calls else "stop"
     logger.info(
-        "LLM stream complete: provider=%s model=%s in=%d out=%d stop=%s duration=%.0fms",
+        "LLM stream done: %s/%s in=%d out=%d stop=%s %.0fms",
         llm.provider,
         llm.model,
         usage.input_tokens if usage else 0,
         usage.output_tokens if usage else 0,
-        stop_reason,
-        duration_ms,
+        stop,
+        _ms(t0),
     )
 
     yield Done(message=message)
@@ -214,21 +220,5 @@ def _build_message(events: Sequence[StreamEvent]) -> Message:  # noqa: C901
 # ---------------------------------------------------------------------------
 
 
-def _log_error(llm: ProviderBase, t0: float, error: Exception, *, unexpected: bool = False) -> None:
-    duration_ms = (time.perf_counter() - t0) * 1000
-    if unexpected:
-        logger.exception(
-            "LLM stream error (unexpected): provider=%s model=%s error=%s duration=%.0fms",
-            llm.provider,
-            llm.model,
-            error,
-            duration_ms,
-        )
-    else:
-        logger.error(
-            "LLM stream error: provider=%s model=%s error=%s duration=%.0fms",
-            llm.provider,
-            llm.model,
-            error,
-            duration_ms,
-        )
+def _ms(t0: float) -> float:
+    return (time.perf_counter() - t0) * 1000
