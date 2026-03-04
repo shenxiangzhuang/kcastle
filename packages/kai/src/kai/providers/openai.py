@@ -6,7 +6,7 @@ import os
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, cast
+from typing import Any, Unpack, cast
 
 import httpx
 import openai
@@ -23,7 +23,7 @@ from openai.types.responses import (
 )
 
 from kai.errors import ErrorKind, KaiError
-from kai.providers.base import ProviderBase
+from kai.providers.base import GenerationKwargs, ProviderBase
 from kai.tool import Tool
 from kai.types.message import (
     ContentPart,
@@ -69,7 +69,9 @@ class OpenAIBase(ProviderBase, ABC):
         return self._model
 
     @abstractmethod
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, context: Context, **kwargs: Unpack[GenerationKwargs]
+    ) -> AsyncIterator[StreamEvent]:
         raise NotImplementedError  # pragma: no cover
         yield  # pragma: no cover  # noqa: RET503
 
@@ -105,17 +107,17 @@ class OpenAIChatBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._extra_body = extra_body
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, context: Context, **kwargs: Unpack[GenerationKwargs]
+    ) -> AsyncIterator[StreamEvent]:
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else None
 
-        api_kwargs: dict[str, Any] = {
-            k: kwargs[k] for k in ("temperature", "max_tokens", "top_p", "stop") if k in kwargs
-        }
+        kw: dict[str, Any] = dict(kwargs)
         if tools:
-            api_kwargs["tools"] = tools
-        if self._extra_body:
-            api_kwargs["extra_body"] = self._extra_body
+            kw["tools"] = tools
+        if "extra_body" not in kw and self._extra_body:
+            kw["extra_body"] = self._extra_body
 
         try:
             response = await self._client.chat.completions.create(
@@ -123,7 +125,7 @@ class OpenAIChatBase(OpenAIBase, ABC):
                 messages=messages,
                 stream=True,
                 stream_options={"include_usage": True},
-                **api_kwargs,
+                **kw,
             )
             async for event in _convert_chat_stream(response):
                 yield event
@@ -144,30 +146,30 @@ class OpenAIResponsesBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._reasoning = reasoning
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, context: Context, **kwargs: Unpack[GenerationKwargs]
+    ) -> AsyncIterator[StreamEvent]:
         input_items = _build_input(context)
         tools = _build_tools(context.tools) if context.tools else None
 
-        api_kwargs: dict[str, Any] = {
-            "store": False,
-            **{k: kwargs[k] for k in ("temperature", "top_p") if k in kwargs},
-        }
+        kw: dict[str, Any] = dict(kwargs)
+        kw["store"] = False
         if tools:
-            api_kwargs["tools"] = tools
-        if "max_tokens" in kwargs:
-            api_kwargs["max_output_tokens"] = kwargs["max_tokens"]
+            kw["tools"] = tools
+        if (max_tokens := kw.pop("max_tokens", None)) is not None:
+            kw["max_output_tokens"] = max_tokens
 
-        reasoning = kwargs.get("reasoning", self._reasoning)
+        reasoning = kw.pop("reasoning", self._reasoning)
         if reasoning:
-            api_kwargs["reasoning"] = reasoning
-            api_kwargs["include"] = ["reasoning.encrypted_content"]
+            kw["reasoning"] = reasoning
+            kw["include"] = ["reasoning.encrypted_content"]
 
         try:
             response = await self._client.responses.create(
                 model=self._model,
                 input=input_items,
                 stream=True,
-                **api_kwargs,
+                **kw,
             )
             async for event in _convert_responses_stream(response):
                 yield event

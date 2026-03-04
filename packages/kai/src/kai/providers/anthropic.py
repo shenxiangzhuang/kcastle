@@ -6,7 +6,7 @@ import json
 import os
 from abc import ABC
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, cast
+from typing import Any, Unpack, cast
 
 from anthropic import (
     AnthropicError,
@@ -40,7 +40,7 @@ from anthropic.types import (
 )
 
 from kai.errors import ErrorKind, KaiError
-from kai.providers.base import ProviderBase
+from kai.providers.base import GenerationKwargs, ProviderBase
 from kai.tool import Tool
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart
 from kai.types.stream import (
@@ -90,18 +90,17 @@ class AnthropicBase(ProviderBase, ABC):
     def model(self) -> str:
         return self._model
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
+    async def stream(
+        self, context: Context, **kwargs: Unpack[GenerationKwargs]
+    ) -> AsyncIterator[StreamEvent]:
         """Stream raw events from the Anthropic Messages API."""
         system = context.system or ""
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else []
 
-        api_kwargs: dict[str, Any] = {
-            "max_tokens": kwargs.get("max_tokens", self._max_tokens),
-            **{k: kwargs[k] for k in ("temperature", "top_p", "top_k") if k in kwargs},
-        }
+        kw: dict[str, Any] = {"max_tokens": self._max_tokens, **kwargs}
         if self._thinking:
-            api_kwargs["thinking"] = self._thinking
+            kw["thinking"] = self._thinking
 
         try:
             response = await self._client.messages.create(
@@ -110,7 +109,7 @@ class AnthropicBase(ProviderBase, ABC):
                 system=system if system else [],
                 tools=tools,
                 stream=True,
-                **api_kwargs,
+                **kw,
             )
             async for event in _convert_stream(response):
                 yield event

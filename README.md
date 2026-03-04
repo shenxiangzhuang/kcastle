@@ -22,5 +22,3 @@ uv run pyright       # Type check
 ## License
 
 MIT
-
-

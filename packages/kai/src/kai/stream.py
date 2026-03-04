@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Unpack
 
 from kai.errors import ErrorKind, KaiError
 from kai.providers import ProviderBase
+from kai.providers.base import GenerationKwargs
 from kai.types.message import ContentPart, Context, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
     Done,
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 async def stream(
     llm: ProviderBase,
     context: Context,
-    **kwargs: Any,
+    **kwargs: Unpack[GenerationKwargs],
 ) -> AsyncIterator[StreamEvent]:
     """Stream events from an LLM.
 
@@ -117,7 +118,7 @@ async def stream(
 async def complete(
     llm: ProviderBase,
     context: Context,
-    **kwargs: Any,
+    **kwargs: Unpack[GenerationKwargs],
 ) -> Message:
     """Get a complete response from an LLM.
 

@@ -30,6 +30,7 @@ from kai.providers import (
     OpenAIResponses,
     ProviderBase,
 )
+from kai.providers.base import GenerationKwargs
 from kai.stream import complete, stream
 from kai.tool import Tool, ToolResult
 from kai.types.message import (
@@ -83,6 +84,7 @@ __all__ = [
     "Error",
     # Protocol
     "ProviderBase",
+    "GenerationKwargs",
     # Usage
     "TokenUsage",
     # Errors

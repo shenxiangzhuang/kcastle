@@ -52,3 +52,8 @@ include = [
     "packages/*/src/**/*.py",
     "packages/*/tests/**/*.py",
 ]
+
+
+[tool.vulture]
+ignore_names = ["test_*", "Test*"]
+paths = ["packages/*/src"]
