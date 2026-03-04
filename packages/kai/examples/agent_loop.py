@@ -26,21 +26,15 @@ from rich.text import Text
 
 from kai import (
     Context,
-    DoneEvent,
-    ErrorEvent,
+    Done,
+    Error,
     Message,
     OpenAIChatCompletions,
-    StartEvent,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
-    ThinkDeltaEvent,
-    ThinkEndEvent,
-    ThinkStartEvent,
+    TextDelta,
+    ThinkDelta,
     Tool,
-    ToolCallDeltaEvent,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+    ToolCallBegin,
+    ToolCallEnd,
     ToolResult,
     stream,
 )
@@ -141,16 +135,14 @@ async def stream_round(
 
     async for event in stream(provider, Context(messages=messages, tools=TOOLS)):
         match event:
-            case StartEvent():
-                pass
-
             # --- Thinking ---
-            case ThinkStartEvent():
-                think_buffer = ""
-            case ThinkDeltaEvent(delta=text):
+            case ThinkDelta(delta=text):
                 think_buffer += text
-            case ThinkEndEvent():
-                if think_buffer:
+
+            # --- Text ---
+            case TextDelta(delta=text):
+                # Flush think buffer when text starts
+                if think_buffer and not text_buffer:
                     think_preview = think_buffer[:200] + ("..." if len(think_buffer) > 200 else "")
                     console.print(
                         Panel(
@@ -160,35 +152,31 @@ async def stream_round(
                             border_style="bright_black",
                         )
                     )
-
-            # --- Text ---
-            case TextStartEvent():
-                text_buffer = ""
-            case TextDeltaEvent(delta=text):
+                    think_buffer = ""
                 text_buffer += text
-            case TextEndEvent():
-                pass
 
             # --- Tool calls ---
-            case ToolCallStartEvent(name=name):
+            case ToolCallBegin(name=name):
                 console.print(
                     f"  [bold yellow]> calling[/bold yellow] [cyan]{name}[/cyan]",
                     end="",
                 )
-            case ToolCallDeltaEvent():
+            case ToolCallEnd():
                 pass
-            case ToolCallEndEvent(tool_call=tc):
-                result = await execute_tool_call(tc.name, tc.arguments)
-                args_short = tc.arguments[:80] + ("..." if len(tc.arguments) > 80 else "")
-                console.print(f"({args_short})")
-                result_short = result[:120] + ("..." if len(result) > 120 else "")
-                console.print(f"    [dim]→ {result_short}[/dim]")
-                tool_results.append(Message.tool_result(tc.id, result))
 
             # --- Done / Error ---
-            case DoneEvent(message=msg):
+            case Done(message=msg):
                 done_msg = msg
-            case ErrorEvent(error=err):
+                # Execute tool calls from the done message
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        result = await execute_tool_call(tc.name, tc.arguments)
+                        args_short = tc.arguments[:80] + ("..." if len(tc.arguments) > 80 else "")
+                        console.print(f"({args_short})")
+                        result_short = result[:120] + ("..." if len(result) > 120 else "")
+                        console.print(f"    [dim]→ {result_short}[/dim]")
+                        tool_results.append(Message.tool_result(tc.id, result))
+            case Error(error=err):
                 console.print(f"[bold red]Error:[/bold red] {err}")
 
     # Render assistant text

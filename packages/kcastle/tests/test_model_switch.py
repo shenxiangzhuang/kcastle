@@ -8,7 +8,7 @@ import pytest
 from kagent import Agent
 from kai import Context
 from kai.providers import ProviderBase
-from kai.types.stream import Chunk
+from kai.types.stream import StreamEvent
 
 from kcastle.castle import Castle
 from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderEntry
@@ -29,9 +29,9 @@ class DummyProvider(ProviderBase):
     def model(self) -> str:
         return self._model
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         if False:
-            yield cast(Chunk, None)
+            yield cast(StreamEvent, None)
 
 
 def _build_config(tmp_path: Path) -> CastleConfig:

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from kai.providers.openai import OpenAIResponses
 from kai.types.message import Context, ImagePart, Message, TextPart, ToolCall
-from kai.types.stream import Chunk
+from kai.types.stream import StreamEvent
 
 
 def _ctx(*messages: Message, system: str | None = None) -> Context:
@@ -19,7 +19,7 @@ def _ctx(*messages: Message, system: str | None = None) -> Context:
 
 async def _stream_raw(
     context: Context | None = None,
-) -> tuple[list[Chunk], dict[str, Any]]:
+) -> tuple[list[StreamEvent], dict[str, Any]]:
     """Call ``OpenAIResponses.stream()`` with a mocked client.
 
     The stream is always empty; only the captured ``input`` kwarg matters.

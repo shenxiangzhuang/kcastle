@@ -22,7 +22,7 @@ from openai.types.responses import (
     ResponseStreamEvent,
 )
 
-from kai.errors import ConnectionError, ProviderError, StatusError, TimeoutError
+from kai.errors import ErrorKind, KaiError
 from kai.providers.base import ProviderBase
 from kai.types.message import (
     ContentPart,
@@ -33,13 +33,13 @@ from kai.types.message import (
     ThinkPart,
 )
 from kai.types.stream import (
-    Chunk,
-    TextChunk,
-    ThinkChunk,
+    StreamEvent,
+    TextDelta,
+    ThinkDelta,
+    ToolCallBegin,
     ToolCallDelta,
     ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
+    Usage,
 )
 from kai.types.usage import TokenUsage
 
@@ -68,25 +68,27 @@ class OpenAIBase(ProviderBase, ABC):
         return self._model
 
     @abstractmethod
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         raise NotImplementedError  # pragma: no cover
         yield  # pragma: no cover  # noqa: RET503
 
     @staticmethod
-    def _convert_error(error: OpenAIError | httpx.HTTPError) -> ProviderError:
-        if isinstance(error, openai.APIStatusError):
-            return StatusError(error.status_code, error.message)
-        if isinstance(error, openai.APIConnectionError):
-            return ConnectionError(error.message)
-        if isinstance(error, openai.APITimeoutError):
-            return TimeoutError(error.message)
-        if isinstance(error, httpx.TimeoutException):
-            return TimeoutError(str(error))
-        if isinstance(error, httpx.NetworkError):
-            return ConnectionError(str(error))
-        if isinstance(error, httpx.HTTPStatusError):
-            return StatusError(error.response.status_code, str(error))
-        return ProviderError(f"OpenAI error: {error}")
+    def _convert_error(error: OpenAIError | httpx.HTTPError) -> KaiError:
+        match error:
+            case openai.APIStatusError(status_code=code, message=msg):
+                return KaiError(ErrorKind.STATUS, f"HTTP {code}: {msg}")
+            case openai.APIConnectionError(message=msg):
+                return KaiError(ErrorKind.CONNECTION, msg)
+            case openai.APITimeoutError(message=msg):
+                return KaiError(ErrorKind.TIMEOUT, msg)
+            case httpx.TimeoutException():
+                return KaiError(ErrorKind.TIMEOUT, str(error))
+            case httpx.NetworkError():
+                return KaiError(ErrorKind.CONNECTION, str(error))
+            case httpx.HTTPStatusError(response=resp):
+                return KaiError(ErrorKind.STATUS, f"HTTP {resp.status_code}: {error}")
+            case _:
+                return KaiError(ErrorKind.PROVIDER, f"OpenAI error: {error}")
 
 
 class OpenAIChatBase(OpenAIBase, ABC):
@@ -102,7 +104,7 @@ class OpenAIChatBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._extra_body = extra_body
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         messages = _build_messages(context)
         tools = _build_tools(context.tools) if context.tools else None
 
@@ -128,8 +130,8 @@ class OpenAIChatBase(OpenAIBase, ABC):
                 stream_options={"include_usage": True},
                 **api_kwargs,
             )
-            async for chunk in _convert_chat_stream(response):
-                yield chunk
+            async for event in _convert_chat_stream(response):
+                yield event
         except (OpenAIError, httpx.HTTPError) as e:
             raise self._convert_error(e) from e
 
@@ -147,7 +149,7 @@ class OpenAIResponsesBase(OpenAIBase, ABC):
         super().__init__(provider=provider, model=model, api_key=api_key, base_url=base_url)
         self._reasoning = reasoning
 
-    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[Chunk]:
+    async def stream(self, context: Context, **kwargs: Any) -> AsyncIterator[StreamEvent]:
         input_items = _build_input(context)
         tools = _build_tools(context.tools) if context.tools else None
 
@@ -173,8 +175,8 @@ class OpenAIResponsesBase(OpenAIBase, ABC):
                 stream=True,
                 **api_kwargs,
             )
-            async for chunk in _convert_responses_stream(response):
-                yield chunk
+            async for event in _convert_responses_stream(response):
+                yield event
         except (OpenAIError, httpx.HTTPError) as e:
             raise self._convert_error(e) from e
 
@@ -327,7 +329,7 @@ def _extract_reasoning_text(delta: object) -> str | None:
 
 async def _convert_chat_stream(
     response: AsyncIterator[ChatCompletionChunk],
-) -> AsyncIterator[Chunk]:
+) -> AsyncIterator[StreamEvent]:
     current_tool_id: str | None = None
 
     async for chunk in response:
@@ -340,7 +342,7 @@ async def _convert_chat_stream(
             ):
                 cached = chunk.usage.prompt_tokens_details.cached_tokens
                 input_tokens -= cached
-            yield UsageChunk(
+            yield Usage(
                 usage=TokenUsage(
                     input_tokens=input_tokens,
                     output_tokens=chunk.usage.completion_tokens,
@@ -355,10 +357,10 @@ async def _convert_chat_stream(
 
         reasoning = _extract_reasoning_text(delta)
         if reasoning:
-            yield ThinkChunk(text=reasoning)
+            yield ThinkDelta(delta=reasoning)
 
         if delta.content:
-            yield TextChunk(text=delta.content)
+            yield TextDelta(delta=delta.content)
 
         for tool_call in delta.tool_calls or []:
             if not tool_call.function:
@@ -369,7 +371,7 @@ async def _convert_chat_stream(
                     yield ToolCallEnd()
 
                 current_tool_id = tool_call.id or str(uuid.uuid4())
-                yield ToolCallStart(
+                yield ToolCallBegin(
                     id=current_tool_id,
                     name=tool_call.function.name or "",
                 )
@@ -464,19 +466,19 @@ def _convert_content_for_responses(
 
 async def _convert_responses_stream(
     response: AsyncIterator[ResponseStreamEvent],
-) -> AsyncIterator[Chunk]:
+) -> AsyncIterator[StreamEvent]:
     async for event in response:
         match event.type:
             case "response.output_text.delta":
-                yield TextChunk(text=event.delta)
+                yield TextDelta(delta=event.delta)
 
             case "response.reasoning_summary_text.delta":
-                yield ThinkChunk(text=event.delta)
+                yield ThinkDelta(delta=event.delta)
 
             case "response.output_item.added":
                 item = event.item
                 if item.type == "function_call":
-                    yield ToolCallStart(
+                    yield ToolCallBegin(
                         id=item.call_id or str(uuid.uuid4()),
                         name=item.name,
                     )
@@ -498,7 +500,7 @@ async def _convert_responses_stream(
                     if details and details.cached_tokens:
                         cached = details.cached_tokens
                         input_tokens -= cached
-                    yield UsageChunk(
+                    yield Usage(
                         usage=TokenUsage(
                             input_tokens=input_tokens,
                             output_tokens=resp.usage.output_tokens,
@@ -509,7 +511,7 @@ async def _convert_responses_stream(
             case "error":
                 msg = getattr(event, "message", "Unknown error")
                 code = getattr(event, "code", None)
-                raise ProviderError(f"Responses API error ({code}): {msg}")
+                raise KaiError(ErrorKind.PROVIDER, f"Responses API error ({code}): {msg}")
 
             case _:
                 pass

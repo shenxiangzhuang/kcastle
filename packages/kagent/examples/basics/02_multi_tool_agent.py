@@ -22,7 +22,7 @@ import sys
 from datetime import UTC, datetime
 
 from kai import AnthropicMessages, Message, Tool, ToolResult
-from kai.types.stream import TextDeltaEvent
+from kai.types.stream import TextDelta
 from pydantic import BaseModel, Field
 
 from kagent import (
@@ -157,7 +157,7 @@ async def demo_streaming() -> None:
 
     async for event in agent.run("What time is it? What's 2^10 + 3^7? What's the weather in NYC?"):
         match event:
-            case StreamChunk(event=e) if isinstance(e, TextDeltaEvent):
+            case StreamChunk(event=e) if isinstance(e, TextDelta):
                 print(e.delta, end="", flush=True)
 
             case ToolExecStart(tool_name=name, arguments=args):

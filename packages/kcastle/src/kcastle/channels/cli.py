@@ -24,7 +24,7 @@ from kagent import (
     TurnEnd,
     TurnStart,
 )
-from kai import TextDeltaEvent
+from kai import TextDelta
 
 from kcastle.session.session import Session
 
@@ -40,7 +40,7 @@ def _render_event(event: AgentEvent) -> None:
         case TurnStart():
             pass  # silent
         case StreamChunk(event=stream_event):
-            if isinstance(stream_event, TextDeltaEvent):
+            if isinstance(stream_event, TextDelta):
                 sys.stdout.write(stream_event.delta)
                 sys.stdout.flush()
         case ToolExecStart(tool_name=name, arguments=args):

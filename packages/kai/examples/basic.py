@@ -14,10 +14,10 @@ import sys
 
 from kai import (
     Context,
-    DoneEvent,
+    Done,
     Message,
     OpenAIChatCompletions,
-    TextDeltaEvent,
+    TextDelta,
     complete,
     stream,
 )
@@ -77,9 +77,9 @@ async def example_stream() -> None:
 
     async for event in stream(provider, context):
         match event:
-            case TextDeltaEvent(delta=text):
+            case TextDelta(delta=text):
                 print(text, end="", flush=True)
-            case DoneEvent(message=msg):
+            case Done(message=msg):
                 print(f"\n\nDone. Tokens: {msg.usage}")
             case _:
                 pass

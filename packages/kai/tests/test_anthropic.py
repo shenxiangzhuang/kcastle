@@ -17,12 +17,12 @@ from anthropic.types import (
 from kai.providers.anthropic import AnthropicMessages
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
-    Chunk,
-    TextChunk,
+    StreamEvent,
+    TextDelta,
+    ToolCallBegin,
     ToolCallDelta,
     ToolCallEnd,
-    ToolCallStart,
-    UsageChunk,
+    Usage,
 )
 
 
@@ -53,7 +53,7 @@ class _MockStream:
 async def _stream_raw(
     events: list[Any] | None = None,
     context: Context | None = None,
-) -> tuple[list[Chunk], dict[str, Any]]:
+) -> tuple[list[StreamEvent], dict[str, Any]]:
     """Call ``AnthropicMessages.stream()`` with a mocked client.
 
     Returns ``(output_chunks, captured_create_kwargs)``.
@@ -368,11 +368,11 @@ class TestStreamConversion:
             _msg_delta(output_tokens=5),
         ]
         chunks, _ = await _stream_raw(events)
-        texts = [c for c in chunks if isinstance(c, TextChunk)]
+        texts = [c for c in chunks if isinstance(c, TextDelta)]
         assert len(texts) == 2
-        assert texts[0].text == "Hello"
-        assert texts[1].text == " world"
-        usage = next(c for c in chunks if isinstance(c, UsageChunk))
+        assert texts[0].delta == "Hello"
+        assert texts[1].delta == " world"
+        usage = next(c for c in chunks if isinstance(c, Usage))
         assert usage.usage.input_tokens == 10
         assert usage.usage.output_tokens == 5
 
@@ -401,7 +401,7 @@ class TestStreamConversion:
             ),
         ]
         chunks, _ = await _stream_raw(events)
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         deltas = [c for c in chunks if isinstance(c, ToolCallDelta)]
         ends = [c for c in chunks if isinstance(c, ToolCallEnd)]
         assert len(starts) == 1
@@ -424,16 +424,16 @@ class TestStreamConversion:
             ),
         ]
         chunks, _ = await _stream_raw(events)
-        starts = [c for c in chunks if isinstance(c, ToolCallStart)]
+        starts = [c for c in chunks if isinstance(c, ToolCallBegin)]
         ends = [c for c in chunks if isinstance(c, ToolCallEnd)]
         assert len(starts) == 2
         assert len(ends) == 2
-        si = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallStart)]
+        si = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallBegin)]
         ei = [i for i, c in enumerate(chunks) if isinstance(c, ToolCallEnd)]
         assert ei[0] < si[1]
 
     async def test_usage_always_emitted(self) -> None:
-        """Usage chunk is emitted even for an empty stream."""
+        """Usage event is emitted even for an empty stream."""
         chunks, _ = await _stream_raw([])
-        usage = [c for c in chunks if isinstance(c, UsageChunk)]
+        usage = [c for c in chunks if isinstance(c, Usage)]
         assert len(usage) == 1

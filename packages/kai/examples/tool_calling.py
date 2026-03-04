@@ -23,16 +23,12 @@ from pydantic import BaseModel, Field
 
 from kai import (
     Context,
-    DoneEvent,
+    Done,
     Message,
     OpenAIChatCompletions,
-    StartEvent,
-    TextDeltaEvent,
-    TextEndEvent,
-    TextStartEvent,
+    TextDelta,
     Tool,
-    ToolCallEndEvent,
-    ToolCallStartEvent,
+    ToolCallBegin,
     ToolResult,
     complete,
     stream,
@@ -150,26 +146,20 @@ async def example_stream() -> None:
 
     # Stream with tool call events
     tool_results: list[Message] = []
+    done_msg: Message | None = None
     async for event in stream(provider, Context(messages=messages, tools=TOOLS)):
         match event:
-            case StartEvent():
-                pass
-            case TextStartEvent():
-                pass
-            case TextDeltaEvent(delta=text):
+            case TextDelta(delta=text):
                 print(text, end="", flush=True)
-            case TextEndEvent():
-                print()
-            case ToolCallStartEvent(name=name):
+            case ToolCallBegin(name=name):
                 print(f"  [Tool call: {name}]")
-            case ToolCallEndEvent(tool_call=tc):
-                result = await execute_tool_call(tc.name, tc.arguments)
-                print(f"  [Result:    {result}]")
-                tool_results.append(Message.tool_result(tc.id, result))
-            case DoneEvent(message=assistant_msg):
-                # Append the full assistant message (with tool_calls), then results
-                if tool_results:
-                    # Messages with role 'tool' must follow an assistant message with 'tool_calls'
+            case Done(message=assistant_msg):
+                done_msg = assistant_msg  # noqa: F841
+                if assistant_msg.tool_calls:
+                    for tc in assistant_msg.tool_calls:
+                        result = await execute_tool_call(tc.name, tc.arguments)
+                        print(f"  [Result:    {result}]")
+                        tool_results.append(Message.tool_result(tc.id, result))
                     messages.append(assistant_msg)
                     messages.extend(tool_results)
             case _:
@@ -179,15 +169,9 @@ async def example_stream() -> None:
     if tool_results:
         async for event in stream(provider, Context(messages=messages, tools=TOOLS)):
             match event:
-                case StartEvent():
-                    pass
-                case TextStartEvent():
-                    pass
-                case TextDeltaEvent(delta=text):
+                case TextDelta(delta=text):
                     print(text, end="", flush=True)
-                case TextEndEvent():
-                    print()
-                case DoneEvent():
+                case Done():
                     pass
                 case _:
                     pass

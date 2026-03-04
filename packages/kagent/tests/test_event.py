@@ -1,6 +1,6 @@
 """Tests for kagent.event module."""
 
-from kai import Message, StartEvent, ToolResult
+from kai import Message, TextDelta, ToolResult
 
 from kagent.event import (
     AgentEnd,
@@ -28,7 +28,7 @@ class TestEventTypes:
         assert ev.tool_results == []
 
     def test_stream_chunk(self) -> None:
-        kai_event = StartEvent()
+        kai_event = TextDelta(delta="hello")
         ev = StreamChunk(event=kai_event)
         assert ev.type == "stream_chunk"
         assert ev.event is kai_event
