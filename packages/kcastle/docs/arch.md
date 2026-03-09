@@ -121,7 +121,7 @@ The ID format depends on who creates the session:
 | Creator | Session ID format | Example |
 |---------|------------------|---------|
 | CLI (default) | UUID hex (short) | `a1b2c3d4` |
-| CLI (`k -S <id>`) | user-specified | `my-project` |
+| CLI (`kcastle -S <id>`) | user-specified | `my-project` |
 | Telegram private | `tg-u{user_id}` | `tg-u123456` |
 | Telegram group | `tg-g{chat_id}` | `tg-g-987654` |
 
@@ -130,13 +130,13 @@ directly — no lookup table needed. Telegram private chats and groups each get
 their own session automatically.
 
 **Cross-channel resume**: any channel can resume any session by its ID.
-`k -S tg-u123456` opens a Telegram user's session from the CLI. This works
+`kcastle -S tg-u123456` opens a Telegram user's session from the CLI. This works
 naturally because the session directory is the same regardless of which
 channel accesses it.
 
 **Session resolution heuristics** (no persisted mapping):
-- **CLI** `k -C`: resume the most recently active session (by `last_active_at`).
-- **CLI** `k -S <id>`: explicit session selection.
+- **CLI** `kcastle -C`: resume the most recently active session (by `last_active_at`).
+- **CLI** `kcastle -S <id>`: explicit session selection.
 - **Telegram**: deterministic `tg-u{user_id}` / `tg-g{chat_id}` — auto-created
   on first message, resumed on subsequent messages.
 
@@ -146,7 +146,7 @@ channel accesses it.
 kcastle/
 ├── __init__.py           # Public API re-exports
 ├── castle.py             # Castle — top-level lifecycle orchestrator
-├── cli.py                # `k` command entry point
+├── cli.py                # `kcastle` command entry point
 ├── config.py             # CastleConfig, YAML + env var loading, built-in registry
 ├── daemon.py             # Daemon process management (start/stop/status/restart)
 ├── setup.py              # First-run env var detection + config generation
@@ -238,7 +238,7 @@ At load time, `load_config` merges built-in providers with user config:
 
 ### First-run setup
 
-On first launch, `k` detects that `config.yaml` is missing and runs a
+On first launch, `kcastle` detects that `config.yaml` is missing and runs a
 non-interactive setup:
 
 1. Scan for known API key env vars (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`).
@@ -498,15 +498,15 @@ Castle
 Interactive terminal using `prompt_toolkit`.
 
 ```
-$ k                    # New session (auto-generated ID)
-$ k -C                 # Continue most recently active session
-$ k -S <id>            # Resume specific session by ID
-$ k -d                 # Daemon mode (foreground, no interactive CLI)
+$ kcastle                    # New session (auto-generated ID)
+$ kcastle -C                 # Continue most recently active session
+$ kcastle -S <id>            # Resume specific session by ID
+$ kcastle -d                 # Daemon mode (foreground, no interactive CLI)
 
-$ k start              # Start daemon in background
-$ k stop               # Stop the background daemon
-$ k status             # Show daemon status
-$ k restart            # Restart the daemon
+$ kcastle start              # Start daemon in background
+$ kcastle stop               # Stop the background daemon
+$ kcastle status             # Show daemon status
+$ kcastle restart            # Restart the daemon
 
 k> hello               # User input → session.run("hello")
                        # Stream AgentEvent → render to terminal

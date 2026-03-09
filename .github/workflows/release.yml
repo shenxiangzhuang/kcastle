@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+
+      - name: Set up environment
+        uses: ./.github/actions/setup-python-env
+
+      - name: Build kcastle-ai
+        run: uv build --package kcastle-ai --no-sources --out-dir dist/kcastle-ai
+
+      - name: Build kcastle-agent
+        run: uv build --package kcastle-agent --no-sources --out-dir dist/kcastle-agent
+
+      - name: Build kcastle
+        run: uv build --package kcastle --no-sources --out-dir dist/kcastle
+
+      - name: Upload kcastle-ai artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-kcastle-ai
+          path: dist/kcastle-ai/
+
+      - name: Upload kcastle-agent artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-kcastle-agent
+          path: dist/kcastle-agent/
+
+      - name: Upload kcastle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-kcastle
+          path: dist/kcastle/
+
+  publish-kcastle-ai:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-kcastle-ai
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-kcastle-agent:
+    runs-on: ubuntu-latest
+    needs: publish-kcastle-ai
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-kcastle-agent
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+
+  publish-kcastle:
+    runs-on: ubuntu-latest
+    needs: publish-kcastle-agent
+    permissions:
+      id-token: write
+    environment: pypi
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-kcastle
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true

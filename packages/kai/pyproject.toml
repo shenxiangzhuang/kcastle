@@ -1,6 +1,6 @@
 [project]
-name = "kai"
-version = "0.1.0"
+name = "kcastle-ai"
+version = "0.0.1a0"
 description = "AI provider abstractions for the k agent framework"
 readme = "README.md"
 authors = [

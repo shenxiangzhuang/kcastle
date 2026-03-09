@@ -1,5 +1,7 @@
 # kcastle
 
+[![PyPI](https://img.shields.io/pypi/v/kcastle?color=%2334D058&label=pypi%20package)](https://pypi.org/project/kcastle/)
+
 Agent application with multi-endpoint support for the K agent framework.
 
 kcastle is a general-purpose agent application built on `kagent`. It provides a unified

@@ -1,5 +1,7 @@
 # kai
 
+[![PyPI](https://img.shields.io/pypi/v/kcastle-ai?color=%2334D058&label=pypi%20package)](https://pypi.org/project/kcastle-ai/)
+
 Unified multi-provider LLM API for the k agent framework.
 
 kai provides a simple, provider-agnostic interface for streaming LLM completions with tool calling support. It has two entry points — `stream()` for real-time events and `complete()` for one-shot responses.
@@ -7,7 +9,7 @@ kai provides a simple, provider-agnostic interface for streaming LLM completions
 ## Installation
 
 ```bash
-uv add kai
+uv add kcastle-ai
 ```
 
 ## Quick Start

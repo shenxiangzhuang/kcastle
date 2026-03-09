@@ -1,6 +1,6 @@
 [project]
-name = "kagent"
-version = "0.1.0"
+name = "kcastle-agent"
+version = "0.0.1a0"
 description = "Core agent framework for the k agent framework"
 readme = "README.md"
 authors = [
@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "kai",
+    "kcastle-ai",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +35,7 @@ module-name = ["kagent"]
 source-exclude = ["tests/**/*"]
 
 [tool.uv.sources]
-kai = { workspace = true }
+"kcastle-ai" = { workspace = true }
 
 [tool.ruff]
 line-length = 100

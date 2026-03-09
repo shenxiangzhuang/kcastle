@@ -72,7 +72,7 @@ def _print_missing_keys_hint() -> None:
     print(f"\n  {_YELLOW}No API keys found.{_RESET}")
     print("  Set one of the above environment variables, e.g.:\n")
     print(f'    {_DIM}export DEEPSEEK_API_KEY="sk-..."{_RESET}\n')
-    print("  Then run `k` again.\n")
+    print("  Then run `kcastle` again.\n")
 
 
 def _confirm_write(path: Path) -> bool:
@@ -122,5 +122,5 @@ def run_setup(home: Path | None = None) -> Path:
 
     _write_minimal_config(path, chosen)
 
-    print(f"\n  {_GREEN}✓{_RESET} Done. Run {_BOLD}k{_RESET} to start.\n")
+    print(f"\n  {_GREEN}✓{_RESET} Done. Run {_BOLD}kcastle{_RESET} to start.\n")
     return path

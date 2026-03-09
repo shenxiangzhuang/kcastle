@@ -2,14 +2,14 @@
 
 Usage::
 
-    $ k                    # New session (auto-generated ID)
-    $ k -C                 # Continue most recently active session
-    $ k -S <id>            # Resume specific session by ID
-    $ k -d                 # Daemon mode (no interactive CLI, foreground)
-    $ k start              # Start daemon in background
-    $ k stop               # Stop the background daemon
-    $ k status             # Show daemon status
-    $ k restart            # Restart the daemon
+    $ kcastle                    # New session (auto-generated ID)
+    $ kcastle -C                 # Continue most recently active session
+    $ kcastle -S <id>            # Resume specific session by ID
+    $ kcastle -d                 # Daemon mode (no interactive CLI, foreground)
+    $ kcastle start              # Start daemon in background
+    $ kcastle stop               # Stop the background daemon
+    $ kcastle status             # Show daemon status
+    $ kcastle restart            # Restart the daemon
 """
 
 from __future__ import annotations
@@ -21,9 +21,9 @@ import sys
 
 
 def main() -> None:
-    """Main entry point for the ``k`` command."""
+    """Main entry point for the ``kcastle`` command."""
     parser = argparse.ArgumentParser(
-        prog="k",
+        prog="kcastle",
         description="kcastle — AI agent with session management",
     )
     parser.add_argument(

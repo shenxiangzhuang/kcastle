@@ -67,11 +67,11 @@ jobs:
       - name: Set up environment
         uses: ./.github/actions/setup-python-env
 
-      - name: Build kai
-        run: uv build --package kai --no-sources --out-dir dist/kai
+      - name: Build kcastle-ai
+        run: uv build --package kcastle-ai --no-sources --out-dir dist/kcastle-ai
 
-      - name: Build kagent
-        run: uv build --package kagent --no-sources --out-dir dist/kagent
+      - name: Build kcastle-agent
+        run: uv build --package kcastle-agent --no-sources --out-dir dist/kcastle-agent
 
       - name: Build kcastle
         run: uv build --package kcastle --no-sources --out-dir dist/kcastle

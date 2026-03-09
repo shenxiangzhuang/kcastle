@@ -1,14 +1,14 @@
 [project]
 name = "k"
-version = "0.1.0"
+version = "0.0.1a0"
 description = "The k agent framework"
 readme = "README.md"
 requires-python = ">=3.12"
 
 [dependency-groups]
 dev = [
-    "kai",
-    "kagent",
+    "kcastle-ai",
+    "kcastle-agent",
     "kcastle",
     "pyright>=1.1.407",
     "pytest>=9.0.2",
@@ -20,8 +20,8 @@ dev = [
 members = ["packages/*"]
 
 [tool.uv.sources]
-kai = { workspace = true }
-kagent = { workspace = true }
+"kcastle-ai" = { workspace = true }
+"kcastle-agent" = { workspace = true }
 kcastle = { workspace = true }
 
 [tool.ruff]

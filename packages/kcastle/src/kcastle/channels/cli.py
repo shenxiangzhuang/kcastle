@@ -2,9 +2,9 @@
 
 Usage::
 
-    $ k                    # New session (auto-generated ID)
-    $ k -C                 # Continue most recently active session
-    $ k -S <id>            # Resume specific session by ID
+    $ kcastle                    # New session (auto-generated ID)
+    $ kcastle -C                 # Continue most recently active session
+    $ kcastle -S <id>            # Resume specific session by ID
 """
 
 from __future__ import annotations

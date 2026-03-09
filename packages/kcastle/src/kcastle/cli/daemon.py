@@ -1,7 +1,7 @@
 """Daemon process management for kcastle.
 
-Provides start/stop/status/restart operations for the background ``k``
-process.  The daemon is a detached ``k -d`` subprocess whose PID is
+Provides start/stop/status/restart operations for the background ``kcastle``
+process.  The daemon is a detached ``kcastle -d`` subprocess whose PID is
 tracked in ``~/.kcastle/k.pid`` and whose output is logged to
 ``~/.kcastle/k.log``.
 """

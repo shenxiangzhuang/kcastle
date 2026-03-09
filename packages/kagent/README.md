@@ -1,5 +1,7 @@
 # kagent
 
+[![PyPI](https://img.shields.io/pypi/v/kcastle-agent?color=%2334D058&label=pypi%20package)](https://pypi.org/project/kcastle-agent/)
+
 Core agent runtime for the K agent framework — a context-first, three-level agent SDK built on `kai`.
 
 ## Key Principles

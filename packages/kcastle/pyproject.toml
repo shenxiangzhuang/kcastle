@@ -1,6 +1,6 @@
 [project]
 name = "kcastle"
-version = "0.1.0"
+version = "0.0.1a0"
 description = "Agent application with multi-endpoint support for the k agent framework"
 readme = "README.md"
 authors = [
@@ -8,14 +8,14 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "kagent",
+    "kcastle-agent",
     "pyyaml>=6.0",
     "python-telegram-bot>=21.0",
     "telegramify-markdown>=0.5.4",
 ]
 
 [project.scripts]
-k = "kcastle.cli:main"
+kcastle = "kcastle.cli:main"
 
 [dependency-groups]
 dev = [
@@ -30,7 +30,7 @@ requires = ["uv_build>=0.9.18,<0.10.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-kagent = { workspace = true }
+"kcastle-agent" = { workspace = true }
 
 [tool.ruff]
 line-length = 100

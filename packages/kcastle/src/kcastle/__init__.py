@@ -12,9 +12,9 @@ Quick start::
 
 Or from the command line::
 
-    $ k                    # New session
-    $ k -C                 # Continue latest session
-    $ k -S <id>            # Resume specific session
+    $ kcastle                    # New session
+    $ kcastle -C                 # Continue latest session
+    $ kcastle -S <id>            # Resume specific session
 """
 
 from kcastle.castle import Castle
