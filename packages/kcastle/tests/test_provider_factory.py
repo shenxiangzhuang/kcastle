@@ -5,8 +5,7 @@ from kai.providers import ProviderBase
 from kai.providers.deepseek import DeepseekOpenAI
 from kai.providers.openai import OpenAIResponses
 
-from kcastle.provider_config import ProviderConfig
-from kcastle.provider_factory import ProviderRegistry, create_provider
+from kcastle.providers import ProviderConfig, ProviderRegistry, create_provider
 
 
 def test_create_provider_openai_completions() -> None:

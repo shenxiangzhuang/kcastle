@@ -11,8 +11,8 @@ from kai.providers import ProviderBase
 from kai.types.stream import StreamEvent
 
 from kcastle.castle import Castle
-from kcastle.config import CastleConfig, ChannelConfig, ModelConfig, ProviderEntry
-from kcastle.provider_config import ProviderConfig
+from kcastle.config import CastleConfig, ChannelConfig
+from kcastle.providers import ModelConfig, ProviderConfig, ProviderEntry
 from kcastle.session.manager import SessionManager
 
 

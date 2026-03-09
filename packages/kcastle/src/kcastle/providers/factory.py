@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from kai import ProviderBase
 from kai.providers.anthropic import AnthropicMessages
@@ -13,7 +14,7 @@ from kai.providers.openai import (
     OpenAIResponses,
 )
 
-from kcastle.provider_config import ProviderConfig
+from kcastle.providers.config import ModelConfig, ProviderConfig, ProviderEntry
 
 type ProviderFactory = Callable[[ProviderConfig], ProviderBase]
 
@@ -156,3 +157,77 @@ def create_provider(
     """
     active_registry = registry or _DEFAULT_REGISTRY
     return active_registry.create(config)
+
+
+def _to_str_dict(d: object) -> dict[str, Any]:
+    """Coerce an untyped dict from YAML into ``dict[str, Any]``."""
+    if not isinstance(d, dict):
+        return {}
+    return {
+        str(k): v  # pyright: ignore[reportUnknownArgumentType]
+        for k, v in d.items()  # pyright: ignore[reportUnknownVariableType]
+    }
+
+
+def parse_models(raw: object) -> list[ModelConfig]:
+    """Parse the ``models`` mapping inside a provider."""
+    if not isinstance(raw, dict):
+        return []
+    models: list[ModelConfig] = []
+    for model_id, model_cfg in raw.items():  # pyright: ignore[reportUnknownVariableType]
+        mid = str(model_id)  # pyright: ignore[reportUnknownArgumentType]
+        if isinstance(model_cfg, dict):
+            mc = _to_str_dict(model_cfg)  # pyright: ignore[reportUnknownArgumentType]
+            active = bool(mc.pop("active", True))
+            options: dict[str, object] = {str(k): v for k, v in mc.items()}
+            models.append(ModelConfig(id=mid, active=active, options=options))
+        else:
+            # Bare entry or ``model_id: true/false``
+            active = bool(model_cfg) if model_cfg is not None else True  # pyright: ignore[reportUnknownArgumentType]
+            models.append(ModelConfig(id=mid, active=active))
+    return models
+
+
+def build_provider_entry(
+    *,
+    provider_name: str,
+    cfg_dict: dict[str, Any],
+) -> ProviderEntry:
+    """Build a typed provider profile from an untyped mapping."""
+    base_url_val = cfg_dict.get("base_url")
+    base_url: str | None = str(base_url_val) if base_url_val else None
+    extra_body_val = cfg_dict.get("extra_body")
+    extra_body: dict[str, object] | None = (
+        _to_str_dict(extra_body_val)  # pyright: ignore[reportUnknownArgumentType]
+        if isinstance(extra_body_val, dict)
+        else None
+    )
+    return ProviderEntry(
+        config=ProviderConfig(
+            provider=provider_name,
+            model="",
+            api_key=str(cfg_dict.get("api_key", "")) or None,
+            base_url=base_url,
+            extra_body=extra_body,
+            options={},
+        ),
+        models=parse_models(cfg_dict.get("models")),
+    )
+
+
+def parse_providers(data: dict[str, Any]) -> dict[str, ProviderEntry]:
+    """Parse the ``providers`` section of a config dict."""
+    raw: object = data.get("providers")
+    if not isinstance(raw, dict):
+        return {}
+    providers: dict[str, ProviderEntry] = {}
+    for name, cfg in raw.items():  # pyright: ignore[reportUnknownVariableType]
+        provider_name = str(name).lower()  # pyright: ignore[reportUnknownArgumentType]
+        cfg_dict = _to_str_dict(cfg)  # pyright: ignore[reportUnknownArgumentType]
+        if not cfg_dict:
+            continue
+        providers[provider_name] = build_provider_entry(
+            provider_name=provider_name,
+            cfg_dict=cfg_dict,
+        )
+    return providers

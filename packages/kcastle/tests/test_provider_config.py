@@ -4,7 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from kcastle.provider_config import ProviderConfig
+from kcastle.providers import ProviderConfig
 
 
 def test_provider_config_name_uses_lower_provider() -> None:
