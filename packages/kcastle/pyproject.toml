@@ -34,6 +34,7 @@ kagent = { workspace = true }
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["src/kcastle/skills"]
 
 [tool.ruff.format]
 docstring-code-format = true
