@@ -36,7 +36,7 @@ class _WorkspaceTool(Tool):
     def for_workspace(cls, workspace: Path) -> _WorkspaceTool:
         tool = cls.model_construct()
         tool._workspace = workspace.resolve()
-        tool._user_skills_dir = (Path.home() / ".kcastle" / "skills").resolve(strict=False)
+        tool._user_skills_dir = (Path.home() / ".agent" / "skills").resolve(strict=False)
         return tool
 
     def _resolve(self, user_path: str) -> Path:
@@ -57,7 +57,7 @@ class _WorkspaceTool(Tool):
         if absolute.is_relative_to(self._workspace):
             return absolute.relative_to(self._workspace).as_posix()
         if absolute.is_relative_to(self._user_skills_dir):
-            return f"~/.kcastle/skills/{absolute.relative_to(self._user_skills_dir).as_posix()}"
+            return f"~/.agent/skills/{absolute.relative_to(self._user_skills_dir).as_posix()}"
         return absolute.as_posix()
 
 

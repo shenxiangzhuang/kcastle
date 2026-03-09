@@ -237,7 +237,7 @@ class Castle:
         config.skills_dir.mkdir(parents=True, exist_ok=True)
 
         project_root = find_project_root(Path.cwd())
-        project_skills = project_root / ".skills"
+        project_skills = project_root / ".agent" / "skills"
         skill_manager = SkillManager(
             user_skills_dir=config.skills_dir,
             project_skills_dir=project_skills,

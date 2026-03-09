@@ -69,12 +69,6 @@ discover all sessions.
 ```
 ~/.kcastle/
 ├── config.yaml                      # Global configuration (YAML)
-├── skills/                          # User-level skills
-│   ├── <skill_id_1>/
-│   │   ├── skill.yaml
-│   │   ├── prompt.md
-│   │   └── tools.py
-│   └── ...
 └── sessions/
     ├── <session_id_1>/
     │   ├── meta.json                # Session metadata
@@ -82,6 +76,13 @@ discover all sessions.
     ├── <session_id_2>/
     │   ├── meta.json
     │   └── trace.jsonl
+    └── ...
+
+~/.agent/
+└── skills/                          # User-level skills
+    ├── <skill_id_1>/
+    │   ├── SKILL.md
+    │   └── ...
     └── ...
 ```
 
@@ -272,8 +273,8 @@ flattened `Tool` lists.
 Skills are discovered from three layers, with deterministic override priority:
 
 1. **Builtin** (read-only, shipped with kcastle)
-2. **User** (`~/.kcastle/skills`)
-3. **Project** (`<project_root>/.skills`)
+2. **User** (`~/.agent/skills`)
+3. **Project** (`<project_root>/.agent/skills`)
 
 Conflict rule: `project > user > builtin` for the same `skill_id`.
 
@@ -285,7 +286,7 @@ Project root is resolved from the current workspace using nearest-parent rules:
 2. Else directory containing `pyproject.toml`
 3. Else current working directory
 
-If `<project_root>/.skills` exists, it is included as the highest-priority
+If `<project_root>/.agent/skills` exists, it is included as the highest-priority
 skill layer.
 
 ### Skill Unit Format

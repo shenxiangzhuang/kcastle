@@ -445,7 +445,7 @@ def load_config(home: Path | None = None) -> CastleConfig:
     data: dict[str, Any] = _to_str_dict(_expand_env_recursive(raw_data))
 
     sessions_dir = home / "sessions"
-    skills_dir = home / "skills"
+    skills_dir = Path.home() / ".agent" / "skills"
 
     providers = _parse_providers(data)
 

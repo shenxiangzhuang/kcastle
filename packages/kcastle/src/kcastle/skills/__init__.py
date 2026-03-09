@@ -1,8 +1,8 @@
 """kcastle.skills — Skill management for kcastle.
 
 Discover, search, and render skills across three layers:
-builtin (``kcastle/skills``), user (``~/.kcastle/skills``), and
-project (``<root>/.skills``).
+builtin (``kcastle/skills``), user (``~/.agent/skills``), and
+project (``<root>/.agent/skills``).
 """
 
 from kcastle.skills.manager import SkillManager

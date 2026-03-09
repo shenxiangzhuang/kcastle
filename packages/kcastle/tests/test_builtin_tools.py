@@ -80,7 +80,7 @@ async def test_core_file_tools_allow_user_skill_dir_with_tilde(
     read_tool = tools["read_file"]
 
     skill_id = f"kcastle-test-{uuid.uuid4().hex[:8]}"
-    target = f"~/.kcastle/skills/{skill_id}/SKILL.md"
+    target = f"~/.agent/skills/{skill_id}/SKILL.md"
     content = "---\nname: demo-skill\ndescription: demo\n---\n"
 
     try:
@@ -93,7 +93,7 @@ async def test_core_file_tools_allow_user_skill_dir_with_tilde(
         assert not read_result.is_error
         assert "name: demo-skill" in read_result.output
     finally:
-        shutil.rmtree(Path.home() / ".kcastle" / "skills" / skill_id, ignore_errors=True)
+        shutil.rmtree(Path.home() / ".agent" / "skills" / skill_id, ignore_errors=True)
 
 
 @pytest.mark.asyncio
