@@ -78,7 +78,8 @@ def main() -> None:
 
     if args.command in ("start", "stop", "status", "restart"):
         from kcastle.config import _DEFAULT_HOME  # pyright: ignore[reportPrivateUsage]
-        from kcastle.daemon import (
+
+        from .daemon import (
             daemon_restart,
             daemon_start,
             daemon_status,
@@ -97,7 +98,8 @@ def main() -> None:
         return
 
     from kcastle.config import load_config
-    from kcastle.setup import needs_setup, run_setup
+
+    from .setup import needs_setup, run_setup
 
     if needs_setup(home):
         run_setup(home)
