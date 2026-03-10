@@ -105,7 +105,7 @@ class TraceEntry:
     message: Message | None = None
     """The ``kai.Message`` for message-bearing entries."""
 
-    data: dict[str, Any] = field(default_factory=lambda: {})
+    data: dict[str, Any] = field(default_factory=dict)  # pyright: ignore[reportUnknownVariableType]
     """Kind-specific structured data (e.g. anchor name, event payload)."""
 
     meta: TraceMeta = field(default_factory=TraceMeta)

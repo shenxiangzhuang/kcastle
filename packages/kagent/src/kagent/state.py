@@ -38,7 +38,7 @@ class AgentState:
     trace: Trace = field(default_factory=Trace)
     """Append-only execution trace.  The single source of truth."""
 
-    tools: list[Tool] = field(default_factory=lambda: list[Tool]())
+    tools: list[Tool] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
     """Available tools for the agent."""
 
     @property
