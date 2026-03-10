@@ -88,3 +88,44 @@ def test_search_matches_hyphenated_and_underscored_queries(tmp_path: Path) -> No
     assert matches_underscore
     assert matches_dash[0].skill.name == "skill-creator"
     assert matches_underscore[0].skill.name == "skill-creator"
+
+
+def test_expand_hints_injects_skill_instructions(tmp_path: Path) -> None:
+    user_dir = tmp_path / "user"
+    _write_skill(
+        user_dir / "my-tool",
+        name="my-tool",
+        description="Performs a useful task",
+    )
+    (user_dir / "my-tool" / "SKILL.md").write_text(
+        (
+            "---\nname: my-tool\ndescription: Performs a useful task\n---\n\n"
+            "# My Tool\n\nDo the thing.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    manager = SkillManager(user_skills_dir=user_dir)
+    manager.discover()
+
+    result = manager.expand_hints("Please use $my-tool for this.")
+
+    assert "<skill_expansion>" in result
+    assert "[my-tool]" in result
+    assert "Do the thing." in result
+
+
+def test_expand_hints_returns_input_unchanged_when_no_hints(tmp_path: Path) -> None:
+    manager = SkillManager(user_skills_dir=tmp_path / "user")
+    manager.discover()
+
+    user_input = "No hints here, just a plain message."
+    assert manager.expand_hints(user_input) == user_input
+
+
+def test_expand_hints_ignores_unknown_hints(tmp_path: Path) -> None:
+    manager = SkillManager(user_skills_dir=tmp_path / "user")
+    manager.discover()
+
+    user_input = "Use $nonexistent-skill please."
+    assert manager.expand_hints(user_input) == user_input

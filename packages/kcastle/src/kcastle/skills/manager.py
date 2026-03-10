@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kcastle.log import logger
-from kcastle.skills.skill import Skill
+from kcastle.skills.skill import Skill, extract_skill_hints, render_expanded_skills
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
@@ -113,6 +113,32 @@ class SkillManager:
     def get_skill(self, name: str) -> Skill | None:
         """Get a single skill by name."""
         return self._skills.get(name)
+
+    def expand_hints(self, user_input: str) -> str:
+        """Augment *user_input* with full instructions for hinted skills.
+
+        Progressive disclosure strategy: compact skill metadata is always
+        present in the system prompt; full skill bodies are injected only
+        when the user explicitly references ``$skill-name`` in their message.
+
+        Returns the original *user_input* unchanged when no valid hints are
+        found.
+        """
+        hints = extract_skill_hints(user_input)
+        if not hints:
+            return user_input
+
+        expanded: list[Skill] = []
+        for hint in hints:
+            skill = self.get_skill(hint)
+            if skill is None:
+                continue
+            expanded.append(skill)
+
+        expansion_block = render_expanded_skills(expanded)
+        if not expansion_block:
+            return user_input
+        return f"{user_input}\n\n{expansion_block}"
 
     @staticmethod
     def _scan_dir(directory: Path, source: str) -> list[Skill]:

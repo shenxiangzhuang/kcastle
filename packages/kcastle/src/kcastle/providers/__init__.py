@@ -9,9 +9,11 @@ from kcastle.providers.factory import (
     parse_models,
     parse_providers,
 )
+from kcastle.providers.model_manager import ModelManager
 
 __all__ = [
     "ModelConfig",
+    "ModelManager",
     "ProviderConfig",
     "ProviderEntry",
     "ProviderRegistry",

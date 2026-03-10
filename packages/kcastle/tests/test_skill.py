@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kcastle.skills.skill import Skill
+from kcastle.skills.skill import Skill, extract_skill_hints, render_expanded_skills
 
 # --- Loading / Saving ---
 
@@ -74,7 +74,7 @@ def test_save_handles_yaml_special_chars(tmp_path: Path) -> None:
 
 def test_extract_hints_normalizes_and_deduplicates() -> None:
     text = "Use $skill_creator then $skill-creator and also $skill-installer"
-    assert Skill.extract_hints(text) == ["skill-creator", "skill-installer"]
+    assert extract_skill_hints(text) == ["skill-creator", "skill-installer"]
 
 
 def test_render_expanded_includes_instruction_body() -> None:
@@ -86,7 +86,7 @@ def test_render_expanded_includes_instruction_body() -> None:
         source="builtin",
     )
 
-    block = Skill.render_expanded([skill])
+    block = render_expanded_skills([skill])
     assert "<skill_expansion>" in block
     assert "[skill-creator] (builtin)" in block
     assert "Do things." in block

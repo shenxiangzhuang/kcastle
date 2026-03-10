@@ -71,12 +71,19 @@ def _make_castle(tmp_path: Path) -> Castle:
         agent_factory=_agent_factory,
     )
 
+    from kcastle.providers import ModelManager
+
+    model_manager = ModelManager(
+        config=config,
+        session_manager=session_manager,
+    )
+
     return Castle(
         config=config,
         session_manager=session_manager,
         skill_manager=object(),  # type: ignore[arg-type]
         channels=[],
-        provider=default_provider,
+        model_manager=model_manager,
         system_prompt="",
         skill_tools=[],
     )
@@ -98,12 +105,12 @@ def test_switch_model_only_affects_target_session(
     s1 = sm.create(session_id="s1")
     s2 = sm.create(session_id="s2")
 
-    import kcastle.castle as castle_module
+    import kcastle.providers.model_manager as model_manager_module
 
     def _fake_create_provider(config: ProviderConfig) -> object:
         return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
+    monkeypatch.setattr(model_manager_module, "create_provider", _fake_create_provider)
 
     castle.switch_model("mock", "model-b", session_id="s1")
 
@@ -119,12 +126,12 @@ def test_switch_model_raises_for_unloaded_session(
 ) -> None:
     castle = _make_castle(tmp_path)
 
-    import kcastle.castle as castle_module
+    import kcastle.providers.model_manager as model_manager_module
 
     def _fake_create_provider(config: ProviderConfig) -> object:
         return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
+    monkeypatch.setattr(model_manager_module, "create_provider", _fake_create_provider)
 
     with pytest.raises(KeyError, match="not loaded"):
         castle.switch_model("mock", "model-b", session_id="missing")
@@ -136,12 +143,12 @@ def test_switch_model_persists_across_resume(
 ) -> None:
     castle = _make_castle(tmp_path)
 
-    import kcastle.castle as castle_module
+    import kcastle.providers.model_manager as model_manager_module
 
     def _fake_create_provider(config: ProviderConfig) -> object:
         return DummyProvider(provider=config.provider, model=config.model)
 
-    monkeypatch.setattr(castle_module, "create_provider", _fake_create_provider)
+    monkeypatch.setattr(model_manager_module, "create_provider", _fake_create_provider)
 
     castle.session_manager.create(session_id="s1")
     castle.switch_model("mock", "model-b", session_id="s1")

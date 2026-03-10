@@ -1,10 +1,17 @@
-"""Skill — metadata, loading, and prompt rendering.
+"""Skill — skill data model with file-based persistence.
 
 Canonical format follows anthropics/skills exactly:
 
 - ``<skill-dir>/SKILL.md`` (required)
 - YAML frontmatter with ``name`` and ``description`` (required)
 - Markdown body as instructions
+
+Rendering utilities and hint extraction are provided as module-level
+functions to keep the ``Skill`` dataclass focused on data and persistence:
+
+- :func:`render_compact_skills` — compact metadata for system prompt injection
+- :func:`render_expanded_skills` — full instruction bodies for hinted skills
+- :func:`extract_skill_hints` — extract ``$skill-name`` references from text
 """
 
 from __future__ import annotations
@@ -101,50 +108,59 @@ class Skill:
         content = f"---\n{fm}\n---\n\n{body}\n" if body else f"---\n{fm}\n---\n\n# {self.name}\n"
         (target / _SKILL_MD).write_text(content, encoding="utf-8")
 
-    @staticmethod
-    def render_compact(skills: list[Skill]) -> str:
-        """Render compact skill metadata for system prompt injection."""
-        if not skills:
-            return ""
 
-        lines = ["<skills>"]
-        for skill in skills:
-            lines.append(f"- {skill.name} ({skill.source}): {skill.description}")
-        lines.append("</skills>")
-        return "\n".join(lines)
+# ---------------------------------------------------------------------------
+# Rendering utilities — operate on collections of skills, not a single skill
+# ---------------------------------------------------------------------------
 
-    @staticmethod
-    def render_expanded(skills: list[Skill]) -> str:
-        """Render full instruction bodies for explicitly hinted skills."""
-        if not skills:
-            return ""
 
-        lines = ["<skill_expansion>"]
-        for skill in skills:
-            lines.append(f"=== [{skill.name}] ({skill.source}) ===")
-            if skill.instructions.strip():
-                lines.append(skill.instructions.strip())
-            lines.append("")
-        lines.append("</skill_expansion>")
-        return "\n".join(lines).strip()
+def render_compact_skills(skills: list[Skill]) -> str:
+    """Render compact skill metadata for system prompt injection."""
+    if not skills:
+        return ""
 
-    @staticmethod
-    def extract_hints(text: str) -> list[str]:
-        """Extract unique ``$skill`` style hints from free text."""
-        hints: list[str] = []
-        seen: set[str] = set()
+    lines = ["<skills>"]
+    for skill in skills:
+        lines.append(f"- {skill.name} ({skill.source}): {skill.description}")
+    lines.append("</skills>")
+    return "\n".join(lines)
 
-        for match in _HINT_RE.finditer(text):
-            raw = match.group(1).strip().lower()
-            if not raw:
-                continue
-            normalized = raw.replace("_", "-")
-            if normalized in seen:
-                continue
-            seen.add(normalized)
-            hints.append(normalized)
 
-        return hints
+def render_expanded_skills(skills: list[Skill]) -> str:
+    """Render full instruction bodies for explicitly hinted skills."""
+    if not skills:
+        return ""
+
+    lines = ["<skill_expansion>"]
+    for skill in skills:
+        lines.append(f"=== [{skill.name}] ({skill.source}) ===")
+        if skill.instructions.strip():
+            lines.append(skill.instructions.strip())
+        lines.append("")
+    lines.append("</skill_expansion>")
+    return "\n".join(lines).strip()
+
+
+def extract_skill_hints(text: str) -> list[str]:
+    """Extract unique ``$skill`` style hints from free text.
+
+    Normalizes underscores to hyphens and deduplicates hints while
+    preserving their first-occurrence order.
+    """
+    hints: list[str] = []
+    seen: set[str] = set()
+
+    for match in _HINT_RE.finditer(text):
+        raw = match.group(1).strip().lower()
+        if not raw:
+            continue
+        normalized = raw.replace("_", "-")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        hints.append(normalized)
+
+    return hints
 
 
 def _parse_frontmatter(markdown: str) -> tuple[dict[str, Any], str]:
