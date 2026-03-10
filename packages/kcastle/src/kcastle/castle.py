@@ -149,47 +149,20 @@ class Castle:
         if config is None:
             config = load_config()
 
-        config.home.mkdir(parents=True, exist_ok=True)
-        config.sessions_dir.mkdir(parents=True, exist_ok=True)
-        config.skills_dir.mkdir(parents=True, exist_ok=True)
+        cls._ensure_dirs(config)
 
-        project_root = find_project_root(Path.cwd())
-        project_skills = project_root / ".agent" / "skills"
-        skill_manager = SkillManager(
-            user_skills_dir=config.skills_dir,
-            project_skills_dir=project_skills,
-            builtin_skills_dir=Path(__file__).resolve().parent / "skills",
+        skill_manager = cls._build_skill_manager(config)
+        provider = create_provider(config.active_provider_config())
+        skill_tools = create_builtin_tools(workspace=Path.cwd(), skill_manager=skill_manager)
+        system_prompt = _build_system_prompt(
+            config, render_compact_skills(skill_manager.all_skills())
         )
-        skill_manager.discover()
-
-        provider_config = config.active_provider_config()
-        provider = create_provider(provider_config)
-
-        all_skills = skill_manager.all_skills()
-        skill_tools = create_builtin_tools(
-            workspace=Path.cwd(),
-            skill_manager=skill_manager,
+        channels = cls._build_channels(
+            config,
+            session_id=session_id,
+            continue_latest=continue_latest,
+            daemon=daemon,
         )
-        skill_prompts = render_compact_skills(all_skills)
-
-        system_prompt = _build_system_prompt(config, skill_prompts)
-
-        channels: list[Channel] = []
-        if config.cli.enabled and not daemon:
-            channels.append(
-                CLIChannel(
-                    session_id=session_id,
-                    continue_latest=continue_latest,
-                )
-            )
-        if config.telegram.enabled and config.telegram_token and daemon:
-            bot_username = config.telegram.options.get("bot_username", "")
-            channels.append(
-                TelegramChannel(
-                    token=config.telegram_token,
-                    bot_username=str(bot_username),
-                )
-            )
 
         def agent_factory(trace: Trace) -> Agent:
             return Agent(
@@ -204,11 +177,7 @@ class Castle:
             sessions_dir=config.sessions_dir,
             agent_factory=agent_factory,
         )
-
-        model_manager = ModelManager(
-            config=config,
-            session_manager=session_manager,
-        )
+        model_manager = ModelManager(config=config, session_manager=session_manager)
 
         return cls(
             config=config,
@@ -219,6 +188,44 @@ class Castle:
             system_prompt=system_prompt,
             skill_tools=skill_tools,
         )
+
+    @staticmethod
+    def _ensure_dirs(config: CastleConfig) -> None:
+        """Create all required application directories."""
+        config.home.mkdir(parents=True, exist_ok=True)
+        config.sessions_dir.mkdir(parents=True, exist_ok=True)
+        config.skills_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _build_skill_manager(config: CastleConfig) -> SkillManager:
+        """Create and initialise the skill manager with layered discovery."""
+        project_root = find_project_root(Path.cwd())
+        skill_manager = SkillManager(
+            user_skills_dir=config.skills_dir,
+            project_skills_dir=project_root / ".agent" / "skills",
+            builtin_skills_dir=Path(__file__).resolve().parent / "skills",
+        )
+        skill_manager.discover()
+        return skill_manager
+
+    @staticmethod
+    def _build_channels(
+        config: CastleConfig,
+        *,
+        session_id: str | None,
+        continue_latest: bool,
+        daemon: bool,
+    ) -> list[Channel]:
+        """Create the configured communication channels."""
+        channels: list[Channel] = []
+        if config.cli.enabled and not daemon:
+            channels.append(CLIChannel(session_id=session_id, continue_latest=continue_latest))
+        if config.telegram.enabled and config.telegram_token and daemon:
+            bot_username = config.telegram.options.get("bot_username", "")
+            channels.append(
+                TelegramChannel(token=config.telegram_token, bot_username=str(bot_username))
+            )
+        return channels
 
     async def run(self) -> None:
         """Start all channels and wait until shutdown."""

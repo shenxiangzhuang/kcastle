@@ -200,15 +200,13 @@ class Session:
         trace_manager = TraceManager(store=trace_store)
         trace = trace_manager.create(name=name)
 
-        agent: Agent = agent_factory(trace)
-
         logger.info("Created session %s", session_id)
-        return cls(
+        return cls._assemble(
             session_dir=session_dir,
             meta=meta,
-            agent=agent,
             trace=trace,
             trace_manager=trace_manager,
+            agent_factory=agent_factory,
         )
 
     @classmethod
@@ -229,9 +227,27 @@ class Session:
             raise ValueError(f"No trace found in session {meta.id}")
         trace = trace_manager.load(trace_ids[0])
 
-        agent: Agent = agent_factory(trace)
-
         logger.info("Resumed session %s (%d trace entries)", meta.id, len(trace))
+        return cls._assemble(
+            session_dir=session_dir,
+            meta=meta,
+            trace=trace,
+            trace_manager=trace_manager,
+            agent_factory=agent_factory,
+        )
+
+    @classmethod
+    def _assemble(
+        cls,
+        *,
+        session_dir: Path,
+        meta: SessionMeta,
+        trace: Trace,
+        trace_manager: TraceManager,
+        agent_factory: AgentFactory,
+    ) -> Session:
+        """Assemble a Session from its components (shared by create and resume)."""
+        agent: Agent = agent_factory(trace)
         return cls(
             session_dir=session_dir,
             meta=meta,

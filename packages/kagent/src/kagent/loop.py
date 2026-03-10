@@ -42,6 +42,37 @@ type ShouldContinueFn = Callable[[AgentState, Message], Awaitable[bool]]
 Receives ``(state, assistant_message)``. Return ``False`` to stop."""
 
 
+def _record_turn_end(
+    state: AgentState,
+    event: TurnEnd,
+    *,
+    run_id: str,
+    turn_index: int,
+) -> TokenUsage | None:
+    """Record a completed turn in the trace and return token usage.
+
+    Delegates trace-recording responsibility to this helper so that the main
+    loop stays focused on orchestration (SRP / Delegation principles).
+    """
+    state.trace.append(
+        TraceEntry.assistant(
+            event.message,
+            run_id=run_id,
+            turn_index=turn_index,
+            usage=event.message.usage,
+        )
+    )
+    for tool_msg in event.tool_results:
+        state.trace.append(
+            TraceEntry.tool_result(
+                tool_msg,
+                run_id=run_id,
+                turn_index=turn_index,
+            )
+        )
+    return event.message.usage
+
+
 async def agent_loop(
     *,
     llm: ProviderBase,
@@ -148,31 +179,14 @@ async def agent_loop(
                         duration_ms=event.llm_duration_ms,
                     )
 
-                    # Record in trace
-                    state.trace.append(
-                        TraceEntry.assistant(
-                            event.message,
-                            run_id=run_id,
-                            turn_index=turn_count,
-                            usage=event.message.usage,
-                        )
+                    # Record turn in trace (delegated to helper)
+                    turn_usage = _record_turn_end(
+                        state, event, run_id=run_id, turn_index=turn_count
                     )
-                    for tool_msg in event.tool_results:
-                        state.trace.append(
-                            TraceEntry.tool_result(
-                                tool_msg,
-                                run_id=run_id,
-                                turn_index=turn_count,
-                            )
-                        )
 
                     # Accumulate total usage
-                    if event.message.usage:
-                        total_usage = (
-                            total_usage + event.message.usage
-                            if total_usage
-                            else event.message.usage
-                        )
+                    if turn_usage is not None:
+                        total_usage = total_usage + turn_usage if total_usage else turn_usage
 
                     # Turn end hook
                     turn_duration_ms = (time.perf_counter() - turn_t0) * 1000
