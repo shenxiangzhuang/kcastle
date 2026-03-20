@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from kagent import Agent, Hooks, Trace
-from kagent.otel import OTelHooks
 from kai import Tool
 
 from kcastle.channels import Channel
@@ -20,7 +19,6 @@ from kcastle.channels.cli import CLIChannel
 from kcastle.channels.telegram import TelegramChannel
 from kcastle.config import CastleConfig, load_config
 from kcastle.log import logger
-from kcastle.otel import configure_otel
 from kcastle.providers import ModelManager, create_provider
 from kcastle.session.manager import SessionManager
 from kcastle.skills.manager import SkillManager, find_project_root
@@ -239,8 +237,10 @@ class Castle:
     @staticmethod
     def _build_agent_hooks(config: CastleConfig) -> Hooks | None:
         """Create optional agent hooks from runtime configuration."""
-        if not config.otel_enabled:
+        if not config.otel_endpoint:
             return None
+
+        from kagent.otel import OTelHooks
 
         logger.info("OpenTelemetry hooks enabled")
         return OTelHooks()
@@ -248,10 +248,12 @@ class Castle:
     @staticmethod
     def _configure_otel(config: CastleConfig) -> Any | None:
         """Configure OTel exporter/provider for kcastle."""
-        if not config.otel_enabled:
+        if not config.otel_endpoint:
             return None
-        provider = configure_otel(config.otel_endpoint)
 
+        from kcastle.otel import configure_otel
+
+        provider = configure_otel()
         logger.info("OpenTelemetry exporter configured: %s", config.otel_endpoint)
         return provider
 

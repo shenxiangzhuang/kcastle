@@ -204,7 +204,7 @@ default:
     assert active.provider == "deepseek-openai"
 
 
-def test_load_config_disables_otel_by_default(tmp_path: Path) -> None:
+def test_load_config_otel_disabled_by_default(tmp_path: Path) -> None:
     _write_config(
         tmp_path,
         """
@@ -220,59 +220,7 @@ default:
 
     cfg = load_config(home=tmp_path)
 
-    assert cfg.otel_enabled is False
-    assert cfg.otel_endpoint == "http://localhost:4317"
-
-
-@pytest.mark.parametrize(
-    ("env_value", "expected"),
-  [("1", True), ("0", False)],
-)
-def test_load_config_reads_otel_enabled_from_env(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    env_value: str,
-    expected: bool,
-) -> None:
-    _write_config(
-        tmp_path,
-        """
-providers:
-  deepseek-openai:
-    api_key: sk-test
-
-default:
-  provider: deepseek-openai
-  model: deepseek-chat
-""",
-    )
-    monkeypatch.setenv("KCASTLE_OTEL_ENABLED", env_value)
-
-    cfg = load_config(home=tmp_path)
-
-    assert cfg.otel_enabled is expected
-
-
-def test_load_config_rejects_invalid_otel_env_value(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _write_config(
-        tmp_path,
-        """
-providers:
-  deepseek-openai:
-    api_key: sk-test
-
-default:
-  provider: deepseek-openai
-  model: deepseek-chat
-""",
-    )
-    monkeypatch.setenv("KCASTLE_OTEL_ENABLED", "true")
-
-    with pytest.raises(ValueError, match="KCASTLE_OTEL_ENABLED"):
-        load_config(home=tmp_path)
+    assert cfg.otel_endpoint == ""
 
 
 def test_load_config_reads_otel_endpoint_from_env(
@@ -291,7 +239,7 @@ default:
   model: deepseek-chat
 """,
     )
-    monkeypatch.setenv("KCASTLE_OTEL_ENDPOINT", "http://otel.example:4317")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel.example:4317")
 
     cfg = load_config(home=tmp_path)
 

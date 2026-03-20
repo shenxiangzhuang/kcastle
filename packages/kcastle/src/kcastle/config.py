@@ -80,11 +80,8 @@ class CastleConfig:
     max_turns: int = 100
     """Maximum turns per agent run."""
 
-    otel_enabled: bool = False
-    """Whether to enable OpenTelemetry hooks for agent runs."""
-
-    otel_endpoint: str = "http://localhost:4317"
-    """OTLP gRPC endpoint used when OpenTelemetry export is enabled."""
+    otel_endpoint: str = ""
+    """OTLP gRPC endpoint.  When non-empty, OpenTelemetry export is enabled."""
 
     cli: ChannelConfig = field(default_factory=ChannelConfig)
     telegram: ChannelConfig = field(
@@ -180,22 +177,6 @@ def _resolve_default_provider_name(provider_value: str) -> str:
     return provider_name.lower() if provider_name else ""
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    """Parse a 0/1 environment variable."""
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-
-    normalized = raw_value.strip()
-    if normalized == "1":
-        return True
-    if normalized == "0":
-        return False
-
-    raise ValueError(
-        f"Environment variable {name!r} must be '0' or '1', got {raw_value!r}"
-    )
-
 
 def _parse_channel(
     data: dict[str, Any],
@@ -257,11 +238,7 @@ def load_config(home: Path | None = None) -> CastleConfig:
     agent = _to_str_dict(data.get("agent"))
     system_prompt = str(agent.get("system_prompt", _DEFAULT_SYSTEM_PROMPT))
     max_turns = int(agent.get("max_turns", 100))
-    otel_enabled = _env_bool("KCASTLE_OTEL_ENABLED", False)
-    otel_endpoint = (
-        os.environ.get("KCASTLE_OTEL_ENDPOINT", "http://localhost:4317")
-        or "http://localhost:4317"
-    )
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 
     cli_cfg = _parse_channel(data, "cli", default_enabled=True)
     tg_cfg = _parse_channel(data, "telegram", default_enabled=False)
@@ -280,7 +257,6 @@ def load_config(home: Path | None = None) -> CastleConfig:
         default_model=default_model,
         system_prompt=system_prompt,
         max_turns=max_turns,
-        otel_enabled=otel_enabled,
         otel_endpoint=otel_endpoint,
         cli=cli_cfg,
         telegram=tg_cfg,

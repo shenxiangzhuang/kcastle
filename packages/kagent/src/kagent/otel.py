@@ -1,3 +1,4 @@
+# pyright: reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnknownLambdaType=false
 """OpenTelemetry hooks for kagent.
 
 ``OTelHooks`` maps agent lifecycle events to OpenTelemetry spans following
@@ -16,13 +17,13 @@ Usage::
 
 Span hierarchy::
 
-    agent.run (run_id)
-    +-- agent.turn (turn 0)
-    |   +-- gen_ai.chat (LLM call)
-    |   +-- agent.tool (tool_name)
-    |   +-- agent.tool (tool_name)
-    +-- agent.turn (turn 1)
-    |   +-- gen_ai.chat
+    agent.run
+    +-- agent.turn: read_file, run_bash
+    |   +-- chat deepseek-reasoner
+    |   +-- agent.tool.read_file
+    |   +-- agent.tool.run_bash
+    +-- agent.turn (stop)
+    |   +-- chat deepseek-reasoner
     +-- ...
 
 All spans are annotated with ``gen_ai.*`` attributes per the OpenTelemetry
@@ -96,6 +97,10 @@ class OTelHooks(Hooks):
         self._turn_spans: dict[str, Any] = {}
         self._llm_spans: dict[str, Any] = {}
         self._tool_spans: dict[str, Any] = {}
+        # Per-run context: GenAI identity and model name.
+        self._run_genai: dict[str, dict[str, str]] = {}
+        # Per-turn tool names collected during the turn for span naming.
+        self._turn_tools: dict[str, list[str]] = {}
 
     @staticmethod
     def _turn_key(run_id: str, turn_index: int) -> str:
@@ -109,14 +114,16 @@ class OTelHooks(Hooks):
         ctx = self._otel_trace.set_span_in_context(parent) if parent else None
         return self._tracer.start_span(name, context=ctx, attributes=attributes)
 
+    # -- agent lifecycle --------------------------------------------------
+
     def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
+        self._run_genai[run_id] = {
+            "gen_ai.system": provider,
+            "gen_ai.request.model": model,
+        }
         span = self._tracer.start_span(
             "agent.run",
-            attributes={
-                "agent.run_id": run_id,
-                "gen_ai.system": provider,
-                "gen_ai.request.model": model,
-            },
+            attributes={"agent.run_id": run_id},
         )
         self._agent_spans[run_id] = span
 
@@ -128,25 +135,30 @@ class OTelHooks(Hooks):
         duration_ms: float,
         usage: TokenUsage | None,
     ) -> None:
+        self._run_genai.pop(run_id, None)
         span = self._agent_spans.pop(run_id, None)
         if span is None:
             return
         span.set_attribute("agent.turn_count", turn_count)
         span.set_attribute("agent.duration_ms", duration_ms)
         if usage:
-            span.set_attribute("gen_ai.usage.input_tokens", usage.input_tokens)
-            span.set_attribute("gen_ai.usage.output_tokens", usage.output_tokens)
-            span.set_attribute("gen_ai.usage.total_tokens", usage.total_tokens)
+            span.set_attribute("agent.usage.input_tokens", usage.input_tokens)
+            span.set_attribute("agent.usage.output_tokens", usage.output_tokens)
+            span.set_attribute("agent.usage.total_tokens", usage.total_tokens)
         span.end()
 
+    # -- turn lifecycle ---------------------------------------------------
+
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
+        key = self._turn_key(run_id, turn_index)
+        self._turn_tools[key] = []
         parent = self._agent_spans.get(run_id)
         span = self._start_child_span(
             "agent.turn",
             parent,
             {"agent.run_id": run_id, "agent.turn_index": turn_index},
         )
-        self._turn_spans[self._turn_key(run_id, turn_index)] = span
+        self._turn_spans[key] = span
 
     def on_turn_end(
         self,
@@ -162,23 +174,38 @@ class OTelHooks(Hooks):
         span = self._turn_spans.pop(key, None)
         if span is None:
             return
+
+        # Rename span: "agent.turn: tool1, tool2" or "agent.turn (stop)"
+        tools = self._turn_tools.pop(key, [])
+        if tools:
+            span.update_name(f"agent.turn: {', '.join(tools)}")
+        elif message.stop_reason:
+            span.update_name(f"agent.turn ({message.stop_reason})")
+
         span.set_attribute("agent.turn.duration_ms", duration_ms)
         span.set_attribute("agent.turn.llm_duration_ms", llm_duration_ms)
         span.set_attribute("agent.turn.tool_count", len(tool_results))
-        if message.stop_reason:
-            span.set_attribute("gen_ai.response.finish_reasons", [message.stop_reason])
-        if message.usage:
-            span.set_attribute("gen_ai.usage.input_tokens", message.usage.input_tokens)
-            span.set_attribute("gen_ai.usage.output_tokens", message.usage.output_tokens)
         span.end()
 
+    # -- LLM call ---------------------------------------------------------
+
     def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
+        genai = self._run_genai.get(run_id, {})
+        model = genai.get("gen_ai.request.model", "")
+        # OTel GenAI convention: span name = "{operation} {model}"
+        span_name = f"chat {model}" if model else "chat"
+
         key = self._turn_key(run_id, turn_index)
         parent = self._turn_spans.get(key)
         span = self._start_child_span(
-            "gen_ai.chat",
+            span_name,
             parent,
-            {"agent.run_id": run_id, "agent.turn_index": turn_index},
+            {
+                **genai,
+                "gen_ai.operation.name": "chat",
+                "agent.run_id": run_id,
+                "agent.turn_index": turn_index,
+            },
         )
         self._llm_spans[key] = span
 
@@ -202,6 +229,8 @@ class OTelHooks(Hooks):
             span.set_attribute("gen_ai.usage.output_tokens", message.usage.output_tokens)
         span.end()
 
+    # -- tool call --------------------------------------------------------
+
     def on_tool_start(
         self,
         *,
@@ -211,7 +240,12 @@ class OTelHooks(Hooks):
         tool_name: str,
         arguments: dict[str, Any],
     ) -> None:
+        # Collect tool name for turn span naming.
         turn_key = self._turn_key(run_id, turn_index)
+        tools = self._turn_tools.get(turn_key)
+        if tools is not None:
+            tools.append(tool_name)
+
         parent = self._turn_spans.get(turn_key)
         attrs: dict[str, Any] = {
             "agent.run_id": run_id,
