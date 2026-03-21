@@ -85,3 +85,6 @@ providers:
 			deepseek-reasoner:
 				active: true
 ```
+
+OpenTelemetry hooks are disabled by default. Set `OTEL_EXPORTER_OTLP_ENDPOINT`
+(e.g. `http://localhost:4317`) to enable trace export.

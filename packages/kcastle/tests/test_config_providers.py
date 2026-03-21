@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from kcastle.config import load_config
 
 
@@ -200,3 +202,45 @@ default:
     active = cfg.active_provider()
 
     assert active.provider == "deepseek-openai"
+
+
+def test_load_config_otel_disabled_by_default(tmp_path: Path) -> None:
+    _write_config(
+        tmp_path,
+        """
+providers:
+  deepseek-openai:
+    api_key: sk-test
+
+default:
+  provider: deepseek-openai
+  model: deepseek-chat
+""",
+    )
+
+    cfg = load_config(home=tmp_path)
+
+    assert cfg.otel_endpoint == ""
+
+
+def test_load_config_reads_otel_endpoint_from_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_config(
+        tmp_path,
+        """
+providers:
+  deepseek-openai:
+    api_key: sk-test
+
+default:
+  provider: deepseek-openai
+  model: deepseek-chat
+""",
+    )
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel.example:4317")
+
+    cfg = load_config(home=tmp_path)
+
+    assert cfg.otel_endpoint == "http://otel.example:4317"

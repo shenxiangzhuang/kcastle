@@ -4,6 +4,10 @@ version = "0.0.1a0"
 description = "The k agent framework"
 readme = "README.md"
 requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "requests>=2.32.5",
+]
 
 [dependency-groups]
 dev = [

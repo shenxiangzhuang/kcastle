@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from kai import Message, ToolResult
+from kai import Context, Message, Tool, ToolResult
 from kai.types.usage import TokenUsage
 
 logger = logging.getLogger("kagent.hooks")
@@ -58,7 +58,19 @@ class Hooks:
         └── on_agent_end
     """
 
-    def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
+    def on_agent_start(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        provider: str,
+        agent_name: str | None = None,
+        agent_id: str | None = None,
+        agent_description: str | None = None,
+        conversation_id: str | None = None,
+        system: str | None = None,
+        tools: list[Tool] | None = None,
+    ) -> None:
         """Called when the agent loop starts."""
 
     def on_agent_end(
@@ -68,8 +80,10 @@ class Hooks:
         turn_count: int,
         duration_ms: float,
         usage: TokenUsage | None,
+        is_error: bool = False,
+        error_type: str | None = None,
     ) -> None:
-        """Called when the agent loop ends normally."""
+        """Called when the agent loop ends (normally or with error)."""
 
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
         """Called at the start of each turn."""
@@ -86,7 +100,7 @@ class Hooks:
     ) -> None:
         """Called at the end of each turn."""
 
-    def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
+    def on_llm_start(self, *, run_id: str, turn_index: int, context: Context) -> None:
         """Called when the LLM streaming call starts (within a turn)."""
 
     def on_llm_end(
@@ -107,6 +121,7 @@ class Hooks:
         call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
+        tool_description: str | None = None,
     ) -> None:
         """Called when a tool execution starts."""
 
@@ -144,13 +159,27 @@ class LoggingHooks(Hooks):
     def __init__(self, *, level: int = logging.INFO) -> None:
         self._level = level
 
-    def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
+    def on_agent_start(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        provider: str,
+        agent_name: str | None = None,
+        agent_id: str | None = None,
+        agent_description: str | None = None,
+        conversation_id: str | None = None,
+        system: str | None = None,
+        tools: list[Tool] | None = None,
+    ) -> None:
+        name_info = f" name={agent_name}" if agent_name else ""
         logger.log(
             self._level,
-            "[%s] Agent start: provider=%s model=%s",
+            "[%s] Agent start: provider=%s model=%s%s",
             run_id,
             provider,
             model,
+            name_info,
         )
 
     def on_agent_end(
@@ -160,17 +189,21 @@ class LoggingHooks(Hooks):
         turn_count: int,
         duration_ms: float,
         usage: TokenUsage | None,
+        is_error: bool = False,
+        error_type: str | None = None,
     ) -> None:
         tokens = ""
         if usage:
             tokens = f" tokens={usage.input_tokens}/{usage.output_tokens}"
+        error_info = f" ERROR={error_type}" if is_error else ""
         logger.log(
             self._level,
-            "[%s] Agent end: turns=%d duration=%.0fms%s",
+            "[%s] Agent end: turns=%d duration=%.0fms%s%s",
             run_id,
             turn_count,
             duration_ms,
             tokens,
+            error_info,
         )
 
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
@@ -202,7 +235,7 @@ class LoggingHooks(Hooks):
             tools_info,
         )
 
-    def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
+    def on_llm_start(self, *, run_id: str, turn_index: int, context: Context) -> None:
         logger.debug("[%s] Turn %d LLM start", run_id, turn_index)
 
     def on_llm_end(
@@ -230,6 +263,7 @@ class LoggingHooks(Hooks):
         call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
+        tool_description: str | None = None,
     ) -> None:
         logger.debug(
             "[%s] Turn %d tool %s start (call_id=%s)",
@@ -274,9 +308,31 @@ class MultiHooks(Hooks):
     def __init__(self, *hooks: Hooks) -> None:
         self._hooks = list(hooks)
 
-    def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
+    def on_agent_start(
+        self,
+        *,
+        run_id: str,
+        model: str,
+        provider: str,
+        agent_name: str | None = None,
+        agent_id: str | None = None,
+        agent_description: str | None = None,
+        conversation_id: str | None = None,
+        system: str | None = None,
+        tools: list[Tool] | None = None,
+    ) -> None:
         for h in self._hooks:
-            h.on_agent_start(run_id=run_id, model=model, provider=provider)
+            h.on_agent_start(
+                run_id=run_id,
+                model=model,
+                provider=provider,
+                agent_name=agent_name,
+                agent_id=agent_id,
+                agent_description=agent_description,
+                conversation_id=conversation_id,
+                system=system,
+                tools=tools,
+            )
 
     def on_agent_end(
         self,
@@ -285,10 +341,17 @@ class MultiHooks(Hooks):
         turn_count: int,
         duration_ms: float,
         usage: TokenUsage | None,
+        is_error: bool = False,
+        error_type: str | None = None,
     ) -> None:
         for h in self._hooks:
             h.on_agent_end(
-                run_id=run_id, turn_count=turn_count, duration_ms=duration_ms, usage=usage
+                run_id=run_id,
+                turn_count=turn_count,
+                duration_ms=duration_ms,
+                usage=usage,
+                is_error=is_error,
+                error_type=error_type,
             )
 
     def on_turn_start(self, *, run_id: str, turn_index: int) -> None:
@@ -315,9 +378,9 @@ class MultiHooks(Hooks):
                 duration_ms=duration_ms,
             )
 
-    def on_llm_start(self, *, run_id: str, turn_index: int) -> None:
+    def on_llm_start(self, *, run_id: str, turn_index: int, context: Context) -> None:
         for h in self._hooks:
-            h.on_llm_start(run_id=run_id, turn_index=turn_index)
+            h.on_llm_start(run_id=run_id, turn_index=turn_index, context=context)
 
     def on_llm_end(
         self,
@@ -340,6 +403,7 @@ class MultiHooks(Hooks):
         call_id: str,
         tool_name: str,
         arguments: dict[str, Any],
+        tool_description: str | None = None,
     ) -> None:
         for h in self._hooks:
             h.on_tool_start(
@@ -348,6 +412,7 @@ class MultiHooks(Hooks):
                 call_id=call_id,
                 tool_name=tool_name,
                 arguments=arguments,
+                tool_description=tool_description,
             )
 
     def on_tool_end(

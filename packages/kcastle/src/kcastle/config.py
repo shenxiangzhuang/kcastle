@@ -80,6 +80,9 @@ class CastleConfig:
     max_turns: int = 100
     """Maximum turns per agent run."""
 
+    otel_endpoint: str = ""
+    """OTLP gRPC endpoint.  When non-empty, OpenTelemetry export is enabled."""
+
     cli: ChannelConfig = field(default_factory=ChannelConfig)
     telegram: ChannelConfig = field(
         default_factory=lambda: ChannelConfig(enabled=False),
@@ -234,6 +237,7 @@ def load_config(home: Path | None = None) -> CastleConfig:
     agent = _to_str_dict(data.get("agent"))
     system_prompt = str(agent.get("system_prompt", _DEFAULT_SYSTEM_PROMPT))
     max_turns = int(agent.get("max_turns", 100))
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 
     cli_cfg = _parse_channel(data, "cli", default_enabled=True)
     tg_cfg = _parse_channel(data, "telegram", default_enabled=False)
@@ -252,6 +256,7 @@ def load_config(home: Path | None = None) -> CastleConfig:
         default_model=default_model,
         system_prompt=system_prompt,
         max_turns=max_turns,
+        otel_endpoint=otel_endpoint,
         cli=cli_cfg,
         telegram=tg_cfg,
         telegram_token=tg_token,

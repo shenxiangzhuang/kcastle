@@ -122,7 +122,13 @@ async def agent_loop(
     agent_t0 = time.perf_counter()
     total_usage: TokenUsage | None = None
 
-    _hooks.on_agent_start(run_id=run_id, model=llm.model, provider=llm.provider)
+    _hooks.on_agent_start(
+        run_id=run_id,
+        model=llm.model,
+        provider=llm.provider,
+        system=state.system,
+        tools=state.tools or None,
+    )
 
     turn_count = 0
     while max_turns == 0 or turn_count < max_turns:
@@ -131,7 +137,7 @@ async def agent_loop(
 
         turn_t0 = time.perf_counter()
         _hooks.on_turn_start(run_id=run_id, turn_index=turn_count)
-        _hooks.on_llm_start(run_id=run_id, turn_index=turn_count)
+        _hooks.on_llm_start(run_id=run_id, turn_index=turn_count, context=context)
 
         # Delegate to agent_step — all LLM streaming + tool execution happens there
         assistant_msg: Message | None = None
@@ -149,12 +155,19 @@ async def agent_loop(
                     pass
 
                 case ToolExecStart():
+                    # Look up tool description from state
+                    _tool_desc = None
+                    for _t in state.tools:
+                        if _t.name == event.tool_name:
+                            _tool_desc = _t.description
+                            break
                     _hooks.on_tool_start(
                         run_id=run_id,
                         turn_index=turn_count,
                         call_id=event.call_id,
                         tool_name=event.tool_name,
                         arguments=event.arguments,
+                        tool_description=_tool_desc,
                     )
 
                 case ToolExecEnd():
@@ -207,6 +220,8 @@ async def agent_loop(
                         turn_count=turn_count,
                         duration_ms=agent_duration_ms,
                         usage=total_usage,
+                        is_error=True,
+                        error_type=type(event.error).__name__,
                     )
                     yield event
                     yield AgentEnd(messages=state.messages)

@@ -59,7 +59,7 @@ def _make_factory(cls: type[ProviderBase], *, include_extra_body: bool = False) 
             kwargs["extra_body"] = config.extra_body
         if config.options:
             kwargs.update(config.options)
-        return cls(**kwargs)  # type: ignore[arg-type]
+        return cls(**kwargs)
 
     return factory
 

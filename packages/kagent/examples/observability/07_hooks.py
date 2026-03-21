@@ -134,7 +134,7 @@ class MetricsHooks(Hooks):
         self.tool_calls: list[dict[str, Any]] = []
         self._current_run: dict[str, Any] = {}
 
-    def on_agent_start(self, *, run_id: str, model: str, provider: str) -> None:
+    def on_agent_start(self, *, run_id: str, model: str, provider: str, **kwargs: Any) -> None:
         self._current_run = {"run_id": run_id, "model": model, "provider": provider}
 
     def on_agent_end(
@@ -144,6 +144,7 @@ class MetricsHooks(Hooks):
         turn_count: int,
         duration_ms: float,
         usage: TokenUsage | None,
+        **kwargs: Any,
     ) -> None:
         self._current_run["turn_count"] = turn_count
         self._current_run["duration_ms"] = round(duration_ms, 1)
