@@ -18,7 +18,7 @@ from kagent import (
 )
 from kai import StreamEvent, TextDelta, ThinkDelta, ToolCallBegin
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
@@ -110,6 +110,18 @@ _COMMANDS = {
     "/help": "Show available commands",
     "/quit": "Exit the CLI",
 }
+
+
+class _SlashCompleter(Completer):
+    """Auto-complete slash commands when the input starts with ``/``."""
+
+    def get_completions(self, document, complete_event):  # type: ignore[override]
+        text = document.text_before_cursor
+        if not text.startswith("/"):
+            return
+        for cmd, desc in _COMMANDS.items():
+            if cmd.startswith(text):
+                yield Completion(cmd, start_position=-len(text), display_meta=desc)
 
 
 def parse_session_new_args(args: list[str]) -> tuple[str | None, str]:
@@ -223,13 +235,10 @@ class CLIChannel:
         history_dir.mkdir(parents=True, exist_ok=True)
         history = FileHistory(str(history_dir / "cli.history"))
 
-        commands = list(_COMMANDS.keys())
-        completer = WordCompleter(commands, ignore_case=True)
-
         return PromptSession(
             history=history,
-            completer=completer,
-            complete_while_typing=False,
+            completer=_SlashCompleter(),
+            complete_while_typing=True,
         )
 
     async def start(self, castle: Castle) -> None:
