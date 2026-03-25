@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kagent import (
-    AgentEnd,
     AgentError,
     AgentEvent,
     AgentStart,
@@ -17,7 +16,7 @@ from kagent import (
     TurnEnd,
     TurnStart,
 )
-from kai import TextDelta
+from kai import StreamEvent, TextDelta, ThinkDelta, ToolCallBegin
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
@@ -29,31 +28,79 @@ if TYPE_CHECKING:
     from kcastle.castle import Castle
 
 
-def _render_event(event: AgentEvent) -> None:
-    """Render a single AgentEvent to the terminal."""
-    match event:
-        case AgentStart():
-            pass  # silent
-        case TurnStart():
-            pass  # silent
-        case StreamChunk(event=stream_event):
-            if isinstance(stream_event, TextDelta):
-                sys.stdout.write(stream_event.delta)
+class _StatusLine:
+    """An ephemeral status line that overwrites itself in-place."""
+
+    def __init__(self) -> None:
+        self._visible = False
+
+    def show(self, text: str) -> None:
+        """Display a dim status message on the current line."""
+        sys.stdout.write(f"\r\033[2K\033[2m{text}\033[0m")
+        sys.stdout.flush()
+        self._visible = True
+
+    def clear(self) -> None:
+        """Erase the status line (no-op if already clear)."""
+        if not self._visible:
+            return
+        sys.stdout.write("\r\033[2K")
+        sys.stdout.flush()
+        self._visible = False
+
+
+class _EventRenderer:
+    """Renders agent events with ephemeral status indicators."""
+
+    def __init__(self) -> None:
+        self._status = _StatusLine()
+        self._phase = "idle"
+
+    def render(self, event: AgentEvent) -> None:
+        match event:
+            case AgentStart():
+                pass
+            case TurnStart():
+                self._status.show("› thinking...")
+                self._phase = "thinking"
+            case StreamChunk(event=stream_event):
+                self._render_stream(stream_event)
+            case ToolExecStart(tool_name=name, arguments=args):
+                _args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                self._status.show(f"› {name}({_args_str})")
+            case ToolExecEnd(tool_name=name, is_error=is_err, duration_ms=dur):
+                marker = "✗" if is_err else "›"
+                self._status.show(f"{marker} {name} done ({dur:.0f}ms)")
+            case TurnEnd():
+                self._status.clear()
+                if self._phase == "streaming":
+                    print(flush=True)  # newline after streamed text
+                self._phase = "idle"
+            case AgentError(error=err):
+                self._status.clear()
+                print(f"\n✗ Error: {err}", file=sys.stderr, flush=True)
+                self._phase = "idle"
+            case _:
+                self._status.clear()
+                self._phase = "idle"
+
+    def _render_stream(self, event: StreamEvent) -> None:
+        match event:
+            case ThinkDelta():
+                if self._phase != "reasoning":
+                    self._status.show("› reasoning...")
+                    self._phase = "reasoning"
+            case TextDelta(delta=delta):
+                if self._phase != "streaming":
+                    self._status.clear()
+                    self._phase = "streaming"
+                sys.stdout.write(delta)
                 sys.stdout.flush()
-        case ToolExecStart(tool_name=name, arguments=args):
-            _args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-            print(f"\n⚙ {name}({_args_str})", flush=True)
-        case ToolExecEnd(tool_name=name, is_error=is_err, duration_ms=dur):
-            status = "✗" if is_err else "✓"
-            print(f"  {status} {name} ({dur:.0f}ms)", flush=True)
-        case TurnEnd():
-            print(flush=True)  # newline after streamed text
-        case AgentError(error=err):
-            print(f"\n✗ Error: {err}", file=sys.stderr, flush=True)
-        case AgentEnd():
-            pass  # silent
-        case _:
-            pass
+            case ToolCallBegin(name=name):
+                self._status.show(f"› calling {name}...")
+                self._phase = "tool_call"
+            case _:
+                pass
 
 
 _COMMANDS = {
@@ -207,6 +254,7 @@ class CLIChannel:
         print("Type /help for commands, /quit to exit.\n")
 
         prompt_session = self._build_prompt(castle.config.home)
+        renderer = _EventRenderer()
 
         while self._running:
             try:
@@ -232,7 +280,7 @@ class CLIChannel:
             try:
                 user_input = castle.prepare_user_input(line)
                 async for event in session.run(user_input):
-                    _render_event(event)
+                    renderer.render(event)
             except (RuntimeError, ValueError, KeyError) as e:
                 print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
 
