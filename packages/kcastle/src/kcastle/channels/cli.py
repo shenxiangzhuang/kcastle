@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -40,6 +41,18 @@ class _StatusLine:
         self._text = ""
         self._frame = 0
         self._task: asyncio.Task[None] | None = None
+        self._log_filter: _SpinnerClearFilter | None = None
+
+    def install(self) -> None:
+        """Install a root-logger filter that clears the spinner before log output."""
+        self._log_filter = _SpinnerClearFilter(self)
+        logging.getLogger().addFilter(self._log_filter)
+
+    def uninstall(self) -> None:
+        """Remove the log filter."""
+        if self._log_filter is not None:
+            logging.getLogger().removeFilter(self._log_filter)
+            self._log_filter = None
 
     def show(self, text: str) -> None:
         """Display a dim, animated status message on the current line."""
@@ -74,6 +87,18 @@ class _StatusLine:
                 self._draw()
         except asyncio.CancelledError:
             pass
+
+
+class _SpinnerClearFilter(logging.Filter):
+    """Clears the spinner before any log record reaches a handler."""
+
+    def __init__(self, status: _StatusLine) -> None:
+        super().__init__()
+        self._status = status
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        self._status.clear()
+        return True
 
 
 class _EventRenderer:
@@ -291,34 +316,38 @@ class CLIChannel:
 
         prompt_session = self._build_prompt(castle.config.home)
         renderer = _EventRenderer()
+        renderer._status.install()
 
-        while self._running:
-            try:
-                with patch_stdout():
-                    line = await prompt_session.prompt_async("k> ")
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
+        try:
+            while self._running:
+                try:
+                    with patch_stdout():
+                        line = await prompt_session.prompt_async("k> ")
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
 
-            line = line.strip()
-            if not line:
-                continue
+                line = line.strip()
+                if not line:
+                    continue
 
-            if line == "/quit":
-                break
+                if line == "/quit":
+                    break
 
-            if line.startswith("/"):
-                new_session = await _handle_command(line, castle, session)
-                if new_session is not None:
-                    session = new_session
-                continue
+                if line.startswith("/"):
+                    new_session = await _handle_command(line, castle, session)
+                    if new_session is not None:
+                        session = new_session
+                    continue
 
-            try:
-                user_input = castle.prepare_user_input(line)
-                async for event in session.run(user_input):
-                    renderer.render(event)
-            except (RuntimeError, ValueError, KeyError) as e:
-                print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
+                try:
+                    user_input = castle.prepare_user_input(line)
+                    async for event in session.run(user_input):
+                        renderer.render(event)
+                except (RuntimeError, ValueError, KeyError) as e:
+                    print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
+        finally:
+            renderer._status.uninstall()
 
         manager.suspend(session.id)
 
