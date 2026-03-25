@@ -19,10 +19,6 @@ import platform
 import sys
 
 from pydantic import BaseModel, Field
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.text import Text
 
 from kai import (
     Context,
@@ -38,8 +34,6 @@ from kai import (
     ToolResult,
     stream,
 )
-
-console = Console()
 
 # ---------------------------------------------------------------------------
 # Tool definitions — locally executable, no network required
@@ -92,7 +86,10 @@ class GetEnvVariable(Tool):
     class Params(BaseModel):
         name: str = Field(description="Environment variable name")
 
-    async def execute(self, params: GetEnvVariable.Params) -> ToolResult:
+    async def execute(self, params: object) -> ToolResult:
+        if not isinstance(params, GetEnvVariable.Params):
+            return ToolResult.error("Invalid parameters for get_env_variable")
+
         value = os.environ.get(params.name)
         if value is None:
             return ToolResult.error(f"Variable '{params.name}' is not set")
@@ -110,8 +107,17 @@ async def execute_tool_call(name: str, arguments: str) -> str:
     tool = TOOL_MAP.get(name)
     if tool is None:
         return json.dumps({"error": f"Unknown tool: {name}"})
-    args: dict[str, object] = json.loads(arguments) if arguments.strip() else {}
-    result = await tool.execute(args)
+
+    raw_args: object = json.loads(arguments) if arguments.strip() else {}
+    if not isinstance(raw_args, dict):
+        return json.dumps({"error": f"Tool arguments for {name} must decode to an object"})
+
+    params_cls = getattr(type(tool), "Params", None)
+    if isinstance(params_cls, type) and issubclass(params_cls, BaseModel):
+        result = await tool.execute(params_cls.model_validate(raw_args))
+    else:
+        result = await tool.execute(raw_args)
+
     return result.output
 
 
@@ -126,7 +132,7 @@ async def stream_round(
     round_num: int,
 ) -> Message | None:
     """Stream one LLM round, render output with rich, return the done message."""
-    console.rule(f"[bold blue]Round {round_num}[/bold blue]")
+    print(f"=== Round {round_num} ===")
 
     done_msg: Message | None = None
     tool_results: list[Message] = []
@@ -144,23 +150,13 @@ async def stream_round(
                 # Flush think buffer when text starts
                 if think_buffer and not text_buffer:
                     think_preview = think_buffer[:200] + ("..." if len(think_buffer) > 200 else "")
-                    console.print(
-                        Panel(
-                            Text(think_preview, style="dim italic"),
-                            title="Thinking",
-                            subtitle=f"{len(think_buffer)} chars",
-                            border_style="bright_black",
-                        )
-                    )
+                    print(f"[Thinking] {think_preview}")
                     think_buffer = ""
                 text_buffer += text
 
             # --- Tool calls ---
-            case ToolCallBegin(name=name):
-                console.print(
-                    f"  [bold yellow]> calling[/bold yellow] [cyan]{name}[/cyan]",
-                    end="",
-                )
+            case ToolCallBegin(id=_, name=name):
+                print(f"  > calling {name}", end="")
             case ToolCallEnd():
                 pass
 
@@ -172,25 +168,26 @@ async def stream_round(
                     for tc in msg.tool_calls:
                         result = await execute_tool_call(tc.name, tc.arguments)
                         args_short = tc.arguments[:80] + ("..." if len(tc.arguments) > 80 else "")
-                        console.print(f"({args_short})")
+                        print(f" ({args_short})")
                         result_short = result[:120] + ("..." if len(result) > 120 else "")
-                        console.print(f"    [dim]→ {result_short}[/dim]")
+                        print(f"    -> {result_short}")
                         tool_results.append(Message.tool_result(tc.id, result))
             case Error(error=err):
-                console.print(f"[bold red]Error:[/bold red] {err}")
+                print(f"Error: {err}")
+            case _:
+                pass
 
     # Render assistant text
     if text_buffer:
-        console.print(Panel(Markdown(text_buffer), title="Assistant", border_style="green"))
+        print(text_buffer)
 
     # Show usage
-    if done_msg and done_msg.usage:
+    if done_msg is not None and done_msg.usage is not None:
         u = done_msg.usage
-        usage_text = Text(
-            f"tokens: {u.input_tokens} in + {u.output_tokens} out = {u.total_tokens} total",
-            style="dim",
+        usage_summary = (
+            f"tokens: {u.input_tokens} in + {u.output_tokens} out = {u.total_tokens} total"
         )
-        console.print(usage_text)
+        print(usage_summary)
 
     # Append assistant message + tool results for next round
     if done_msg is not None and tool_results:
@@ -214,7 +211,7 @@ async def agent_loop(question: str) -> None:
         base_url="https://api.deepseek.com",
     )
 
-    console.print(Panel(question, title="User", border_style="bright_blue"))
+    print(f"User: {question}")
 
     messages: list[Message] = [Message(role="user", content=question)]
 
@@ -224,7 +221,7 @@ async def agent_loop(question: str) -> None:
         done_msg = await stream_round(provider, messages, round_num)
 
         if done_msg is None:
-            console.print("[bold red]Stream ended without a done message.[/bold red]")
+            print("Stream ended without a done message.")
             break
 
         # If model made tool calls, results are already appended — loop again
@@ -234,7 +231,7 @@ async def agent_loop(question: str) -> None:
         # No more tool calls — we're done
         break
 
-    console.rule("[bold green]Done[/bold green]")
+    print("=== Done ===")
 
 
 # ---------------------------------------------------------------------------

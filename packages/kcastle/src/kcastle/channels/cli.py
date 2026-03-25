@@ -108,6 +108,12 @@ class _EventRenderer:
         self._status = _StatusLine()
         self._phase = "idle"
 
+    def install(self) -> None:
+        self._status.install()
+
+    def uninstall(self) -> None:
+        self._status.uninstall()
+
     def render(self, event: AgentEvent) -> None:
         match event:
             case AgentStart():
@@ -316,7 +322,7 @@ class CLIChannel:
 
         prompt_session = self._build_prompt(castle.config.home)
         renderer = _EventRenderer()
-        renderer._status.install()
+        renderer.install()
 
         try:
             while self._running:
@@ -347,7 +353,7 @@ class CLIChannel:
                 except (RuntimeError, ValueError, KeyError) as e:
                     print(f"\n✗ Error: {e}", file=sys.stderr, flush=True)
         finally:
-            renderer._status.uninstall()
+            renderer.uninstall()
 
         manager.suspend(session.id)
 
