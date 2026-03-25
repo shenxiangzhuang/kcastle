@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from kagent import (
@@ -18,6 +18,10 @@ from kagent import (
     TurnStart,
 )
 from kai import TextDelta
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from kcastle.session.session import Session
 
@@ -144,10 +148,11 @@ async def _handle_command(line: str, castle: Castle, session: Session) -> Sessio
 
 
 class CLIChannel:
-    """Interactive CLI channel using stdin/stdout.
+    """Interactive CLI channel using stdin/stdout with prompt_toolkit.
 
-    For PoC we use plain ``input()`` in an executor.
-    ``prompt_toolkit`` can be added later for richer features.
+    Uses ``prompt_toolkit.PromptSession`` for proper line editing, arrow-key
+    navigation, CJK character support, persistent history, and slash-command
+    completion.
     """
 
     def __init__(
@@ -163,6 +168,22 @@ class CLIChannel:
     @property
     def name(self) -> str:
         return "cli"
+
+    @staticmethod
+    def _build_prompt(home: Path) -> PromptSession[str]:
+        """Build a ``PromptSession`` with history and slash-command completion."""
+        history_dir = home / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        history = FileHistory(str(history_dir / "cli.history"))
+
+        commands = list(_COMMANDS.keys())
+        completer = WordCompleter(commands, ignore_case=True)
+
+        return PromptSession(
+            history=history,
+            completer=completer,
+            complete_while_typing=False,
+        )
 
     async def start(self, castle: Castle) -> None:
         """Start the interactive CLI loop."""
@@ -185,11 +206,12 @@ class CLIChannel:
 
         print("Type /help for commands, /quit to exit.\n")
 
-        loop = asyncio.get_event_loop()
+        prompt_session = self._build_prompt(castle.config.home)
 
         while self._running:
             try:
-                line = await loop.run_in_executor(None, lambda: input("k> "))
+                with patch_stdout():
+                    line = await prompt_session.prompt_async("k> ")
             except (EOFError, KeyboardInterrupt):
                 print()
                 break

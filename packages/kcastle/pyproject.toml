@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "kcastle-agent[otel]",
+    "prompt-toolkit>=3.0.0",
     "pyyaml>=6.0",
     "python-telegram-bot>=21.0",
     "telegramify-markdown>=0.5.4",
