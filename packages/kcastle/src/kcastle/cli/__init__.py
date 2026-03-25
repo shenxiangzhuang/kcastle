@@ -1,27 +1,14 @@
-"""CLI entry point for kcastle.
+"""CLI entry point for the ``kcastle`` command (``k`` is a shortcut alias).
 
 Usage::
 
-    $ kcastle                    # New session (auto-generated ID)
-    $ k                         # Alias for kcastle
-    $ kcastle -C                 # Continue most recently active session
+    $ k                          # New session (auto-generated ID)
     $ k -C                       # Continue most recently active session
-    $ kcastle -S <id>            # Resume specific session by ID
     $ k -S <id>                  # Resume specific session by ID
-    $ kcastle -d                 # Daemon mode (no interactive CLI, foreground)
-    $ k -d                       # Daemon mode (no interactive CLI, foreground)
-    $ kcastle --verbose          # Show app lifecycle logs
+    $ k -d                       # Daemon mode (foreground, no interactive CLI)
     $ k --verbose                # Show app lifecycle logs
-    $ kcastle --debug            # Show detailed debug logs
     $ k --debug                  # Show detailed debug logs
-    $ kcastle start              # Start daemon in background
-    $ k start                    # Start daemon in background
-    $ kcastle stop               # Stop the background daemon
-    $ k stop                     # Stop the background daemon
-    $ kcastle status             # Show daemon status
-    $ k status                   # Show daemon status
-    $ kcastle restart            # Restart the daemon
-    $ k restart                  # Restart the daemon
+    $ k start|stop|status|restart  # Manage background daemon
 """
 
 from __future__ import annotations
