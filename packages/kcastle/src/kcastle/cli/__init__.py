@@ -10,6 +10,10 @@ Usage::
     $ k -S <id>                  # Resume specific session by ID
     $ kcastle -d                 # Daemon mode (no interactive CLI, foreground)
     $ k -d                       # Daemon mode (no interactive CLI, foreground)
+    $ kcastle --verbose          # Show app lifecycle logs
+    $ k --verbose                # Show app lifecycle logs
+    $ kcastle --debug            # Show detailed debug logs
+    $ k --debug                  # Show detailed debug logs
     $ kcastle start              # Start daemon in background
     $ k start                    # Start daemon in background
     $ kcastle stop               # Stop the background daemon
@@ -26,6 +30,25 @@ import argparse
 import asyncio
 import logging
 import sys
+
+
+def _configure_logging(*, verbose: bool, debug: bool) -> None:
+    """Configure CLI logging for normal, verbose, and debug modes."""
+    level = logging.DEBUG if debug else logging.WARNING
+
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
+
+    if verbose:
+        for name in ("kcastle", "kagent", "kai"):
+            logging.getLogger(name).setLevel(logging.INFO)
+
+    if not debug:
+        for name in ("httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def main() -> None:
@@ -51,7 +74,12 @@ def main() -> None:
         "-v",
         "--verbose",
         action="store_true",
-        help="Enable verbose logging",
+        help="Show informative app logs",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show detailed debug logs, including transport internals",
     )
     parser.add_argument(
         "-d",
@@ -73,12 +101,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    _configure_logging(verbose=args.verbose, debug=args.debug)
 
     from pathlib import Path
 
@@ -96,13 +119,13 @@ def main() -> None:
 
         resolved_home = home or _DEFAULT_HOME
         if args.command == "start":
-            daemon_start(resolved_home, verbose=args.verbose)
+            daemon_start(resolved_home, verbose=args.verbose, debug=args.debug)
         elif args.command == "stop":
             daemon_stop(resolved_home)
         elif args.command == "status":
             daemon_status(resolved_home)
         elif args.command == "restart":
-            daemon_restart(resolved_home, verbose=args.verbose)
+            daemon_restart(resolved_home, verbose=args.verbose, debug=args.debug)
         return
 
     from kcastle.config import load_config
