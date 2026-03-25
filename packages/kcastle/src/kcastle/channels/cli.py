@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,25 +29,51 @@ if TYPE_CHECKING:
     from kcastle.castle import Castle
 
 
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
 class _StatusLine:
-    """An ephemeral status line that overwrites itself in-place."""
+    """An ephemeral status line with a braille spinner animation."""
 
     def __init__(self) -> None:
         self._visible = False
+        self._text = ""
+        self._frame = 0
+        self._task: asyncio.Task[None] | None = None
 
     def show(self, text: str) -> None:
-        """Display a dim status message on the current line."""
-        sys.stdout.write(f"\r\033[2K\033[2m{text}\033[0m")
-        sys.stdout.flush()
-        self._visible = True
+        """Display a dim, animated status message on the current line."""
+        self._text = text
+        self._frame = 0
+        self._draw()
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._spin())
 
     def clear(self) -> None:
-        """Erase the status line (no-op if already clear)."""
+        """Stop the spinner and erase the status line."""
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        self._task = None
         if not self._visible:
             return
         sys.stdout.write("\r\033[2K")
         sys.stdout.flush()
         self._visible = False
+
+    def _draw(self) -> None:
+        char = _SPINNER[self._frame % len(_SPINNER)]
+        sys.stdout.write(f"\r\033[2K\033[2m{char} {self._text}\033[0m")
+        sys.stdout.flush()
+        self._visible = True
+
+    async def _spin(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.08)
+                self._frame = (self._frame + 1) % len(_SPINNER)
+                self._draw()
+        except asyncio.CancelledError:
+            pass
 
 
 class _EventRenderer:
@@ -61,16 +88,16 @@ class _EventRenderer:
             case AgentStart():
                 pass
             case TurnStart():
-                self._status.show("› thinking...")
+                self._status.show("thinking...")
                 self._phase = "thinking"
             case StreamChunk(event=stream_event):
                 self._render_stream(stream_event)
             case ToolExecStart(tool_name=name, arguments=args):
                 _args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())
-                self._status.show(f"› {name}({_args_str})")
+                self._status.show(f"{name}({_args_str})")
             case ToolExecEnd(tool_name=name, is_error=is_err, duration_ms=dur):
-                marker = "✗" if is_err else "›"
-                self._status.show(f"{marker} {name} done ({dur:.0f}ms)")
+                label = "error" if is_err else "done"
+                self._status.show(f"{name} {label} ({dur:.0f}ms)")
             case TurnEnd():
                 self._status.clear()
                 if self._phase == "streaming":
@@ -88,7 +115,7 @@ class _EventRenderer:
         match event:
             case ThinkDelta():
                 if self._phase != "reasoning":
-                    self._status.show("› reasoning...")
+                    self._status.show("reasoning...")
                     self._phase = "reasoning"
             case TextDelta(delta=delta):
                 if self._phase != "streaming":
@@ -97,7 +124,7 @@ class _EventRenderer:
                 sys.stdout.write(delta)
                 sys.stdout.flush()
             case ToolCallBegin(name=name):
-                self._status.show(f"› calling {name}...")
+                self._status.show(f"calling {name}...")
                 self._phase = "tool_call"
             case _:
                 pass
