@@ -101,7 +101,7 @@ def _check_daemon_config(home: Path) -> str | None:
     return None
 
 
-def daemon_start(home: Path, *, verbose: bool = False) -> None:
+def daemon_start(home: Path, *, verbose: bool = False, debug: bool = False) -> None:
     """Start the daemon as a detached background process."""
     pid = _read_pid(home)
     if pid is not None:
@@ -117,7 +117,9 @@ def daemon_start(home: Path, *, verbose: bool = False) -> None:
 
     log = _log_file(home)
     cmd = [sys.executable, "-m", "kcastle.cli", "-d"]
-    if verbose:
+    if debug:
+        cmd.append("--debug")
+    elif verbose:
         cmd.append("-v")
     cmd.extend(["--home", str(home)])
 
@@ -158,9 +160,9 @@ def daemon_stop(home: Path) -> None:
     print(f"  {_GREEN}✓{_RESET} Daemon stopped (PID {pid})")
 
 
-def daemon_restart(home: Path, *, verbose: bool = False) -> None:
+def daemon_restart(home: Path, *, verbose: bool = False, debug: bool = False) -> None:
     """Restart the daemon (stop + start)."""
     pid = _read_pid(home)
     if pid is not None:
         daemon_stop(home)
-    daemon_start(home, verbose=verbose)
+    daemon_start(home, verbose=verbose, debug=debug)

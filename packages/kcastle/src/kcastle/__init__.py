@@ -10,11 +10,11 @@ Quick start::
     castle = Castle.create()
     await castle.run()
 
-Or from the command line::
+Or from the command line (``k`` is a shortcut for ``kcastle``)::
 
-    $ kcastle                    # New session
-    $ kcastle -C                 # Continue latest session
-    $ kcastle -S <id>            # Resume specific session
+    $ k                          # New session
+    $ k -C                       # Continue latest session
+    $ k -S <id>                  # Resume specific session
 """
 
 from kcastle.castle import Castle

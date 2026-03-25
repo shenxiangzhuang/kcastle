@@ -497,16 +497,14 @@ Castle
 
 Interactive terminal using `prompt_toolkit`.
 
-```
-$ kcastle                    # New session (auto-generated ID)
-$ kcastle -C                 # Continue most recently active session
-$ kcastle -S <id>            # Resume specific session by ID
-$ kcastle -d                 # Daemon mode (foreground, no interactive CLI)
+`k` is a shortcut alias for `kcastle`.
 
-$ kcastle start              # Start daemon in background
-$ kcastle stop               # Stop the background daemon
-$ kcastle status             # Show daemon status
-$ kcastle restart            # Restart the daemon
+```
+$ k                          # New session (auto-generated ID)
+$ k -C                       # Continue most recently active session
+$ k -S <id>                  # Resume specific session by ID
+$ k -d                       # Daemon mode (foreground, no interactive CLI)
+$ k start|stop|status|restart  # Manage background daemon
 
 k> hello               # User input → session.run("hello")
                        # Stream AgentEvent → render to terminal

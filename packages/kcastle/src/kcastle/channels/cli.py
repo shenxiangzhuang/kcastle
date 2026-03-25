@@ -1,11 +1,4 @@
-"""CLI channel — interactive terminal using prompt_toolkit.
-
-Usage::
-
-    $ kcastle                    # New session (auto-generated ID)
-    $ kcastle -C                 # Continue most recently active session
-    $ kcastle -S <id>            # Resume specific session by ID
-"""
+"""CLI channel — interactive terminal using prompt_toolkit."""
 
 from __future__ import annotations
 
