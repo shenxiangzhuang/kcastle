@@ -13,6 +13,7 @@ Quick start::
 Or from the command line::
 
     $ kcastle                    # New session
+    $ k                         # Alias for kcastle
     $ kcastle -C                 # Continue latest session
     $ kcastle -S <id>            # Resume specific session
 """

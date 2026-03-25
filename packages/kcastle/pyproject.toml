@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 kcastle = "kcastle.cli:main"
+k = "kcastle.cli:main"
 
 [dependency-groups]
 dev = [

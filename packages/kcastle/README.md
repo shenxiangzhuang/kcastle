@@ -1,5 +1,7 @@
 # kcastle
 
+`kcastle` also provides a short `k` command alias, so you can start the agent with either `kcastle` or `k`.
+
 [![PyPI](https://img.shields.io/pypi/v/kcastle?color=%2334D058&label=pypi%20package)](https://pypi.org/project/kcastle/)
 
 Agent application with multi-endpoint support for the K agent framework.
