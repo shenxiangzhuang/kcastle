@@ -200,7 +200,6 @@ class Session:
         trace_manager = TraceManager(store=trace_store)
         trace = trace_manager.create(name=name)
 
-        logger.info("Created session %s", session_id)
         return cls._assemble(
             session_dir=session_dir,
             meta=meta,
