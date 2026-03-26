@@ -287,7 +287,17 @@ class TelegramChannel:
                 collected_events.append(event)
         except (KaiError, RuntimeError, ValueError, KeyError, OSError) as e:
             logger.exception("Error in session %s", sid)
-            await update.message.reply_text(f"\u274c Error: {e}")
+            error_msg = str(e)
+
+            # Check for content moderation errors
+            if "Content Exists Risk" in error_msg:
+                await update.message.reply_text(
+                    "\u26a0\ufe0f The AI provider blocked this request due to content moderation. "
+                    "This may happen with certain topics or conversation contexts. "
+                    "Try rephrasing your message or starting a new conversation with /new."
+                )
+            else:
+                await update.message.reply_text(f"\u274c Error: {e}")
             return
         finally:
             typing_task.cancel()
