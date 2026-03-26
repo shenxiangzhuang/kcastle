@@ -212,7 +212,7 @@ class Castle:
         project_root = find_project_root(Path.cwd())
         skill_manager = SkillManager(
             user_skills_dir=config.skills_dir,
-            project_skills_dir=project_root / ".agent" / "skills",
+            project_skills_dir=project_root / ".agents" / "skills",
             builtin_skills_dir=Path(__file__).resolve().parent / "skills",
         )
         skill_manager.discover()

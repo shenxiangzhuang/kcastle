@@ -78,7 +78,7 @@ discover all sessions.
     │   └── trace.jsonl
     └── ...
 
-~/.agent/
+~/.agents/
 └── skills/                          # User-level skills
     ├── <skill_id_1>/
     │   ├── SKILL.md
@@ -125,9 +125,9 @@ The ID format depends on who creates the session:
 | Telegram private | `tg-u{user_id}` | `tg-u123456` |
 | Telegram group | `tg-g{chat_id}` | `tg-g-987654` |
 
-This follows bub's approach: the channel context **determines** the session ID
-directly — no lookup table needed. Telegram private chats and groups each get
-their own session automatically.
+This design lets the channel context **determine** the session ID directly —
+no lookup table needed. Telegram private chats and groups each get their own
+session automatically.
 
 **Cross-channel resume**: any channel can resume any session by its ID.
 `kcastle -S tg-u123456` opens a Telegram user's session from the CLI. This works
@@ -261,7 +261,7 @@ have already exported the relevant env var.
 | Default selection | `default.provider` + `default.model` selects the active combination. Overridable via `KCASTLE_PROVIDER` / `KCASTLE_MODEL` env vars. |
 | Model-specific options | Extra keys in a model entry (e.g. `max_tokens`, `reasoning`) are forwarded to the kai constructor. |
 
-## Skills Architecture (bub-aligned)
+## Skills Architecture
 
 kcastle supports Claude-style skills as a first-class runtime capability:
 discover, search, use, create, and update. This is implemented at the kcastle
@@ -273,8 +273,8 @@ flattened `Tool` lists.
 Skills are discovered from three layers, with deterministic override priority:
 
 1. **Builtin** (read-only, shipped with kcastle)
-2. **User** (`~/.agent/skills`)
-3. **Project** (`<project_root>/.agent/skills`)
+2. **User** (`~/.agents/skills`)
+3. **Project** (`<project_root>/.agents/skills`)
 
 Conflict rule: `project > user > builtin` for the same `skill_id`.
 
@@ -286,7 +286,7 @@ Project root is resolved from the current workspace using nearest-parent rules:
 2. Else directory containing `pyproject.toml`
 3. Else current working directory
 
-If `<project_root>/.agent/skills` exists, it is included as the highest-priority
+If `<project_root>/.agents/skills` exists, it is included as the highest-priority
 skill layer.
 
 ### Skill Unit Format
@@ -531,7 +531,7 @@ Created session "my-project" (id: my-project)
 Bot that auto-creates a session per chat. Works in both private chats
 and group chats (responds when mentioned or replied to).
 
-**Session mapping** (bub-style, no lookup table):
+**Session mapping** (direct, no lookup table):
 - Private chat → `session_id = "tg-u{user_id}"`
 - Group chat → `session_id = "tg-g{chat_id}"`
 
@@ -611,8 +611,8 @@ These live in lower layers:
 ## System Prompt Design
 
 The system prompt is **assembled dynamically** at agent creation time (not stored
-per session). This follows the pattern used by bub and kimi-cli — both build the
-prompt from composable blocks rather than persisting a static string.
+per session). This follows a composable-block pattern rather than persisting a
+static string per session.
 
 ### Composition
 
@@ -645,6 +645,6 @@ This ensures the prompt always reflects the latest config, workspace rules, and
 tool set. The prompt is passed to `kagent.Agent(system=...)` and never persisted
 separately.
 
-For the PoC phase, a simple block-concatenation approach (like bub) is sufficient.
-Template rendering (like kimi-cli's Jinja2 agent specs) can be added later if
+For the PoC phase, a simple block-concatenation approach is sufficient.
+Template rendering (such as Jinja2-based agent specs) can be added later if
 customization needs grow.

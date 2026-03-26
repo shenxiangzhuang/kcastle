@@ -44,8 +44,8 @@ class SkillManager:
 
     Skills are discovered from three layers (lowest → highest priority):
     1. Builtin skills (shipped with kcastle)
-    2. User skills (``~/.agent/skills``)
-    3. Project skills (``<project_root>/.agent/skills``)
+    2. User skills (``~/.agents/skills``)
+    3. Project skills (``<project_root>/.agents/skills``)
 
     Same-name skills in higher-priority layers override lower ones.
     """
