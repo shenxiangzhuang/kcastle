@@ -101,6 +101,7 @@ class Session:
         self._trace = trace
         self._trace_manager = trace_manager
         self._running = False
+        self._runtime_started = False
 
     @property
     def id(self) -> str:
@@ -154,6 +155,11 @@ class Session:
         if self._running:
             raise RuntimeError(f"Session {self.id} is already running")
 
+        # Start runtime on first run
+        if not self._runtime_started:
+            await self._runtime.start()
+            self._runtime_started = True
+
         self._running = True
         try:
             async for event in self._runtime.send(UserInput(text=user_input)):
@@ -171,6 +177,13 @@ class Session:
 
         Trace is already persisted incrementally; just write final meta.
         """
+        # Stop runtime if started
+        if self._runtime_started:
+            # Cancel the runtime's loop task directly
+            if hasattr(self._runtime, '_loop_task') and self._runtime._loop_task:
+                self._runtime._loop_task.cancel()
+            self._runtime_started = False
+
         self._touch()
         logger.info("Session %s suspended", self.id)
 
