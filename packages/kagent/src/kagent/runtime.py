@@ -53,7 +53,7 @@ class _ChildHandle:
     id: str
     description: str
     status: Literal["running", "completed", "failed"] = "running"
-    asyncio_task: asyncio.Task | None = None
+    asyncio_task: asyncio.Task[None] | None = None
     state: AgentState | None = None
     result: str | None = None
     error: str | None = None
@@ -91,12 +91,14 @@ class AgentRuntime:
             system=agent.system,
             tools=list(agent.tools),
         )
-        self._mailbox: asyncio.Queue[tuple[Signal, asyncio.Queue]] = asyncio.Queue()
+        self._mailbox: asyncio.Queue[tuple[Signal, asyncio.Queue[AgentEvent | object]]] = (
+            asyncio.Queue()
+        )
         self._children: dict[str, _ChildHandle] = {}
         self._abort_event: asyncio.Event | None = None
         self._steer_queue: list[Message] = []
         self._running = False
-        self._loop_task: asyncio.Task | None = None
+        self._loop_task: asyncio.Task[None] | None = None
 
         # Inject runtime tools for sub-agent spawning
         if can_spawn:

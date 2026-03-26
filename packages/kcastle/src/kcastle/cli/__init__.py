@@ -95,7 +95,7 @@ def main() -> None:
     home = Path(args.home) if args.home else None
 
     if args.command in ("start", "stop", "status", "restart"):
-        from kcastle.config import _DEFAULT_HOME  # pyright: ignore[reportPrivateUsage]
+        from kcastle.config import _DEFAULT_HOME
 
         from .daemon import (
             daemon_restart,

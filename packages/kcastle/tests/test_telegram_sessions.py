@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,7 +42,6 @@ class TestTelegramSessions:
         channel = TelegramChannel(token="fake-token", bot_username="testbot")
         channel._castle = mock_castle
         channel._active_sessions = {}
-
         # Mock update and context
         update = MagicMock()
         update.effective_chat.type = "private"
@@ -54,7 +54,6 @@ class TestTelegramSessions:
 
         # Call _cmd_new
         await channel._cmd_new(update, context)
-
         # Check that create was called with a unique session ID
         mock_manager.create.assert_called_once()
         call_args = mock_manager.create.call_args
@@ -104,7 +103,6 @@ class TestTelegramSessions:
         channel = TelegramChannel(token="fake-token", bot_username="testbot")
         channel._castle = mock_castle
         channel._active_sessions = {"tg-u456": "tg-u456"}
-
         # Mock update and context
         update = MagicMock()
         update.effective_chat.type = "private"
@@ -117,10 +115,8 @@ class TestTelegramSessions:
 
         # Call _cmd_switch
         await channel._cmd_switch(update, context)
-
         # Check that active session was updated
         assert channel._active_sessions["tg-u456"] == "tg-u456-12345"
-
         # Check success message
         update.message.reply_text.assert_called_with(
             "✓ Switched to session: `tg-u456-12345`", parse_mode="Markdown"
@@ -159,10 +155,11 @@ class TestTelegramSessions:
         mock_manager.list.return_value = mock_sessions
 
         # Mock session with async iterator
-        async def mock_run(input_text):
+        async def mock_run(input_text: str) -> AsyncIterator[object]:
             """Mock run that returns an async iterator."""
-            for event in []:  # Empty events
-                yield event
+            # Return empty iterator - no events
+            return
+            yield  # Make it a generator
 
         mock_session = MagicMock()
         mock_session.run = mock_run
@@ -172,7 +169,6 @@ class TestTelegramSessions:
         channel = TelegramChannel(token="fake-token", bot_username="testbot")
         channel._castle = mock_castle
         channel._active_sessions = {}
-
         # Mock update
         update = MagicMock()
         update.effective_chat.type = "private"
@@ -191,7 +187,6 @@ class TestTelegramSessions:
 
             # Call _on_message
             await channel._on_message(update, context)
-
         # Should use the most recent session
         assert channel._active_sessions["tg-u456"] == "tg-u456-67890"
         mock_manager.get_or_create.assert_called_with("tg-u456-67890")

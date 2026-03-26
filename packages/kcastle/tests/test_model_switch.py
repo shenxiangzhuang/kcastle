@@ -166,7 +166,7 @@ def test_switch_model_persists_across_resume(
 def test_build_agent_hooks_returns_none_when_no_endpoint(tmp_path: Path) -> None:
     config = _build_config(tmp_path)
 
-    assert Castle._build_agent_hooks(config) is None  # pyright: ignore[reportPrivateUsage]
+    assert Castle._build_agent_hooks(config) is None
 
 
 def test_build_agent_hooks_creates_otel_hooks_when_endpoint_set(
@@ -174,7 +174,7 @@ def test_build_agent_hooks_creates_otel_hooks_when_endpoint_set(
 ) -> None:
     config = replace(_build_config(tmp_path), otel_endpoint="http://localhost:4317")
 
-    hooks = Castle._build_agent_hooks(config)  # pyright: ignore[reportPrivateUsage]
+    hooks = Castle._build_agent_hooks(config)
 
     assert isinstance(hooks, OTelHooks)
 
@@ -182,7 +182,7 @@ def test_build_agent_hooks_creates_otel_hooks_when_endpoint_set(
 def test_configure_otel_returns_none_when_no_endpoint(tmp_path: Path) -> None:
     config = _build_config(tmp_path)
 
-    assert Castle._configure_otel(config) == (None, None)  # pyright: ignore[reportPrivateUsage]
+    assert Castle._configure_otel(config) == (None, None)
 
 
 def test_configure_otel_sets_up_provider(
@@ -239,7 +239,7 @@ def test_configure_otel_sets_up_provider(
 
     monkeypatch.setitem(sys.modules, "opentelemetry._logs", None)
 
-    provider, log_provider = Castle._configure_otel(config)  # pyright: ignore[reportPrivateUsage]
+    provider, log_provider = Castle._configure_otel(config)
 
     assert provider is captured["provider"]
     assert log_provider is None
