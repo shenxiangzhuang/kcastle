@@ -26,7 +26,7 @@ from kai import AnthropicMessages, Tool, ToolResult
 from kai.types.usage import TokenUsage
 from pydantic import BaseModel, Field
 
-from kagent import Agent, Hooks, LoggingHooks, MultiHooks
+from kagent import Agent, Hooks, LoggingHooks, MultiHooks, complete
 
 # ---------------------------------------------------------------------------
 # Provider
@@ -110,7 +110,7 @@ async def demo_logging_hooks() -> None:
         hooks=LoggingHooks(level=logging.INFO),
     )
 
-    reply = await agent.complete(QUESTION)
+    reply = await complete(agent, QUESTION)
     print(f"\n>>> Answer: {reply.extract_text()}\n")
 
     logging.root.handlers.clear()
@@ -223,7 +223,7 @@ async def demo_custom_hooks() -> None:
         hooks=hooks,
     )
 
-    reply = await agent.complete(QUESTION)
+    reply = await complete(agent, QUESTION)
     print(f"\n>>> Answer: {reply.extract_text()}")
 
     metrics.print_report()

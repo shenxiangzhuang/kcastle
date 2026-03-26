@@ -1,11 +1,11 @@
-"""Example 02 — Multi-tool Agent (Level 2: Agent)
+"""Example 02 — Multi-tool Agent (Agent + AgentRuntime)
 
 A comprehensive example showing both non-streaming and streaming usage
 with multiple tools and multi-turn conversations to solve complex problems.
 
 Demonstrates:
   1. Non-streaming: complete() — ask, get answer, ask follow-up.
-  2. Streaming:     run()      — observe tool calls and text in real time.
+  2. Streaming:     AgentRuntime.send() — observe tool calls and text in real time.
   3. Interactive:   steer() / abort() — redirect or cancel a running agent.
 
 Run:
@@ -31,11 +31,15 @@ from kagent import (
     AgentEnd,
     AgentError,
     AgentEvent,
+    AgentRuntime,
     StreamChunk,
     ToolExecEnd,
     ToolExecStart,
     TurnEnd,
+    UserInput,
+    complete,
 )
+from kagent.state import AgentState
 
 
 def make_provider() -> AnthropicMessages:
@@ -117,11 +121,12 @@ async def demo_non_streaming() -> None:
         system="You are a helpful assistant. Use tools when needed. Be concise.",
         tools=TOOLS,
     )
+    state = AgentState(system=agent.system, tools=list(agent.tools))
 
     # Turn 1 — the agent will call get_weather + calculator tools internally.
     q1 = "What's the weather in Tokyo and Paris? Also compute (123 * 456) + (789 / 3)."
     print(f">>> {q1}\n")
-    reply = await agent.complete(q1)
+    reply = await complete(agent, q1, state=state)
     print(f"[turn 1] {reply.extract_text()}")
 
     # Turn 2 — follow-up uses the same conversation history.
@@ -130,21 +135,21 @@ async def demo_non_streaming() -> None:
         "result from turn 1 to hexadecimal."
     )
     print(f"\n>>> {q2}\n")
-    reply = await agent.complete(q2)
+    reply = await complete(agent, q2, state=state)
     print(f"[turn 2] {reply.extract_text()}")
 
-    print(f"\n  ({len(agent.state.messages)} messages in history)")
+    print(f"\n  ({len(state.messages)} messages in history)")
     print()
 
 
 # ---------------------------------------------------------------------------
-# Demo 2 — Streaming: run() with full event observation
+# Demo 2 — Streaming: AgentRuntime.send() with event observation
 # ---------------------------------------------------------------------------
 
 
 async def demo_streaming() -> None:
     print("=" * 60)
-    print("Demo 2: Streaming (run) with event observation")
+    print("Demo 2: Streaming (runtime.send) with event observation")
     print("=" * 60)
 
     agent = Agent(
@@ -152,28 +157,35 @@ async def demo_streaming() -> None:
         system="You are a helpful assistant. Use tools when needed. Be concise.",
         tools=TOOLS,
     )
+    runtime = AgentRuntime(agent, can_spawn=False)
+    await runtime.start()
 
     print(">>> What time is it? What's 2^10 + 3^7? What's the weather in NYC?\n")
 
-    async for event in agent.run("What time is it? What's 2^10 + 3^7? What's the weather in NYC?"):
-        match event:
-            case StreamChunk(event=e) if isinstance(e, TextDelta):
-                print(e.delta, end="", flush=True)
+    try:
+        async for event in runtime.send(
+            UserInput("What time is it? What's 2^10 + 3^7? What's the weather in NYC?")
+        ):
+            match event:
+                case StreamChunk(event=e) if isinstance(e, TextDelta):
+                    print(e.delta, end="", flush=True)
 
-            case ToolExecStart(tool_name=name, arguments=args):
-                print(f"\n  [tool] {name}({args})")
+                case ToolExecStart(tool_name=name, arguments=args):
+                    print(f"\n  [tool] {name}({args})")
 
-            case ToolExecEnd(tool_name=name, result=result, is_error=err):
-                status = "ERR" if err else "ok"
-                print(f"  [{status}]  {name} → {result.output}")
+                case ToolExecEnd(tool_name=name, result=result, is_error=err):
+                    status = "ERR" if err else "ok"
+                    print(f"  [{status}]  {name} → {result.output}")
 
-            case TurnEnd(message=msg) if not msg.tool_calls:
-                print(f"\n\n[final] {msg.extract_text()}")
+                case TurnEnd(message=msg) if not msg.tool_calls:
+                    print(f"\n\n[final] {msg.extract_text()}")
 
-            case AgentError(error=err):
-                print(f"\n[error] {err}")
-            case _:
-                pass
+                case AgentError(error=err):
+                    print(f"\n[error] {err}")
+                case _:
+                    pass
+    finally:
+        await runtime.stop()
 
     print()
 
@@ -195,10 +207,20 @@ async def demo_interactive() -> None:
         system="You are a helpful assistant. Use tools when needed.",
         tools=TOOLS,
     )
+    runtime = AgentRuntime(agent, can_spawn=False)
+    await runtime.start()
 
-    agent.steer(Message(role="user", content="Actually, answer in French."))
-    reply = await agent.complete("What's 2 + 2?")
-    print(f"[steered] {reply.extract_text()}")
+    try:
+        runtime.steer(Message(role="user", content="Actually, answer in French."))
+
+        events: list[AgentEvent] = []
+        async for event in runtime.send(UserInput("What's 2 + 2?")):
+            events.append(event)
+        turn_ends = [e for e in events if isinstance(e, TurnEnd)]
+        if turn_ends:
+            print(f"[steered] {turn_ends[-1].message.extract_text()}")
+    finally:
+        await runtime.stop()
 
     # --- abort ---
     print("\n-- abort() --")
@@ -206,20 +228,28 @@ async def demo_interactive() -> None:
         llm=make_provider(),
         system="You are a helpful assistant.",
     )
+    runtime = AgentRuntime(agent, can_spawn=False)
+    await runtime.start()
 
-    async def cancel_after(delay: float) -> None:
-        await asyncio.sleep(delay)
-        agent.abort()
+    try:
 
-    asyncio.create_task(cancel_after(3))
+        async def cancel_after(delay: float) -> None:
+            await asyncio.sleep(delay)
+            runtime.abort()
 
-    events: list[AgentEvent] = []
-    async for event in agent.run("Write a very long essay about the history of computing."):
-        events.append(event)
-        if isinstance(event, AgentAbort):
-            print(f"[aborted] {len(events)} events collected")
-        elif isinstance(event, AgentEnd):
-            print(f"[ended] {len(event.messages)} messages in history")
+        asyncio.create_task(cancel_after(3))
+
+        events = []
+        async for event in runtime.send(
+            UserInput("Write a very long essay about the history of computing.")
+        ):
+            events.append(event)
+            if isinstance(event, AgentAbort):
+                print(f"[aborted] {len(events)} events collected")
+            elif isinstance(event, AgentEnd):
+                print(f"[ended] {len(event.messages)} messages in history")
+    finally:
+        await runtime.stop()
 
     print()
 

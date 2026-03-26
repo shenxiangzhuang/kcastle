@@ -1,60 +1,52 @@
-"""Level 2: Stateful agent SDK.
+"""Agent — pure handler with a single interface.
 
-The ``Agent`` class wraps ``agent_loop()`` with persistent state, interactive
-control (steering, follow-up, abort), and dual consumption modes
-(``run()`` for streaming, ``complete()`` for one-shot).
+The ``Agent`` class is a configuration container with one method: ``handle()``.
+It holds no mutable state, no queues, no flags. Given the same state, it
+produces the same event stream.
+
+Runtime concerns (mailbox, lifecycle, sub-agents, abort, steering) live in
+``AgentRuntime``.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import AsyncIterator
 
 from kai import Message, ProviderBase, Tool
 
 from kagent.context import ContextBuilder
-from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, TurnEnd
-from kagent.hooks import Hooks
+from kagent.event import AgentEnd, AgentError, AgentEvent, TurnEnd
 from kagent.loop import (
     ShouldContinueFn,
     agent_loop,
 )
+from kagent.hooks import Hooks
 from kagent.state import AgentState
 from kagent.step import OnToolResultFn
 from kagent.trace.entry import TraceEntry
-from kagent.trace.trace import Trace
 
 logger = logging.getLogger("kagent.agent")
 
 
 class Agent:
-    """A stateful agent with conversation persistence and interactive control.
+    """A pure agent: configuration + handle.
 
-    Example — streaming::
+    Agent is a message handler. It processes the current state and yields
+    events. It does not own state, manage concurrency, or handle lifecycle.
 
-        agent = Agent(
-            llm=OpenAIChatCompletions(model="gpt-4o"),
-            system="You are helpful.",
-            tools=[my_tool],
-        )
-        async for event in agent.run("What's the weather?"):
-            match event:
-                case StreamChunk(event=e):
-                    print(e, end="", flush=True)
-                case TurnEnd(message=msg):
-                    print(msg.extract_text())
+    Example — with AgentRuntime::
 
-    Example — one-shot::
+        agent = Agent(llm=provider, system="You are helpful.", tools=[my_tool])
+        runtime = AgentRuntime(agent)
+        await runtime.start()
+        async for event in runtime.send(UserInput("Hello")):
+            print(event)
 
-        msg = await agent.complete("What's 2+2?")
+    Example — standalone one-shot::
+
+        msg = await complete(agent, "What's 2+2?")
         print(msg.extract_text())
-
-    Example — multi-turn::
-
-        await agent.complete("Remember: my name is Alice.")
-        msg = await agent.complete("What's my name?")
-        # "Alice" — conversation persists across calls.
     """
 
     def __init__(
@@ -63,200 +55,87 @@ class Agent:
         llm: ProviderBase,
         system: str | None = None,
         tools: list[Tool] | None = None,
-        trace: Trace | None = None,
         context_builder: ContextBuilder | None = None,
         on_tool_result: OnToolResultFn | None = None,
-        should_continue: ShouldContinueFn | None = None,
         hooks: Hooks | None = None,
         max_turns: int = 100,
     ) -> None:
-        """Create an Agent.
+        self.llm = llm
+        self.system = system
+        self.tools = list(tools) if tools else []
+        self.context_builder = context_builder
+        self.on_tool_result = on_tool_result
+        self.hooks = hooks
+        self.max_turns = max_turns
 
-        All callback parameters are optional. If not provided, sensible defaults
-        are used. These are the same callbacks as ``agent_loop()`` — no wrapper types.
+    async def handle(
+        self,
+        state: AgentState,
+        *,
+        should_continue: ShouldContinueFn | None = None,
+    ) -> AsyncIterator[AgentEvent]:
+        """Process the current state and yield events.
 
-        Pass an existing ``trace`` to resume a previous session.
-        Pass ``hooks`` for observability (logging, tracing, metrics).
+        This is the single interface. Agent is a message handler — like a human,
+        it receives context and responds.
+
+        The optional ``should_continue`` parameter allows the runtime to inject
+        abort/steering logic without the agent knowing about concurrency.
+
+        Args:
+            state: The mutable agent state (trace, tools, system).
+            should_continue: Optional callback for loop control.
+                If ``None``, continues while the assistant produces tool calls.
+
+        Yields:
+            ``AgentStart → (TurnStart → … → TurnEnd)* → AgentEnd``
         """
-        self._llm = llm
-        self._context_builder = context_builder
-        self._on_tool_result = on_tool_result
-        self._should_continue = should_continue
-        self._hooks = hooks
-        self._max_turns = max_turns
-        self._state = AgentState(
-            system=system,
-            trace=trace if trace is not None else Trace(),
-            tools=list(tools) if tools else [],
-        )
-        self._running = False
-        self._abort_event: asyncio.Event | None = None
-        self._steer_queue: list[Message] = []
-        self._follow_up_queue: list[Message] = []
-
-    @property
-    def state(self) -> AgentState:
-        """The mutable agent state. Read or modify directly."""
-        return self._state
-
-    @property
-    def llm(self) -> ProviderBase:
-        """Current LLM used by this agent."""
-        return self._llm
-
-    @llm.setter
-    def llm(self, llm: ProviderBase) -> None:
-        """Thin alias for ``replace_llm()``."""
-        self.replace_llm(llm)
-
-    @property
-    def is_running(self) -> bool:
-        """Whether the agent is currently executing."""
-        return self._running
-
-    async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
-        """Run the agent with streaming events (pull-based).
-
-        Records a user message in the trace, then runs the loop.
-        """
-        logger.info("Agent.run called with %d chars of input", len(user_input))
-        msg = Message(role="user", content=user_input)
-        self._state.trace.append(TraceEntry.user(msg))
-        async for event in self._run_loop():
+        async for event in agent_loop(
+            llm=self.llm,
+            state=state,
+            context_builder=self.context_builder,
+            on_tool_result=self.on_tool_result,
+            should_continue=should_continue,
+            hooks=self.hooks,
+            max_turns=self.max_turns,
+        ):
             yield event
 
-    async def complete(self, user_input: str) -> Message:
-        """Run the agent and return the final assistant message.
 
-        Convenience wrapper — consumes the event stream silently.
-        Mirrors kai's ``complete()`` pattern.
+async def complete(
+    agent: Agent,
+    user_input: str,
+    state: AgentState | None = None,
+) -> Message:
+    """One-shot convenience: run agent and return the final assistant message.
 
-        Raises:
-            RuntimeError: If the loop ends without producing an assistant message.
-        """
-        last_assistant: Message | None = None
-        last_error: BaseException | None = None
-        async for event in self.run(user_input):
-            if isinstance(event, TurnEnd):
-                last_assistant = event.message
-            elif isinstance(event, AgentError):
-                last_error = event.error
+    Creates a temporary state if none is provided.
 
-        if last_assistant is None:
-            if last_error is not None:
-                raise RuntimeError(f"Agent loop failed: {last_error}") from last_error
-            raise RuntimeError("Agent loop ended without producing an assistant message")
-        return last_assistant
+    Args:
+        agent: The agent to run.
+        user_input: The user message.
+        state: Optional existing state. If ``None``, a fresh one is created.
 
-    def steer(self, message: Message) -> None:
-        """Interrupt the current run with a message.
+    Returns:
+        The final assistant ``Message``.
 
-        Injected after current tool finishes. Remaining tools are skipped.
-        The loop continues with the steering message in context.
+    Raises:
+        RuntimeError: If the agent ends without producing an assistant message.
+    """
+    if state is None:
+        state = AgentState(system=agent.system, tools=list(agent.tools))
+    state.trace.append(TraceEntry.user(Message(role="user", content=user_input)))
 
-        Note: Steering takes effect on the next turn boundary.
-        """
-        self._steer_queue.append(message)
+    last_assistant: Message | None = None
+    last_error: BaseException | None = None
+    async for event in agent.handle(state):
+        if isinstance(event, TurnEnd):
+            last_assistant = event.message
+        elif isinstance(event, AgentError):
+            last_error = event.error
 
-    def follow_up(self, message: Message) -> None:
-        """Queue a message for after the current run.
-
-        When the loop would stop, it continues with queued follow-ups instead.
-        """
-        self._follow_up_queue.append(message)
-
-    def abort(self) -> None:
-        """Cancel the current run."""
-        if self._abort_event is not None:
-            self._abort_event.set()
-
-    def replace_llm(self, llm: ProviderBase) -> None:
-        """Replace the current LLM.
-
-        Raises:
-            RuntimeError: If called while the agent is running.
-        """
-        old_llm = self._llm
-        old_provider = old_llm.provider
-        old_model = old_llm.model
-        new_provider = llm.provider
-        new_model = llm.model
-
-        if self._running:
-            logger.warning(
-                "replace_llm rejected while running: %s/%s -> %s/%s",
-                old_provider,
-                old_model,
-                new_provider,
-                new_model,
-            )
-            raise RuntimeError("Cannot replace LLM while agent is running")
-
-        self._llm = llm
-        logger.info(
-            "LLM replaced: %s/%s -> %s/%s",
-            old_provider,
-            old_model,
-            new_provider,
-            new_model,
-        )
-
-    async def _run_loop(self) -> AsyncIterator[AgentEvent]:
-        """Run the agent loop with steering and follow-up support."""
-        if self._running:
-            raise RuntimeError("Agent is already running")
-
-        self._running = True
-        self._abort_event = asyncio.Event()
-
-        try:
-            while True:
-                # Run the main loop
-                async for event in agent_loop(
-                    llm=self._llm,
-                    state=self._state,
-                    context_builder=self._context_builder,
-                    on_tool_result=self._on_tool_result,
-                    should_continue=self._wrap_should_continue(),
-                    hooks=self._hooks,
-                    max_turns=self._max_turns,
-                ):
-                    if self._abort_event.is_set():
-                        yield AgentAbort(messages=list(self._state.messages))
-                        yield AgentEnd(messages=list(self._state.messages))
-                        return
-                    yield event
-
-                # After the loop ends, check for follow-ups
-                if self._follow_up_queue:
-                    follow_up = self._follow_up_queue.pop(0)
-                    self._state.trace.append(TraceEntry.user(follow_up))
-                else:
-                    break
-        finally:
-            self._running = False
-            self._abort_event = None
-
-    def _wrap_should_continue(self) -> ShouldContinueFn | None:
-        """Wrap the user's should_continue callback with steering logic."""
-        user_cb = self._should_continue
-
-        async def _combined(state: AgentState, assistant_msg: Message) -> bool:
-            # Check abort
-            if self._abort_event is not None and self._abort_event.is_set():
-                return False
-
-            # Check steering — inject queued steering messages
-            if self._steer_queue:
-                steer_msg = self._steer_queue.pop(0)
-                state.trace.append(TraceEntry.user(steer_msg))
-                return True  # Continue looping with the steering message
-
-            # Delegate to user callback if provided
-            if user_cb is not None:
-                return await user_cb(state, assistant_msg)
-
-            # Default: continue if there are tool calls
-            return bool(assistant_msg.tool_calls)
-
-        return _combined
+    if last_assistant is None:
+        if last_error is not None:
+            raise RuntimeError(f"Agent failed: {last_error}") from last_error
+        raise RuntimeError("Agent ended without producing an assistant message")
+    return last_assistant

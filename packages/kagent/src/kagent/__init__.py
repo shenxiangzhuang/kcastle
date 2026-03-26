@@ -1,24 +1,43 @@
-"""kagent — Core agent runtime for the K agent framework.
+"""kagent — Actor-based agent framework built on ``kai``.
 
-A context-first, three-level agent SDK built on ``kai``:
+Two core abstractions:
 
-- Level 0: ``agent_step()`` — single-turn primitive, full context control
-- Level 1: ``agent_loop()`` — multi-turn loop with callbacks
-- Level 2: ``Agent`` — stateful SDK with steering and follow-up
+- ``Agent`` — pure handler: configuration + ``handle(state)``
+- ``AgentRuntime`` — actor process: mailbox, state, lifecycle, sub-agents
+
+Lower-level primitives:
+
+- ``agent_step()`` — single-turn primitive, full context control
+- ``agent_loop()`` — multi-turn loop with callbacks
 
 Example::
 
-    from kagent import Agent
+    from kagent import Agent, AgentRuntime, UserInput, complete
 
-    agent = Agent(llm=my_llm, system=\"You are helpful.\", tools=[my_tool])
-    msg = await agent.complete("Hello!")
-    print(msg.extract_text())
+    agent = Agent(llm=my_llm, system="You are helpful.", tools=[my_tool])
+
+    # One-shot:
+    msg = await complete(agent, "Hello!")
+
+    # Actor runtime:
+    runtime = AgentRuntime(agent)
+    await runtime.start()
+    async for event in runtime.send(UserInput("Hello!")):
+        print(event)
 """
 
 import logging as _logging
 
-# Level 2: Stateful agent SDK
-from kagent.agent import Agent
+# Agent (pure handler)
+from kagent.agent import Agent, complete
+
+# Runtime (actor process)
+from kagent.runtime import AgentRuntime
+
+# Signals
+from kagent.signal import ChildCompleted as ChildCompletedSignal
+from kagent.signal import ChildError as ChildErrorSignal
+from kagent.signal import Signal, UserInput
 
 # Context builders
 from kagent.context import (
@@ -37,6 +56,8 @@ from kagent.event import (
     AgentError,
     AgentEvent,
     AgentStart,
+    ChildEvent,
+    ChildSpawned,
     StreamChunk,
     ToolExecEnd,
     ToolExecStart,
@@ -59,6 +80,9 @@ from kagent.state import AgentState
 # Level 0: Single-turn primitive
 from kagent.step import OnToolResultFn, agent_step
 
+# Tools
+from kagent.tools import CheckSubAgentTool, SpawnSubAgentTool
+
 # Trace
 from kagent.trace import (
     Trace,
@@ -68,10 +92,18 @@ from kagent.trace import (
 )
 
 __all__ = [
+    # Core
+    "Agent",
+    "AgentRuntime",
+    "complete",
+    # Signals
+    "Signal",
+    "UserInput",
+    "ChildCompletedSignal",
+    "ChildErrorSignal",
     # Levels
     "agent_step",
     "agent_loop",
-    "Agent",
     # State
     "AgentState",
     # Context builders
@@ -92,6 +124,8 @@ __all__ = [
     "StreamChunk",
     "ToolExecStart",
     "ToolExecEnd",
+    "ChildSpawned",
+    "ChildEvent",
     # Hooks
     "Hooks",
     "LoggingHooks",
@@ -99,6 +133,9 @@ __all__ = [
     # Callback types
     "OnToolResultFn",
     "ShouldContinueFn",
+    # Tools
+    "SpawnSubAgentTool",
+    "CheckSubAgentTool",
     # Trace
     "Trace",
     "TraceEntry",

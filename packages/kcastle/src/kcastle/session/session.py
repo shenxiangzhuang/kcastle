@@ -1,7 +1,7 @@
-"""Session — wraps a ``kagent.Agent`` with metadata and persistence.
+"""Session — wraps an ``AgentRuntime`` with metadata and persistence.
 
 A ``Session`` is the atomic unit of interaction in kcastle.  It binds an
-agent instance to a session directory on disk, manages metadata, and
+agent runtime to a session directory on disk, manages metadata, and
 exposes the ``run()`` / ``suspend()`` lifecycle.
 """
 
@@ -15,13 +15,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kagent import Agent, AgentEvent, Trace, TraceManager
+from kagent import Agent, AgentEvent, AgentRuntime, AgentState, Trace, TraceManager, UserInput
 
 from kcastle.log import logger
 from kcastle.session.store import SessionTraceStore
 
 META_FILENAME = "meta.json"
-type AgentFactory = Callable[[Trace], Agent]
+type AgentFactory = Callable[[], Agent]
 
 
 @dataclass(slots=True)
@@ -91,13 +91,13 @@ class Session:
         *,
         session_dir: Path,
         meta: SessionMeta,
-        agent: Agent,
+        runtime: AgentRuntime,
         trace: Trace,
         trace_manager: TraceManager,
     ) -> None:
         self._session_dir = session_dir
         self._meta = meta
-        self._agent = agent
+        self._runtime = runtime
         self._trace = trace
         self._trace_manager = trace_manager
         self._running = False
@@ -121,7 +121,11 @@ class Session:
 
     @property
     def agent(self) -> Agent:
-        return self._agent
+        return self._runtime.agent
+
+    @property
+    def runtime(self) -> AgentRuntime:
+        return self._runtime
 
     @property
     def trace(self) -> Trace:
@@ -152,11 +156,15 @@ class Session:
 
         self._running = True
         try:
-            async for event in self._agent.run(user_input):
+            async for event in self._runtime.send(UserInput(text=user_input)):
                 yield event
         finally:
             self._running = False
             self._touch()
+
+    def abort(self) -> None:
+        """Abort the currently running agent handle."""
+        self._runtime.abort()
 
     def suspend(self) -> None:
         """Suspend the session — drop agent from memory.
@@ -246,11 +254,17 @@ class Session:
         agent_factory: AgentFactory,
     ) -> Session:
         """Assemble a Session from its components (shared by create and resume)."""
-        agent: Agent = agent_factory(trace)
+        agent = agent_factory()
+        state = AgentState(
+            system=agent.system,
+            trace=trace,
+            tools=list(agent.tools),
+        )
+        runtime = AgentRuntime(agent, state=state)
         return cls(
             session_dir=session_dir,
             meta=meta,
-            agent=agent,
+            runtime=runtime,
             trace=trace,
             trace_manager=trace_manager,
         )
