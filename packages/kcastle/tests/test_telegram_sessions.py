@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from kcastle.channels.telegram import _session_id_for_chat, TelegramChannel
-from kcastle.config import CastleConfig, ChannelConfig
+from kcastle.channels.telegram import TelegramChannel, _session_id_for_chat
 from kcastle.session import SessionInfo
 
 
@@ -124,8 +123,7 @@ class TestTelegramSessions:
 
         # Check success message
         update.message.reply_text.assert_called_with(
-            "✓ Switched to session: `tg-u456-12345`",
-            parse_mode="Markdown"
+            "✓ Switched to session: `tg-u456-12345`", parse_mode="Markdown"
         )
 
     @pytest.mark.asyncio

@@ -180,7 +180,7 @@ class Session:
         # Stop runtime if started
         if self._runtime_started:
             # Cancel the runtime's loop task directly
-            if hasattr(self._runtime, '_loop_task') and self._runtime._loop_task:
+            if hasattr(self._runtime, "_loop_task") and self._runtime._loop_task:
                 self._runtime._loop_task.cancel()
             self._runtime_started = False
 

@@ -246,9 +246,7 @@ class AgentRuntime:
             system=child_agent.system,
             tools=list(child_tools),
         )
-        child_state.trace.append(
-            TraceEntry.user(Message(role="user", content=task))
-        )
+        child_state.trace.append(TraceEntry.user(Message(role="user", content=task)))
 
         child_handle = _ChildHandle(
             id=child_id,
@@ -294,9 +292,7 @@ class AgentRuntime:
         """Background loop: process mailbox entries sequentially."""
         while self._running:
             try:
-                signal, channel = await asyncio.wait_for(
-                    self._mailbox.get(), timeout=1.0
-                )
+                signal, channel = await asyncio.wait_for(self._mailbox.get(), timeout=1.0)
             except TimeoutError:
                 continue
 
@@ -354,10 +350,7 @@ class AgentRuntime:
         desc = child.description if child else child_id
 
         result_text = result.extract_text() if hasattr(result, "extract_text") else str(result)
-        notification = (
-            f"[Sub-agent {child_id} completed task: {desc}]\n"
-            f"Result: {result_text}"
-        )
+        notification = f"[Sub-agent {child_id} completed task: {desc}]\nResult: {result_text}"
         msg = Message(role="user", content=notification)
         self._state.trace.append(TraceEntry.user(msg))
 
@@ -381,10 +374,7 @@ class AgentRuntime:
         child = self._children.get(child_id)
         desc = child.description if child else child_id
 
-        notification = (
-            f"[Sub-agent {child_id} failed on task: {desc}]\n"
-            f"Error: {error}"
-        )
+        notification = f"[Sub-agent {child_id} failed on task: {desc}]\nError: {error}"
         msg = Message(role="user", content=notification)
         self._state.trace.append(TraceEntry.user(msg))
 
@@ -421,9 +411,7 @@ class AgentRuntime:
 
     # --- Internal: child execution ---
 
-    async def _run_child(
-        self, child_id: str, child_agent: Agent, child_state: AgentState
-    ) -> None:
+    async def _run_child(self, child_id: str, child_agent: Agent, child_state: AgentState) -> None:
         """Run a child agent in the background and report results."""
         child = self._children.get(child_id)
         if child is None:
@@ -439,20 +427,24 @@ class AgentRuntime:
                 child.status = "completed"
                 child.result = last_msg.extract_text()
                 # Deliver to parent mailbox
-                await self._mailbox.put((
-                    ChildCompleted(child_id=child_id, result=last_msg),
-                    asyncio.Queue(),  # fire-and-forget channel
-                ))
+                await self._mailbox.put(
+                    (
+                        ChildCompleted(child_id=child_id, result=last_msg),
+                        asyncio.Queue(),  # fire-and-forget channel
+                    )
+                )
             else:
                 child.status = "failed"
                 child.error = "No response produced"
-                await self._mailbox.put((
-                    ChildError(
-                        child_id=child_id,
-                        error=RuntimeError("Child produced no response"),
-                    ),
-                    asyncio.Queue(),
-                ))
+                await self._mailbox.put(
+                    (
+                        ChildError(
+                            child_id=child_id,
+                            error=RuntimeError("Child produced no response"),
+                        ),
+                        asyncio.Queue(),
+                    )
+                )
 
         except asyncio.CancelledError:
             child.status = "failed"
@@ -461,10 +453,12 @@ class AgentRuntime:
             child.status = "failed"
             child.error = str(e)
             logger.exception("Child %s failed", child_id)
-            await self._mailbox.put((
-                ChildError(child_id=child_id, error=e),
-                asyncio.Queue(),
-            ))
+            await self._mailbox.put(
+                (
+                    ChildError(child_id=child_id, error=e),
+                    asyncio.Queue(),
+                )
+            )
 
     # --- Internal: helpers ---
 
