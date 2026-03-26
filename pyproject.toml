@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 reportUnnecessaryTypeIgnoreComment = "warning"
+reportPrivateUsage = "none"
 include = [
     "packages/*/src/**/*.py",
     "packages/*/tests/**/*.py",

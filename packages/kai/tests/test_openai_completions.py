@@ -13,7 +13,7 @@ from openai.types.chat import ChatCompletionChunk
 
 from kai.providers.openai import OpenAIChatCompletions
 from kai.providers.openai import (
-    _extract_reasoning_text as _extract_reasoning_text,  # pyright: ignore[reportPrivateUsage]
+    _extract_reasoning_text as _extract_reasoning_text,
 )
 from kai.types.message import Context, ImagePart, Message, TextPart, ThinkPart, ToolCall
 from kai.types.stream import (
