@@ -137,9 +137,7 @@ class TestRuntimeSteer:
             events: list[AgentEvent] = []
             async for event in runtime.send(UserInput(text="go")):
                 events.append(event)
-                if isinstance(event, TurnEnd) and not any(
-                    isinstance(e, AgentEnd) for e in events
-                ):
+                if isinstance(event, TurnEnd) and not any(isinstance(e, AgentEnd) for e in events):
                     # Steer after first turn
                     runtime.steer(Message(role="user", content="Actually, do this instead."))
 

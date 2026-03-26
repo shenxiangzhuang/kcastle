@@ -27,6 +27,7 @@ class MockProvider:
 @pytest.mark.asyncio
 async def test_session_starts_runtime_on_first_run(tmp_path: Path) -> None:
     """Test that Session properly starts AgentRuntime on first run."""
+
     # Create a simple agent factory
     def agent_factory() -> Agent:
         return Agent(llm=MockProvider(), system="Test agent")

@@ -185,6 +185,7 @@ class TelegramChannel:
 
         # Generate a new unique session ID with timestamp
         import time
+
         new_sid = f"{base_sid}-{int(time.time())}"
 
         name = " ".join(context.args) if context.args else ""
@@ -202,9 +203,8 @@ class TelegramChannel:
 
         if not context.args:
             await update.message.reply_text(
-                "Usage: `/switch <session-id>`\n"
-                "Use `/sessions` to see available sessions.",
-                parse_mode="Markdown"
+                "Usage: `/switch <session-id>`\nUse `/sessions` to see available sessions.",
+                parse_mode="Markdown",
             )
             return
 
@@ -222,13 +222,15 @@ class TelegramChannel:
             await update.message.reply_text(
                 f"❌ Session `{target_sid}` not found or doesn't belong to you.\n"
                 f"Use `/sessions` to see your available sessions.",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
             )
             return
 
         # Update the active session mapping
         self._active_sessions[base_sid] = target_sid
-        await update.message.reply_text(f"✓ Switched to session: `{target_sid}`", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"✓ Switched to session: `{target_sid}`", parse_mode="Markdown"
+        )
 
     async def _cmd_clear(self, update: Any, context: Any) -> None:
         """Handle /clear — clear the current session's history."""
@@ -256,7 +258,7 @@ class TelegramChannel:
         await update.message.reply_text(
             "✓ Session history cleared. Starting fresh with the same session ID.\n"
             "This can help resolve content moderation issues.",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
 
     async def _cmd_sessions(self, update: Any, context: Any) -> None:
@@ -286,10 +288,11 @@ class TelegramChannel:
             if "-" in s.id and s.id != base_sid:
                 timestamp = s.id.split("-")[-1]
                 from datetime import datetime
+
                 try:
                     dt = datetime.fromtimestamp(int(timestamp))
                     time_str = dt.strftime(" [%Y-%m-%d %H:%M]")
-                except:
+                except (ValueError, OSError):
                     time_str = ""
             else:
                 time_str = " [default]"
@@ -297,10 +300,11 @@ class TelegramChannel:
             lines.append(f"• `{s.id}`{name_str}{time_str}{marker}")
 
         await update.message.reply_text(
-            f"**Your sessions:**\n\n" + "\n".join(lines) +
-            f"\n\nUse `/switch <session-id>` to switch sessions\n"
-            f"Use `/new [name]` to create a new session",
-            parse_mode="Markdown"
+            "**Your sessions:**\n\n"
+            + "\n".join(lines)
+            + "\n\nUse `/switch <session-id>` to switch sessions\n"
+            "Use `/new [name]` to create a new session",
+            parse_mode="Markdown",
         )
 
     async def _cmd_model(self, update: Any, context: Any) -> None:
