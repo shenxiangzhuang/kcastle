@@ -3,8 +3,16 @@
 ## Problem
 Some AI providers (especially OpenRouter) have aggressive content moderation that flags legitimate technical discussions. Once a session is flagged, all subsequent messages in that session may be blocked with "Content Exists Risk" errors.
 
-## Quick Fix: Create a New Session
-The easiest solution is to start fresh with a new session:
+## Quick Fixes
+
+### Option 1: Clear Current Session (Recommended)
+Keep your session ID but clear the problematic history:
+```
+/clear
+```
+
+### Option 2: Create a New Session
+Start completely fresh with a new session:
 ```
 /new
 ```
