@@ -6,9 +6,9 @@ Usage:
     uv run scripts/init_skill.py <skill-name> --path <path> [--resources scripts,references,assets] [--examples]
 
 Examples:
-    uv run scripts/init_skill.py my-new-skill --path ~/.agent/skills
-    uv run scripts/init_skill.py my-new-skill --path ~/.agent/skills --resources scripts,references
-    uv run scripts/init_skill.py my-api-helper --path .agent/skills --resources scripts --examples
+    uv run scripts/init_skill.py my-new-skill --path ~/.agents/skills
+    uv run scripts/init_skill.py my-new-skill --path ~/.agents/skills --resources scripts,references
+    uv run scripts/init_skill.py my-api-helper --path .agents/skills --resources scripts --examples
     uv run scripts/init_skill.py custom-skill --path /custom/location
 """
 

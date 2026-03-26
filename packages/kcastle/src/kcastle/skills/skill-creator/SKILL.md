@@ -18,8 +18,8 @@ equipped with procedural knowledge that no model can fully possess.
 
 When creating a skill, place it in one of these two roots:
 
-1. Project-local: `$workspace/.agent/skills/<skill-name>`
-2. Global: `~/.agent/skills/<skill-name>` (shared across workspaces)
+1. Project-local: `$workspace/.agents/skills/<skill-name>`
+2. Global: `~/.agents/skills/<skill-name>` (shared across workspaces)
 
 Prefer project-local by default. Use global only when the user explicitly wants the skill available across multiple workspaces.
 
@@ -286,10 +286,10 @@ uv run scripts/init_skill.py <skill-name> --path <output-directory> [--resources
 Examples:
 
 ```bash
-uv run scripts/init_skill.py my-skill --path "$workspace/.agent/skills"
-uv run scripts/init_skill.py my-skill --path "$workspace/.agent/skills" --resources scripts,references
-uv run scripts/init_skill.py my-skill --path "$workspace/.agent/skills" --resources scripts --examples
-uv run scripts/init_skill.py my-skill --path "~/.agent/skills"
+uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills"
+uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills" --resources scripts,references
+uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills" --resources scripts --examples
+uv run scripts/init_skill.py my-skill --path "~/.agents/skills"
 ```
 
 The script:
