@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from conftest import MockProvider, make_echo_tool, text_chunks, tool_call_chunks
 from kai import Message
 
-from kagent.event import AgentAbort, AgentEnd, AgentEvent, AgentStart, TurnEnd
 from kagent.agent import Agent
+from kagent.event import AgentAbort, AgentEnd, AgentEvent, AgentStart, TurnEnd
 from kagent.runtime import AgentRuntime
 from kagent.signal import UserInput
 

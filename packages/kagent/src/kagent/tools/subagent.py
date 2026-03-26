@@ -12,9 +12,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from pydantic import BaseModel, Field, PrivateAttr
-
 from kai import Tool, ToolResult
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class SpawnSubAgentTool(Tool):

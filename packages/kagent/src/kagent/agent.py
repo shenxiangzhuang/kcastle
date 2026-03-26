@@ -16,12 +16,12 @@ from collections.abc import AsyncIterator
 from kai import Message, ProviderBase, Tool
 
 from kagent.context import ContextBuilder
-from kagent.event import AgentEnd, AgentError, AgentEvent, TurnEnd
+from kagent.event import AgentError, AgentEvent, TurnEnd
+from kagent.hooks import Hooks
 from kagent.loop import (
     ShouldContinueFn,
     agent_loop,
 )
-from kagent.hooks import Hooks
 from kagent.state import AgentState
 from kagent.step import OnToolResultFn
 from kagent.trace.entry import TraceEntry

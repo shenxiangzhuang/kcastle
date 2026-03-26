@@ -31,14 +31,6 @@ import logging as _logging
 # Agent (pure handler)
 from kagent.agent import Agent, complete
 
-# Runtime (actor process)
-from kagent.runtime import AgentRuntime
-
-# Signals
-from kagent.signal import ChildCompleted as ChildCompletedSignal
-from kagent.signal import ChildError as ChildErrorSignal
-from kagent.signal import Signal, UserInput
-
 # Context builders
 from kagent.context import (
     AdaptiveBuilder,
@@ -73,6 +65,14 @@ from kagent.loop import (
     ShouldContinueFn,
     agent_loop,
 )
+
+# Runtime (actor process)
+from kagent.runtime import AgentRuntime
+
+# Signals
+from kagent.signal import ChildCompleted as ChildCompletedSignal
+from kagent.signal import ChildError as ChildErrorSignal
+from kagent.signal import Signal, UserInput
 
 # State
 from kagent.state import AgentState

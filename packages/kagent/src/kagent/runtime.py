@@ -18,9 +18,10 @@ Abort and steer bypass the mailbox as direct method calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 from uuid import uuid4
 
@@ -32,7 +33,6 @@ from kagent.event import (
     AgentEnd,
     AgentError,
     AgentEvent,
-    ChildSpawned,
     TurnEnd,
 )
 from kagent.signal import ChildCompleted, ChildError, Signal, UserInput
@@ -156,10 +156,8 @@ class AgentRuntime:
         # Cancel loop
         if self._loop_task is not None:
             self._loop_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._loop_task
-            except asyncio.CancelledError:
-                pass
             self._loop_task = None
 
         logger.info("AgentRuntime stopped")
@@ -299,7 +297,7 @@ class AgentRuntime:
                 signal, channel = await asyncio.wait_for(
                     self._mailbox.get(), timeout=1.0
                 )
-            except (TimeoutError, asyncio.TimeoutError):
+            except TimeoutError:
                 continue
 
             try:
