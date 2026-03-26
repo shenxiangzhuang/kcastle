@@ -85,7 +85,7 @@ class ModelManager:
                 override = loaded.model_override
                 self._session_models[session_id] = override
                 try:
-                    loaded.agent.replace_llm(self.build_provider(*override))
+                    loaded.agent.llm = self.build_provider(*override)
                 except (ValueError, RuntimeError):
                     logger.warning(
                         "Failed to restore session %s model override %s / %s",
@@ -166,4 +166,4 @@ class ModelManager:
         session = self._session_manager.get(session_id)
         if session is None:
             raise KeyError(f"Session {session_id!r} is not loaded")
-        session.agent.replace_llm(provider)
+        session.agent.llm = provider

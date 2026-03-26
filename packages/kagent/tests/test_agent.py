@@ -1,4 +1,4 @@
-"""Tests for kagent.agent — Level 2: stateful agent SDK."""
+"""Tests for kagent.agent — pure handler with single handle() interface."""
 
 from __future__ import annotations
 
@@ -12,17 +12,21 @@ from conftest import (
 )
 from kai import Message, ToolResult
 
-from kagent.agent import Agent
-from kagent.event import AgentAbort, AgentEnd, AgentError, AgentEvent, AgentStart, TurnEnd
+from kagent.agent import Agent, complete
+from kagent.event import AgentEnd, AgentError, AgentStart, TurnEnd
+from kagent.state import AgentState
+from kagent.trace.entry import TraceEntry
 
 
-class TestAgentRun:
+class TestAgentHandle:
     @pytest.mark.asyncio
-    async def test_simple_run(self) -> None:
+    async def test_simple_handle(self) -> None:
         provider = MockProvider([text_chunks("Hello!")])
         agent = Agent(llm=provider, system="You are helpful.")
+        state = AgentState(system=agent.system, tools=list(agent.tools))
+        state.trace.append(TraceEntry.user(Message(role="user", content="Hi")))
 
-        events = [e async for e in agent.run("Hi")]
+        events = [e async for e in agent.handle(state)]
 
         assert isinstance(events[0], AgentStart)
         turn_ends = [e for e in events if isinstance(e, TurnEnd)]
@@ -30,7 +34,7 @@ class TestAgentRun:
         assert turn_ends[0].message.extract_text() == "Hello!"
 
     @pytest.mark.asyncio
-    async def test_state_persists_across_runs(self) -> None:
+    async def test_state_persists_across_handles(self) -> None:
         provider = MockProvider(
             [
                 text_chunks("First response"),
@@ -38,29 +42,35 @@ class TestAgentRun:
             ]
         )
         agent = Agent(llm=provider, system="Remember things.")
+        state = AgentState(system=agent.system, tools=list(agent.tools))
 
-        _ = [e async for e in agent.run("Message 1")]
-        _ = [e async for e in agent.run("Message 2")]
+        # First interaction
+        state.trace.append(TraceEntry.user(Message(role="user", content="Message 1")))
+        _ = [e async for e in agent.handle(state)]
+
+        # Second interaction
+        state.trace.append(TraceEntry.user(Message(role="user", content="Message 2")))
+        _ = [e async for e in agent.handle(state)]
 
         # Should have 4 messages: user1, assistant1, user2, assistant2
-        assert len(agent.state.messages) == 4
-        assert agent.state.messages[0].role == "user"
-        assert agent.state.messages[1].role == "assistant"
-        assert agent.state.messages[2].role == "user"
-        assert agent.state.messages[3].role == "assistant"
+        assert len(state.messages) == 4
+        assert state.messages[0].role == "user"
+        assert state.messages[1].role == "assistant"
+        assert state.messages[2].role == "user"
+        assert state.messages[3].role == "assistant"
 
 
-class TestAgentComplete:
+class TestComplete:
     @pytest.mark.asyncio
     async def test_complete_returns_message(self) -> None:
         provider = MockProvider([text_chunks("The answer is 4.")])
         agent = Agent(llm=provider, system="You are a calculator.")
 
-        msg = await agent.complete("What's 2+2?")
+        msg = await complete(agent, "What's 2+2?")
         assert msg.extract_text() == "The answer is 4."
 
     @pytest.mark.asyncio
-    async def test_complete_multi_turn(self) -> None:
+    async def test_complete_multi_turn_with_shared_state(self) -> None:
         provider = MockProvider(
             [
                 text_chunks("I'll remember that."),
@@ -68,9 +78,10 @@ class TestAgentComplete:
             ]
         )
         agent = Agent(llm=provider)
+        state = AgentState(system=agent.system, tools=list(agent.tools))
 
-        await agent.complete("My name is Alice.")
-        msg = await agent.complete("What's my name?")
+        await complete(agent, "My name is Alice.", state=state)
+        msg = await complete(agent, "What's my name?", state=state)
         assert msg.extract_text() == "Your name is Alice."
 
 
@@ -86,29 +97,20 @@ class TestAgentWithTools:
         )
         agent = Agent(llm=provider, tools=[echo])
 
-        msg = await agent.complete("Echo test")
+        msg = await complete(agent, "Echo test")
         assert msg.extract_text() == "Tool said: echo: test"
 
 
-class TestAgentState:
-    def test_state_is_accessible(self) -> None:
+class TestAgentConfig:
+    def test_agent_stores_config(self) -> None:
         provider = MockProvider([])
-        agent = Agent(llm=provider, system="Hello")
-        assert agent.state.system == "Hello"
-        assert agent.state.messages == []
+        agent = Agent(llm=provider, system="Hello", max_turns=50)
+        assert agent.system == "Hello"
+        assert agent.max_turns == 50
+        assert agent.llm is provider
+        assert agent.tools == []
 
-    def test_state_is_mutable(self) -> None:
-        provider = MockProvider([])
-        agent = Agent(llm=provider, system="v1")
-        agent.state.system = "v2"
-        assert agent.state.system == "v2"
-
-    def test_is_running_initially_false(self) -> None:
-        provider = MockProvider([])
-        agent = Agent(llm=provider)
-        assert agent.is_running is False
-
-    def test_llm_setter_is_alias_for_replace(self) -> None:
+    def test_llm_is_mutable(self) -> None:
         provider1 = MockProvider([])
         provider2 = MockProvider([])
         agent = Agent(llm=provider1)
@@ -116,38 +118,6 @@ class TestAgentState:
         agent.llm = provider2
 
         assert agent.llm is provider2
-
-    def test_llm_setter_raises_when_running(self) -> None:
-        provider1 = MockProvider([])
-        provider2 = MockProvider([])
-        agent = Agent(llm=provider1)
-        agent._running = True  # pyright: ignore[reportPrivateUsage]
-
-        with pytest.raises(RuntimeError, match="Cannot replace LLM while agent is running"):
-            agent.llm = provider2
-
-
-class TestAgentFollowUp:
-    @pytest.mark.asyncio
-    async def test_follow_up_triggers_additional_run(self) -> None:
-        provider = MockProvider(
-            [
-                text_chunks("First done."),
-                text_chunks("Follow-up done."),
-            ]
-        )
-        agent = Agent(llm=provider)
-
-        # Queue a follow-up before running
-        agent.follow_up(Message(role="user", content="And do this too."))
-
-        events = [e async for e in agent.run("Do something.")]
-
-        turn_ends = [e for e in events if isinstance(e, TurnEnd)]
-        # Should have 2 turns: original + follow-up
-        assert len(turn_ends) == 2
-        assert turn_ends[0].message.extract_text() == "First done."
-        assert turn_ends[1].message.extract_text() == "Follow-up done."
 
 
 class TestAgentCallbacks:
@@ -165,104 +135,37 @@ class TestAgentCallbacks:
             ]
         )
         agent = Agent(llm=provider, tools=[echo], on_tool_result=modify)
+        state = AgentState(system=agent.system, tools=list(agent.tools))
+        state.trace.append(TraceEntry.user(Message(role="user", content="go")))
 
-        await agent.complete("go")
+        _ = [e async for e in agent.handle(state)]
         # The tool result should have been intercepted
-        assert agent.state.messages[2].role == "tool"
-
-
-class TestAgentAbort:
-    @pytest.mark.asyncio
-    async def test_abort_emits_agent_abort_and_agent_end(self) -> None:
-        """abort() should emit AgentAbort followed by AgentEnd, never silently exit."""
-        echo = make_echo_tool()
-        provider = MockProvider(
-            [
-                # Turn 1: tool call — agent will loop
-                tool_call_chunks("c1", "echo", '{"message": "hi"}'),
-                # Turn 2: another tool call — but abort fires before this
-                tool_call_chunks("c2", "echo", '{"message": "bye"}'),
-                text_chunks("Done"),
-            ]
-        )
-        agent = Agent(llm=provider, tools=[echo])
-
-        events: list[AgentEvent] = []
-        async for event in agent.run("go"):
-            events.append(event)
-            # Abort after the first turn ends
-            if isinstance(event, TurnEnd):
-                agent.abort()
-
-        # Should have AgentAbort followed by AgentEnd
-        abort_events = [e for e in events if isinstance(e, AgentAbort)]
-        end_events = [e for e in events if isinstance(e, AgentEnd)]
-        assert len(abort_events) == 1, "Expected exactly one AgentAbort event"
-        assert len(end_events) == 1, "Expected exactly one AgentEnd event"
-
-        # AgentAbort should come before AgentEnd
-        abort_idx = events.index(abort_events[0])
-        end_idx = events.index(end_events[0])
-        assert abort_idx < end_idx, "AgentAbort should precede AgentEnd"
-
-        # Both should carry the current messages
-        assert len(abort_events[0].messages) > 0
-        assert len(end_events[0].messages) > 0
-
-    @pytest.mark.asyncio
-    async def test_abort_before_run_is_noop(self) -> None:
-        """abort() before run starts should be a no-op."""
-        provider = MockProvider([text_chunks("Hi")])
-        agent = Agent(llm=provider)
-
-        # abort before run — should not crash
-        agent.abort()
-
-        msg = await agent.complete("Hello")
-        assert msg.extract_text() == "Hi"
-
-    @pytest.mark.asyncio
-    async def test_abort_stops_agent_running_flag(self) -> None:
-        """After abort, is_running should be False."""
-        provider = MockProvider(
-            [
-                tool_call_chunks("c1", "echo", '{"message": "hi"}'),
-                text_chunks("Done"),
-            ]
-        )
-        echo = make_echo_tool()
-        agent = Agent(llm=provider, tools=[echo])
-
-        async for event in agent.run("go"):
-            if isinstance(event, TurnEnd):
-                agent.abort()
-
-        assert agent.is_running is False
+        assert state.messages[2].role == "tool"
 
 
 class TestAgentErrorPropagation:
     @pytest.mark.asyncio
     async def test_complete_raises_on_provider_error(self) -> None:
-        """complete() should raise RuntimeError with the original error as cause."""
         from kai.errors import ErrorKind, KaiError
 
         provider = ErrorProvider(KaiError(ErrorKind.PROVIDER, "API connection failed"))
         agent = Agent(llm=provider, system="test")
 
         with pytest.raises(RuntimeError, match="API connection failed") as exc_info:
-            await agent.complete("Hello")
+            await complete(agent, "Hello")
 
         assert isinstance(exc_info.value.__cause__, KaiError)
 
     @pytest.mark.asyncio
-    async def test_run_yields_agent_error_on_provider_error(self) -> None:
-        """run() should yield AgentError when the provider raises."""
+    async def test_handle_yields_agent_error_on_provider_error(self) -> None:
         from kai.errors import ErrorKind, KaiError
 
         provider = ErrorProvider(KaiError(ErrorKind.PROVIDER, "stream broke"))
         agent = Agent(llm=provider, system="test")
+        state = AgentState(system=agent.system, tools=list(agent.tools))
+        state.trace.append(TraceEntry.user(Message(role="user", content="Hello")))
 
-        events = [e async for e in agent.run("Hello")]
+        events = [e async for e in agent.handle(state)]
 
         error_events = [e for e in events if isinstance(e, AgentError)]
         assert len(error_events) == 1
@@ -273,13 +176,11 @@ class TestAgentErrorPropagation:
 
     @pytest.mark.asyncio
     async def test_complete_raises_on_empty_response(self) -> None:
-        """complete() should raise when the provider returns no content."""
         from kai.types.stream import Usage
         from kai.types.usage import TokenUsage
 
-        # A provider that returns only a usage event (no text, no tool call).
         provider = MockProvider([[Usage(usage=TokenUsage(input_tokens=0, output_tokens=0))]])
         agent = Agent(llm=provider, system="test")
 
-        with pytest.raises(RuntimeError, match="Agent loop failed"):
-            await agent.complete("Hello")
+        with pytest.raises(RuntimeError, match="Agent failed"):
+            await complete(agent, "Hello")

@@ -29,7 +29,7 @@ import os
 from kai import AnthropicMessages, Tool, ToolResult
 from pydantic import BaseModel, Field
 
-from kagent import Agent
+from kagent import Agent, complete
 
 # ---------------------------------------------------------------------------
 # Provider
@@ -117,7 +117,7 @@ async def main() -> None:
         hooks=OTelHooks(),
     )
 
-    reply = await agent.complete(QUESTION)
+    reply = await complete(agent, QUESTION)
     print(f"\n>>> Answer: {reply.extract_text()}")
 
     tp.force_flush()

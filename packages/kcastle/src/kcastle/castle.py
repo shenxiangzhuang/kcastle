@@ -11,7 +11,7 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from kagent import Agent, Hooks, Trace
+from kagent import Agent, Hooks
 from kai import Tool
 
 from kcastle.channels import Channel
@@ -171,12 +171,11 @@ class Castle:
         otel_provider, otel_log_provider = cls._configure_otel(config)
         hooks = cls._build_agent_hooks(config)
 
-        def agent_factory(trace: Trace) -> Agent:
+        def agent_factory() -> Agent:
             return Agent(
                 llm=provider,
                 system=system_prompt,
                 tools=skill_tools if skill_tools else None,
-                trace=trace,
                 hooks=hooks,
                 max_turns=config.max_turns,
             )

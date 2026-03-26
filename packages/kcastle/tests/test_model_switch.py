@@ -65,8 +65,8 @@ def _make_castle(tmp_path: Path) -> Castle:
 
     default_provider = DummyProvider(provider="mock", model="model-a")
 
-    def _agent_factory(trace: Any) -> Agent:
-        return Agent(llm=default_provider, trace=trace)
+    def _agent_factory() -> Agent:
+        return Agent(llm=default_provider)
 
     session_manager = SessionManager(
         sessions_dir=config.sessions_dir,

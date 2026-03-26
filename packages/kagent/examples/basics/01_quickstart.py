@@ -14,7 +14,7 @@ import os
 from kai import AnthropicMessages, Tool, ToolResult
 from pydantic import BaseModel, Field
 
-from kagent import Agent
+from kagent import Agent, complete
 
 
 def make_provider() -> AnthropicMessages:
@@ -73,7 +73,7 @@ async def main() -> None:
     )
 
     # complete() runs the full agent loop and returns the final message.
-    reply = await agent.complete("What's the weather in Tokyo and Paris?")
+    reply = await complete(agent, "What's the weather in Tokyo and Paris?")
     print(reply.extract_text())
 
 

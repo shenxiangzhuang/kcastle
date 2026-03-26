@@ -20,10 +20,14 @@ from kai import AnthropicMessages
 from kagent import (
     AdaptiveBuilder,
     Agent,
+    AgentRuntime,
+    AgentState,
     CompactingBuilder,
     DefaultBuilder,
     SlidingWindowBuilder,
     TurnEnd,
+    UserInput,
+    complete,
 )
 
 
@@ -55,6 +59,9 @@ async def demo_sliding_window() -> None:
         context_builder=SlidingWindowBuilder(window_size=6),
     )
 
+    # Shared state so conversation history persists across turns
+    state = AgentState(system=agent.system, tools=list(agent.tools))
+
     # Simulate a multi-turn conversation
     for question in [
         "My name is Alice.",
@@ -63,7 +70,7 @@ async def demo_sliding_window() -> None:
         "What's my name?",  # May not remember — depends on window
     ]:
         print(f"[user] {question}")
-        msg = await agent.complete(question)
+        msg = await complete(agent, question, state=state)
         print(f"[assistant] {msg.extract_text()}\n")
 
 
@@ -99,16 +106,22 @@ async def demo_adaptive() -> None:
 
     print(f"[context strategy] {adaptive.current}")
 
-    for question in [
-        "Remember: my favorite color is blue.",
-        "Switch to the 'window' context strategy.",
-        "What is my favorite color?",
-    ]:
-        print(f"[user] {question}")
-        async for event in agent.run(question):
-            if isinstance(event, TurnEnd) and event.message.extract_text():
-                print(f"[assistant] {event.message.extract_text()}")
-        print(f"[context strategy] {adaptive.current}\n")
+    runtime = AgentRuntime(agent, can_spawn=False)
+    await runtime.start()
+
+    try:
+        for question in [
+            "Remember: my favorite color is blue.",
+            "Switch to the 'window' context strategy.",
+            "What is my favorite color?",
+        ]:
+            print(f"[user] {question}")
+            async for event in runtime.send(UserInput(question)):
+                if isinstance(event, TurnEnd) and event.message.extract_text():
+                    print(f"[assistant] {event.message.extract_text()}")
+            print(f"[context strategy] {adaptive.current}\n")
+    finally:
+        await runtime.stop()
 
 
 # ---------------------------------------------------------------------------

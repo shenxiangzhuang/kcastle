@@ -112,6 +112,27 @@ class AgentError:
     type: Literal["agent_error"] = "agent_error"
 
 
+# --- Child lifecycle ---
+
+
+@dataclass(frozen=True, slots=True)
+class ChildSpawned:
+    """A sub-agent was spawned."""
+
+    child_id: str
+    task: str
+    type: Literal["child_spawned"] = "child_spawned"
+
+
+@dataclass(frozen=True, slots=True)
+class ChildEvent:
+    """An event forwarded from a sub-agent."""
+
+    child_id: str
+    event: AgentEvent
+    type: Literal["child_event"] = "child_event"
+
+
 type AgentEvent = (
     AgentStart
     | AgentEnd
@@ -122,5 +143,7 @@ type AgentEvent = (
     | ToolExecStart
     | ToolExecEnd
     | AgentError
+    | ChildSpawned
+    | ChildEvent
 )
 """Union of all agent lifecycle events."""
