@@ -4,9 +4,10 @@ If you're getting "Content Exists Risk" errors from the Telegram bot, this is du
 
 ## Quick Solutions
 
-1. **Start a new conversation**: Use `/new` command to clear history
-2. **Rephrase your message**: Try expressing the same idea differently
-3. **Switch to a different model**: Some models have less strict filters
+1. **Clear session history**: Use `/clear` command to keep the same session but clear history
+2. **Start a new conversation**: Use `/new` command to create a completely new session
+3. **Rephrase your message**: Try expressing the same idea differently
+4. **Switch to a different model**: Some models have less strict filters
 
 ## Switching Models
 

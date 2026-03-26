@@ -104,6 +104,7 @@ class TelegramChannel:
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("new", self._cmd_new))
         self._app.add_handler(CommandHandler("switch", self._cmd_switch))
+        self._app.add_handler(CommandHandler("clear", self._cmd_clear))
         self._app.add_handler(CommandHandler("model", self._cmd_model))
         self._app.add_handler(CommandHandler("sessions", self._cmd_sessions))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
@@ -118,6 +119,7 @@ class TelegramChannel:
             [
                 BotCommand("new", "Start a new session"),
                 BotCommand("switch", "Switch to a different session"),
+                BotCommand("clear", "Clear current session history"),
                 BotCommand("model", "Switch model"),
                 BotCommand("sessions", "List all sessions"),
                 BotCommand("help", "Show available commands"),
@@ -148,6 +150,7 @@ class TelegramChannel:
             "/new — Start a new session\n"
             "/sessions — List all sessions\n"
             "/switch <id> — Switch to a session\n"
+            "/clear — Clear current session history\n"
             "/model — Switch model\n"
             "/help — Show available commands"
         )
@@ -159,8 +162,10 @@ class TelegramChannel:
             "/new [name] — Start a new session (clears context)\n"
             "/sessions — List all your sessions\n"
             "/switch <id> — Switch to a different session\n"
+            "/clear — Clear current session history\n"
             "/model — Switch model for current session\n"
             "/help — Show this help message\n\n"
+            "Use /clear if you encounter content moderation errors.\n"
             "Just send any message to chat with me."
         )
 
@@ -224,6 +229,35 @@ class TelegramChannel:
         # Update the active session mapping
         self._active_sessions[base_sid] = target_sid
         await update.message.reply_text(f"✓ Switched to session: `{target_sid}`", parse_mode="Markdown")
+
+    async def _cmd_clear(self, update: Any, context: Any) -> None:
+        """Handle /clear — clear the current session's history."""
+        if self._castle is None:
+            return
+
+        chat = update.effective_chat
+        user = update.effective_user
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        current_sid = self._active_sessions.get(base_sid, base_sid)
+
+        manager = self._castle.session_manager
+
+        # Get the current session info before clearing
+        sessions = manager.list()
+        current_session = next((s for s in sessions if s.id == current_sid), None)
+        session_name = current_session.name if current_session and current_session.name else ""
+
+        # Suspend the current session
+        manager.suspend(current_sid)
+
+        # Create a fresh session with the same ID (effectively clearing it)
+        manager.create(session_id=current_sid, name=session_name)
+
+        await update.message.reply_text(
+            "✓ Session history cleared. Starting fresh with the same session ID.\n"
+            "This can help resolve content moderation issues.",
+            parse_mode="Markdown"
+        )
 
     async def _cmd_sessions(self, update: Any, context: Any) -> None:
         """Handle /sessions — list sessions."""
