@@ -66,7 +66,16 @@ def _render_events_to_text(events: list[AgentEvent]) -> str:
                 if isinstance(stream_event, TextDelta):
                     parts.append(stream_event.delta)
             case AgentError(error=err):
-                parts.append(f"\n❌ Error: {err}")
+                error_msg = str(err)
+                # Check for content moderation errors
+                if "Content Exists Risk" in error_msg:
+                    parts.append(
+                        "\n⚠️ The AI provider blocked this request due to content moderation. "
+                        "This may happen with certain topics or conversation contexts. "
+                        "Try rephrasing your message or starting a new conversation with /new."
+                    )
+                else:
+                    parts.append(f"\n❌ Error: {err}")
             case _:
                 pass
     return "".join(parts).strip()
