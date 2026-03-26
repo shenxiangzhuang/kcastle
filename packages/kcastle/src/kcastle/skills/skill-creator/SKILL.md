@@ -16,12 +16,23 @@ equipped with procedural knowledge that no model can fully possess.
 
 ### Skill Location Policy
 
-When creating a skill, place it in one of these two roots:
+When creating a skill, determine its location based on reusability:
 
-1. Project-local: `$workspace/.agents/skills/<skill-name>`
-2. Global: `~/.agents/skills/<skill-name>` (shared across workspaces)
+1. **Global skills** (`~/.agents/skills/<skill-name>`): For generic, reusable skills
+   - File format processors (PDF, DOCX, CSV handlers)
+   - General-purpose tools (formatters, validators)
+   - Domain-agnostic workflows (code review, testing patterns)
+   - Skills that multiple projects would benefit from
 
-Prefer project-local by default. Use global only when the user explicitly wants the skill available across multiple workspaces.
+2. **Project-local skills** (`./.agents/skills/<skill-name>`): For project-specific skills
+   - Company/project-specific workflows
+   - Skills using proprietary schemas or APIs
+   - Business logic unique to the current workspace
+   - Skills tightly coupled to the project structure
+
+**Decision criteria**: Ask "Would this skill be useful in other projects?"
+- If YES → Global folder for reusability
+- If NO (project-specific) → Keep it local to the project
 
 ### What Skills Provide
 
@@ -234,6 +245,10 @@ Skip this step only when the skill's usage patterns are already clearly understo
 
 To create an effective skill, clearly understand concrete examples of how the skill will be used. This understanding can come from either direct user examples or generated examples that are validated with user feedback.
 
+Early in this process, consider:
+- **Is this skill project-specific or universally useful?**
+- **Could other projects benefit from this functionality?**
+
 For example, when building an image-editor skill, relevant questions include:
 
 - "What functionality should the image-editor skill support? Editing, rotating, anything else?"
@@ -251,6 +266,9 @@ To turn concrete examples into an effective skill, analyze each example by:
 
 1. Considering how to execute on the example from scratch
 2. Identifying what scripts, references, and assets would be helpful when executing these workflows repeatedly
+3. **Assessing reusability**: Will this skill be useful across multiple projects?
+   - YES → Plan for global skill (generic, project-agnostic design)
+   - NO → Plan for project-local skill (can use project-specific context)
 
 Example: When building a `pdf-editor` skill to handle queries like "Help me rotate this PDF," the analysis shows:
 
@@ -283,13 +301,21 @@ Usage:
 uv run scripts/init_skill.py <skill-name> --path <output-directory> [--resources scripts,references,assets] [--examples]
 ```
 
-Examples:
+Choose the path based on skill type:
 
+**For generic, reusable skills** (file processors, formatters, general tools):
 ```bash
-uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills"
-uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills" --resources scripts,references
-uv run scripts/init_skill.py my-skill --path "$workspace/.agents/skills" --resources scripts --examples
-uv run scripts/init_skill.py my-skill --path "~/.agents/skills"
+# Global skills go to ~/.agents/skills
+uv run scripts/init_skill.py pdf-processor --path "~/.agents/skills"
+uv run scripts/init_skill.py csv-analyzer --path "~/.agents/skills" --resources scripts,references
+uv run scripts/init_skill.py code-formatter --path "~/.agents/skills" --resources scripts --examples
+```
+
+**For project-specific skills** (company workflows, proprietary logic):
+```bash
+# Project skills stay local in ./.agents/skills
+uv run scripts/init_skill.py acme-deploy --path "./.agents/skills"
+uv run scripts/init_skill.py company-api --path "./.agents/skills" --resources references
 ```
 
 The script:
