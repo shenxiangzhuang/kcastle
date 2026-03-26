@@ -98,3 +98,44 @@ The project follows a **minor-bump-only** versioning scheme (`MAJOR.MINOR.PATCH`
 Examples: `0.1.0` → `0.2.0` → `0.3.0`; never `0.1.1`.
 
 This rule applies to all packages in the repo.
+
+## Release workflow
+
+Use this release process:
+
+1. Create a `release/<name>` branch for the release work and open a PR.
+2. Merge the release PR into `master`.
+3. Create the release tag from `master` after the PR is merged.
+4. Use a GitHub Releases friendly tag format:
+   - stable: `vMAJOR.MINOR.PATCH`
+   - prerelease: `vMAJOR.MINOR.PATCH-alpha.N`, `vMAJOR.MINOR.PATCH-beta.N`, `vMAJOR.MINOR.PATCH-rc.N`
+
+Examples:
+- `v0.1.0`
+- `v0.2.0-alpha.1`
+- `v0.2.0-beta.1`
+- `v1.0.0-rc.1`
+
+## Release notes
+
+Release notes should use this structure:
+
+1. `## Highlights`
+2. PR list
+3. `## Notes`
+
+Recommended format:
+
+```md
+## Highlights
+- item 1
+- item 2
+
+## Included pull requests
+- #123 — `feat(scope): summary`
+- #124 — `chore(scope): summary`
+
+## Notes
+- note 1
+- note 2
+```
