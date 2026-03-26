@@ -356,6 +356,17 @@ class TelegramChannel:
 
         # Get the active session for this user/chat
         base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+
+        # If no active session is tracked, find the most recent one
+        if base_sid not in self._active_sessions:
+            manager = self._castle.session_manager
+            sessions = manager.list()
+            user_sessions = [s for s in sessions if s.id.startswith(base_sid)]
+            if user_sessions:
+                # Use the most recently active session
+                latest = max(user_sessions, key=lambda s: s.last_active_at or 0)
+                self._active_sessions[base_sid] = latest.id
+
         sid = self._active_sessions.get(base_sid, base_sid)
 
         manager = self._castle.session_manager
