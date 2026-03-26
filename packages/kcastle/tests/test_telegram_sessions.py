@@ -12,7 +12,6 @@ from kcastle.config import CastleConfig, ChannelConfig
 from kcastle.session import SessionInfo
 
 
-@pytest.mark.asyncio
 class TestTelegramSessions:
     """Test multi-session support in Telegram channel."""
 
@@ -26,11 +25,11 @@ class TestTelegramSessions:
         sid = _session_id_for_chat("private", chat_id=123, user_id=None)
         assert sid == "tg-u123"
 
-        # Group chat (not currently implemented but for future)
+        # Group chat
         sid = _session_id_for_chat("group", chat_id=789, user_id=456)
-        # For now it still returns user-based ID
-        assert sid == "tg-u456"
+        assert sid == "tg-g789"  # Group chats use chat ID, not user ID
 
+    @pytest.mark.asyncio
     async def test_new_command_creates_unique_sessions(self, tmp_path: Path) -> None:
         """Test that /new creates unique sessions with timestamps."""
         # Mock the castle and session manager
@@ -71,6 +70,7 @@ class TestTelegramSessions:
         # Active session should be updated
         assert channel._active_sessions["tg-u456"] == session_id
 
+    @pytest.mark.asyncio
     async def test_switch_command(self, tmp_path: Path) -> None:
         """Test that /switch changes the active session."""
         # Mock castle and manager
@@ -128,6 +128,7 @@ class TestTelegramSessions:
             parse_mode="Markdown"
         )
 
+    @pytest.mark.asyncio
     async def test_auto_detect_recent_session(self, tmp_path: Path) -> None:
         """Test that the most recent session is auto-detected after restart."""
         # Mock castle and manager
@@ -159,9 +160,14 @@ class TestTelegramSessions:
         ]
         mock_manager.list.return_value = mock_sessions
 
-        # Mock session
+        # Mock session with async iterator
+        async def mock_run(input_text):
+            """Mock run that returns an async iterator."""
+            for event in []:  # Empty events
+                yield event
+
         mock_session = MagicMock()
-        mock_session.run = AsyncMock(return_value=[])
+        mock_session.run = mock_run
         mock_manager.get_or_create.return_value = mock_session
 
         # Create channel with empty active sessions (simulating restart)
