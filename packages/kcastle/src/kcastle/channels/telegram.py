@@ -88,7 +88,7 @@ class TelegramChannel:
         self._token = token
         self._bot_username = bot_username
         self._castle: Castle | None = None
-        self._app: Any = None  # telegram.ext.Application
+        self._app: Application[Any, Any, Any, Any, Any, Any] | None = None
         self._active_sessions: dict[str, str] = {}  # Maps base_sid -> active_sid
 
     @property
@@ -126,7 +126,8 @@ class TelegramChannel:
             ]
         )
 
-        await self._app.updater.start_polling()
+        if hasattr(self._app, "updater") and self._app.updater is not None:
+            await self._app.updater.start_polling()
 
         try:
             while True:
@@ -138,7 +139,8 @@ class TelegramChannel:
         """Stop the Telegram bot."""
         if self._app is not None:
             logger.info("Stopping Telegram bot")
-            await self._app.updater.stop()
+            if hasattr(self._app, "updater") and self._app.updater is not None:
+                await self._app.updater.stop()
             await self._app.stop()
             await self._app.shutdown()
 
@@ -480,10 +482,11 @@ class TelegramChannel:
         """
         try:
             while True:
-                await self._app.bot.send_chat_action(
-                    chat_id=chat_id,
-                    action=ChatAction.TYPING,
-                )
+                if self._app is not None:
+                    await self._app.bot.send_chat_action(
+                        chat_id=chat_id,
+                        action=ChatAction.TYPING,
+                    )
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
             pass
