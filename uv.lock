@@ -560,7 +560,7 @@ wheels = [
 
 [[package]]
 name = "k"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -597,7 +597,7 @@ dev = [
 
 [[package]]
 name = "kcastle"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { editable = "packages/kcastle" }
 dependencies = [
     { name = "kcastle-agent", extra = ["otel"] },
@@ -634,7 +634,7 @@ dev = [
 
 [[package]]
 name = "kcastle-agent"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { editable = "packages/kagent" }
 dependencies = [
     { name = "kcastle-ai" },
@@ -676,7 +676,7 @@ dev = [
 
 [[package]]
 name = "kcastle-ai"
-version = "0.0.1a1"
+version = "0.0.1a2"
 source = { editable = "packages/kai" }
 dependencies = [
     { name = "anthropic" },

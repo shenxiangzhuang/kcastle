@@ -1,6 +1,6 @@
 [project]
 name = "kcastle"
-version = "0.0.1a1"
+version = "0.0.1a2"
 description = "Agent application with multi-endpoint support for the k agent framework"
 readme = "README.md"
 authors = [
