@@ -80,6 +80,7 @@ class TelegramChannel:
         self._bot_username = bot_username
         self._castle: Castle | None = None
         self._app: Any = None  # telegram.ext.Application
+        self._active_sessions: dict[str, str] = {}  # Maps base_sid -> active_sid
 
     @property
     def name(self) -> str:
@@ -93,6 +94,7 @@ class TelegramChannel:
 
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("new", self._cmd_new))
+        self._app.add_handler(CommandHandler("switch", self._cmd_switch))
         self._app.add_handler(CommandHandler("model", self._cmd_model))
         self._app.add_handler(CommandHandler("sessions", self._cmd_sessions))
         self._app.add_handler(CommandHandler("help", self._cmd_help))
@@ -106,6 +108,7 @@ class TelegramChannel:
         await self._app.bot.set_my_commands(
             [
                 BotCommand("new", "Start a new session"),
+                BotCommand("switch", "Switch to a different session"),
                 BotCommand("model", "Switch model"),
                 BotCommand("sessions", "List all sessions"),
                 BotCommand("help", "Show available commands"),
@@ -134,8 +137,9 @@ class TelegramChannel:
             "👋 Hi! I'm k, your AI assistant. Send me a message to start chatting.\n\n"
             "Commands:\n"
             "/new — Start a new session\n"
-            "/model — Switch model\n"
             "/sessions — List all sessions\n"
+            "/switch <id> — Switch to a session\n"
+            "/model — Switch model\n"
             "/help — Show available commands"
         )
 
@@ -143,9 +147,10 @@ class TelegramChannel:
         """Handle /help command."""
         await update.message.reply_text(
             "Available commands:\n\n"
-            "/new — Start a new session (clears context)\n"
-            "/model — Switch model\n"
-            "/sessions — List all sessions\n"
+            "/new [name] — Start a new session (clears context)\n"
+            "/sessions — List all your sessions\n"
+            "/switch <id> — Switch to a different session\n"
+            "/model — Switch model for current session\n"
             "/help — Show this help message\n\n"
             "Just send any message to chat with me."
         )
@@ -156,12 +161,60 @@ class TelegramChannel:
             return
         chat = update.effective_chat
         user = update.effective_user
-        sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+
+        # Find the current session and suspend it
         manager = self._castle.session_manager
-        manager.suspend(sid)
+        current_sessions = [s for s in manager.list() if s.id.startswith(base_sid)]
+        for session in current_sessions:
+            manager.suspend(session.id)
+
+        # Generate a new unique session ID with timestamp
+        import time
+        new_sid = f"{base_sid}-{int(time.time())}"
+
         name = " ".join(context.args) if context.args else ""
-        manager.create(session_id=sid, name=name)
-        await update.message.reply_text("✓ New session started.")
+        manager.create(session_id=new_sid, name=name)
+
+        # Store the active session mapping
+        self._active_sessions[base_sid] = new_sid
+
+        await update.message.reply_text(f"✓ New session started: {new_sid}")
+
+    async def _cmd_switch(self, update: Any, context: Any) -> None:
+        """Handle /switch — switch to a different session."""
+        if self._castle is None:
+            return
+
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: `/switch <session-id>`\n"
+                "Use `/sessions` to see available sessions.",
+                parse_mode="Markdown"
+            )
+            return
+
+        target_sid = context.args[0]
+        chat = update.effective_chat
+        user = update.effective_user
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+
+        # Check if the session exists and belongs to this user
+        manager = self._castle.session_manager
+        sessions = manager.list()
+        user_sessions = [s for s in sessions if s.id.startswith(base_sid)]
+
+        if not any(s.id == target_sid for s in user_sessions):
+            await update.message.reply_text(
+                f"❌ Session `{target_sid}` not found or doesn't belong to you.\n"
+                f"Use `/sessions` to see your available sessions.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Update the active session mapping
+        self._active_sessions[base_sid] = target_sid
+        await update.message.reply_text(f"✓ Switched to session: `{target_sid}`", parse_mode="Markdown")
 
     async def _cmd_sessions(self, update: Any, context: Any) -> None:
         """Handle /sessions — list sessions."""
@@ -169,18 +222,43 @@ class TelegramChannel:
             return
         chat = update.effective_chat
         user = update.effective_user
-        current_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        current_sid = self._active_sessions.get(base_sid, base_sid)
+
         manager = self._castle.session_manager
         sessions = manager.list()
-        if not sessions:
-            await update.message.reply_text("No sessions.")
+
+        # Filter sessions for this user/chat
+        user_sessions = [s for s in sessions if s.id.startswith(base_sid)]
+
+        if not user_sessions:
+            await update.message.reply_text("No sessions for this chat.")
             return
+
         lines: list[str] = []
-        for s in sessions[:10]:
-            marker = " (current)" if s.id == current_sid else ""
+        for s in user_sessions[:10]:
+            marker = " ⬅️ (active)" if s.id == current_sid else ""
             name_str = f" — {s.name}" if s.name else ""
-            lines.append(f"• `{s.id}`{name_str}{marker}")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            # Extract timestamp from session ID if present
+            if "-" in s.id and s.id != base_sid:
+                timestamp = s.id.split("-")[-1]
+                from datetime import datetime
+                try:
+                    dt = datetime.fromtimestamp(int(timestamp))
+                    time_str = dt.strftime(" [%Y-%m-%d %H:%M]")
+                except:
+                    time_str = ""
+            else:
+                time_str = " [default]"
+
+            lines.append(f"• `{s.id}`{name_str}{time_str}{marker}")
+
+        await update.message.reply_text(
+            f"**Your sessions:**\n\n" + "\n".join(lines) +
+            f"\n\nUse `/switch <session-id>` to switch sessions\n"
+            f"Use `/new [name]` to create a new session",
+            parse_mode="Markdown"
+        )
 
     async def _cmd_model(self, update: Any, context: Any) -> None:
         """Handle /model — show model selection keyboard."""
@@ -189,7 +267,8 @@ class TelegramChannel:
 
         chat = update.effective_chat
         user = update.effective_user
-        sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        sid = self._active_sessions.get(base_sid, base_sid)
 
         self._castle.session_manager.get_or_create(sid)
 
@@ -232,7 +311,8 @@ class TelegramChannel:
 
         chat = update.effective_chat
         user = update.effective_user
-        sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        sid = self._active_sessions.get(base_sid, base_sid)
 
         self._castle.session_manager.get_or_create(sid)
 
@@ -274,7 +354,10 @@ class TelegramChannel:
             sender_name = user.full_name if user else "Unknown"
             message_text = f"[{sender_name}]: {message_text}"
 
-        sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        # Get the active session for this user/chat
+        base_sid = _session_id_for_chat(chat.type, chat.id, user.id if user else None)
+        sid = self._active_sessions.get(base_sid, base_sid)
+
         manager = self._castle.session_manager
         session = manager.get_or_create(sid)
 
