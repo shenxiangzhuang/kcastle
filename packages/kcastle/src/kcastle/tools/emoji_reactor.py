@@ -5,8 +5,7 @@ from __future__ import annotations
 import textwrap
 from typing import TYPE_CHECKING
 
-from kai import Kai
-from kai.models import ChatMessage
+from kai import Context, Message, complete
 
 if TYPE_CHECKING:
     from kcastle.castle import Castle
@@ -45,7 +44,6 @@ class EmojiReactor:
 
     def __init__(self, castle: Castle | None = None):
         self._castle = castle
-        self._kai: Kai | None = None
 
     def set_castle(self, castle: Castle) -> None:
         """Set the castle instance for model access."""
@@ -66,29 +64,43 @@ class EmojiReactor:
             return self._simple_fallback(message)
 
         try:
-            # Try to use the same model as the session if provided
+            # Get the provider to use
             if session_id:
                 provider_name, model_id = self._castle.get_active_model(session_id)
-                provider = self._castle.get_provider(provider_name)
-                kai_instance = Kai(provider=provider) if provider else self._get_default_kai()
             else:
-                kai_instance = self._get_default_kai()
+                # Get the first available provider
+                models = self._castle.available_models()
+                if not models:
+                    raise ValueError("No models available")
+                provider_name, model_id = models[0]
+
+            # Build the provider instance
+            provider = self._castle.model_manager.build_provider(provider_name, model_id)
 
             # Create the prompt
             prompt = self.EMOJI_PROMPT.format(message=message)
 
-            # Get emoji from LLM
-            response = await kai_instance.completion(
-                messages=[ChatMessage(role="user", content=prompt)],
+            # Get emoji from LLM using kai's complete function
+            context = Context(messages=[Message(role="user", content=prompt)])
+
+            response = await complete(
+                provider,
+                context,
                 max_tokens=10,  # We only need one emoji
                 temperature=0.7,  # Some creativity but not too random
             )
 
             # Extract and validate the emoji
-            emoji = response.text.strip()
+            emoji = response.extract_text().strip()
 
-            # Basic validation - should be a single emoji
-            if len(emoji) > 4:  # Most emojis are 1-4 bytes
+            # More robust validation
+            # Check if it's a reasonable length for an emoji (1-2 grapheme clusters)
+            # Most emojis are 1-4 bytes, but some can be longer with modifiers
+            if not emoji or len(emoji) > 8 or len(emoji.encode("utf-8")) > 16:
+                return "💬"  # Default fallback
+
+            # Additional check: ensure it's not plain text
+            if emoji.isalpha() or emoji.isdigit():
                 return "💬"  # Default fallback
 
             return emoji
@@ -100,23 +112,6 @@ class EmojiReactor:
 
                 logger.debug("Failed to get emoji reaction: %s", e)
             return "💬"  # Safe default
-
-    def _get_default_kai(self) -> Kai:
-        """Get a default Kai instance using the castle's primary provider."""
-        if not self._castle:
-            raise ValueError("Castle not set")
-
-        # Get the first available provider
-        models = self._castle.available_models()
-        if not models:
-            raise ValueError("No models available")
-
-        provider_name, _ = models[0]
-        provider = self._castle.get_provider(provider_name)
-        if not provider:
-            raise ValueError(f"Provider {provider_name} not found")
-
-        return Kai(provider=provider)
 
     def _simple_fallback(self, message: str) -> str:
         """Simple rule-based fallback when LLM is not available."""

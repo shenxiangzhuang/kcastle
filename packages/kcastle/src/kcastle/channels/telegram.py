@@ -448,33 +448,24 @@ class TelegramChannel:
                     await self._app.bot.set_message_reaction(
                         chat_id=chat.id,
                         message_id=update.message.message_id,
-                        reaction=[reaction],
+                        reaction=reaction,
                         is_big=False,  # Small reaction
                     )
                 else:
                     # Fallback: Send emoji as a separate message if reactions not supported
-                    logger.debug("Reaction API not available, sending emoji as message")
-                    await self._app.bot.send_message(
-                        chat_id=chat.id,
-                        text=emoji_reaction,
-                        reply_to_message_id=update.message.message_id,
+                    logger.debug(
+                        "Reaction API not available (Bot API < 6.7), skipping emoji reaction"
                     )
+                    # Don't send as a message to avoid cluttering the chat
             except (TelegramError, AttributeError, TypeError) as e:
                 # Log the error type for debugging
                 logger.debug(
-                    "Failed to set emoji reaction (falling back to message): %s - %s",
+                    "Failed to set emoji reaction: %s - %s. "
+                    "This might be due to Bot API version < 6.7 or missing permissions.",
                     type(e).__name__,
                     str(e),
                 )
-                # Fallback to sending as message on any error
-                try:
-                    await self._app.bot.send_message(
-                        chat_id=chat.id,
-                        text=emoji_reaction,
-                        reply_to_message_id=update.message.message_id,
-                    )
-                except Exception as fallback_error:
-                    logger.debug("Fallback emoji send also failed: %s", fallback_error)
+                # Don't fallback to sending as message to avoid cluttering the chat
 
         typing_task = asyncio.create_task(self._send_typing(chat.id))
 
