@@ -319,8 +319,6 @@ class AgentRuntime:
             case ChildError(child_id=cid, error=err):
                 async for event in self._handle_child_error(cid, err):
                     yield event
-            case _:
-                logger.warning("Unknown signal type: %s", type(signal).__name__)
 
     async def _handle_user_input(self, text: str) -> AsyncIterator[AgentEvent]:
         """Handle a user input signal."""
