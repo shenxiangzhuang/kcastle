@@ -10,6 +10,88 @@ from kai import Context, Message, complete
 if TYPE_CHECKING:
     from kcastle.castle import Castle
 
+# Telegram Bot API only allows these emojis for bot reactions.
+# Using any emoji outside this set causes set_message_reaction to fail.
+TELEGRAM_REACTION_EMOJIS: frozenset[str] = frozenset(
+    {
+        "👍",
+        "👎",
+        "❤",
+        "🔥",
+        "🥰",
+        "👏",
+        "😁",
+        "🤔",
+        "🤯",
+        "😱",
+        "🤬",
+        "😢",
+        "🎉",
+        "🤩",
+        "🤮",
+        "💩",
+        "🙏",
+        "👌",
+        "🕊",
+        "🤡",
+        "🥱",
+        "🥴",
+        "😍",
+        "🐳",
+        "❤\u200d🔥",
+        "🌚",
+        "🌭",
+        "💯",
+        "🤣",
+        "⚡",
+        "🍌",
+        "🏆",
+        "💔",
+        "🤨",
+        "😐",
+        "🍓",
+        "🍾",
+        "💋",
+        "🖕",
+        "😈",
+        "😴",
+        "😭",
+        "🤓",
+        "👻",
+        "👨\u200d💻",
+        "👀",
+        "🎃",
+        "🙈",
+        "😇",
+        "😨",
+        "🤝",
+        "✍",
+        "🤗",
+        "🫡",
+        "🎅",
+        "🎄",
+        "☃",
+        "💅",
+        "🤪",
+        "🗿",
+        "🆒",
+        "💘",
+        "🙉",
+        "🦄",
+        "😘",
+        "💊",
+        "🙊",
+        "😎",
+        "👾",
+        "🤷\u200d♂",
+        "🤷",
+        "🤷\u200d♀",
+        "😡",
+    }
+)
+
+DEFAULT_REACTION = "👀"
+
 
 class EmojiReactor:
     """Tool that uses LLM to select appropriate emoji reactions for messages."""
@@ -24,20 +106,19 @@ class EmojiReactor:
         - The topic being discussed
         - Whether it's a question, statement, greeting, etc.
 
-        Available emoji categories:
-        - Greetings: 👋, 🙋‍♂️, 🙋‍♀️
-        - Questions/Curiosity: 🤔, 🧐, ❓, 💭
-        - Happiness/Agreement: 😊, 😄, 👍, ✅, 💯
-        - Excitement: 🎉, 🎊, ✨, 🌟, 🔥
-        - Gratitude: 🙏, 😊, 💝, 🤗
-        - Technical/Code: 💻, ⌨️, 🖥️, 🐛, 🔧, 🚀
-        - Thinking/Analysis: 🧠, 📊, 📈, 🔍
-        - Help/Support: 🤝, 💪, 🆘, 📋
-        - Surprise: 😮, 😲, 🤯, 👀
-        - Sadness/Concern: 😔, 😟, 💔, 😢
-        - General conversation: 💬, 📝, 💡, 🗨️
+        You MUST choose from ONLY these emojis (Telegram allowed reactions):
+        - Questions/Thinking: 🤔, 🤨, 👀
+        - Happiness/Agreement: 😁, 👍, 💯, 😎, 🆒
+        - Excitement: 🎉, 🔥, ⚡, 🤩, ✨ is NOT allowed
+        - Gratitude/Warmth: 🙏, 🤗, ❤, 😘, 🥰
+        - Technical/Code: 👨‍💻, 🤓, 👾
+        - Surprise: 🤯, 😱, 😨
+        - Sadness/Concern: 😢, 😭, 💔
+        - Humor: 🤣, 🤡, 🌚
+        - Greeting/Acknowledgment: 🤗, 👋 is NOT allowed, use 🤗
+        - General: 👀, 👏, 🫡
 
-        Respond with ONLY a single emoji, nothing else.
+        Respond with ONLY a single emoji from the list above, nothing else.
 
         Message: {message}
     """).strip()
@@ -57,10 +138,9 @@ class EmojiReactor:
             session_id: Optional session ID to use the same model as the conversation
 
         Returns:
-            A single emoji character
+            A single emoji character from the Telegram allowed set
         """
         if not self._castle:
-            # Simple fallback logic when no LLM available
             return self._simple_fallback(message)
 
         try:
@@ -68,66 +148,53 @@ class EmojiReactor:
             if session_id:
                 provider_name, model_id = self._castle.get_active_model(session_id)
             else:
-                # Get the first available provider
                 models = self._castle.available_models()
                 if not models:
                     raise ValueError("No models available")
                 provider_name, model_id = models[0]
 
-            # Build the provider instance
             provider = self._castle.model_manager.build_provider(provider_name, model_id)
 
-            # Create the prompt
             prompt = self.EMOJI_PROMPT.format(message=message)
-
-            # Get emoji from LLM using kai's complete function
             context = Context(messages=[Message(role="user", content=prompt)])
 
             response = await complete(
                 provider,
                 context,
-                max_tokens=10,  # We only need one emoji
-                temperature=0.7,  # Some creativity but not too random
+                max_tokens=10,
+                temperature=0.7,
             )
 
-            # Extract and validate the emoji
             emoji = response.extract_text().strip()
 
-            # More robust validation
-            # Check if it's a reasonable length for an emoji (1-2 grapheme clusters)
-            # Most emojis are 1-4 bytes, but some can be longer with modifiers
-            if not emoji or len(emoji) > 8 or len(emoji.encode("utf-8")) > 16:
-                return "💬"  # Default fallback
+            # Validate against Telegram allowed set
+            if emoji in TELEGRAM_REACTION_EMOJIS:
+                return emoji
 
-            # Additional check: ensure it's not plain text
-            if emoji.isalpha() or emoji.isdigit():
-                return "💬"  # Default fallback
-
-            return emoji
+            # LLM returned an invalid emoji — fall back
+            return self._simple_fallback(message)
 
         except Exception as e:
-            # Log error and return default
             if self._castle:
                 from kcastle.log import logger
 
                 logger.debug("Failed to get emoji reaction: %s", e)
-            return "💬"  # Safe default
+            return self._simple_fallback(message)
 
     def _simple_fallback(self, message: str) -> str:
-        """Simple rule-based fallback when LLM is not available."""
+        """Simple rule-based fallback using only Telegram-allowed emojis."""
         message_lower = message.lower()
 
-        # Very basic pattern matching
         if "?" in message or "？" in message:
             return "🤔"
-        elif any(word in message_lower for word in ["thank", "谢谢"]):
-            return "😊"
-        elif any(word in message_lower for word in ["hi", "hello", "你好"]):
-            return "👋"
+        elif any(word in message_lower for word in ["thank", "谢谢", "感谢"]):
+            return "🙏"
+        elif any(word in message_lower for word in ["hi", "hello", "你好", "嗨"]):
+            return "🤗"
         elif "!" in message or "！" in message:
-            return "✨"
+            return "🔥"
         else:
-            return "💬"
+            return DEFAULT_REACTION
 
 
 # Global instance for convenience

@@ -104,7 +104,7 @@ class TelegramChannel:
         # Set castle for emoji reactor
         emoji_reactor.set_castle(castle)
 
-        self._app = Application.builder().token(self._token).build()
+        self._app = Application.builder().token(self._token).concurrent_updates(True).build()
 
         self._app.add_handler(CommandHandler("start", self._cmd_start))
         self._app.add_handler(CommandHandler("new", self._cmd_new))
@@ -426,37 +426,13 @@ class TelegramChannel:
         manager = self._castle.session_manager
         session = manager.get_or_create(sid)
 
-        # React with an emoji based on the message content
-        emoji_reaction = await emoji_reactor.get_reaction(message_text, session_id=sid)
-        if emoji_reaction and self._app is not None:
-            try:
-                # Try to use the reaction API if available
-                # Note: set_message_reaction requires Bot API 6.7+
-                if hasattr(self._app.bot, "set_message_reaction"):
-                    reaction = ReactionTypeEmoji(emoji=emoji_reaction)
-                    await self._app.bot.set_message_reaction(
-                        chat_id=chat.id,
-                        message_id=update.message.message_id,
-                        reaction=reaction,
-                        is_big=False,  # Small reaction
-                    )
-                else:
-                    # Fallback: Send emoji as a separate message if reactions not supported
-                    logger.debug(
-                        "Reaction API not available (Bot API < 6.7), skipping emoji reaction"
-                    )
-                    # Don't send as a message to avoid cluttering the chat
-            except (TelegramError, AttributeError, TypeError) as e:
-                # Log the error type for debugging
-                logger.debug(
-                    "Failed to set emoji reaction: %s - %s. "
-                    "This might be due to Bot API version < 6.7 or missing permissions.",
-                    type(e).__name__,
-                    str(e),
-                )
-                # Don't fallback to sending as message to avoid cluttering the chat
-
+        # Start typing indicator immediately so the user sees feedback
         typing_task = asyncio.create_task(self._send_typing(chat.id))
+
+        # Fire-and-forget emoji reaction (LLM call — don't block the response)
+        asyncio.create_task(
+            self._set_emoji_reaction(chat.id, update.message.message_id, message_text, sid)
+        )
 
         collected_events: list[Any] = []
         try:
@@ -519,6 +495,22 @@ class TelegramChannel:
                 chunk,
                 reply_to_message_id=message.message_id,
             )
+
+    async def _set_emoji_reaction(
+        self, chat_id: int, message_id: int, text: str, session_id: str
+    ) -> None:
+        """Select an emoji via LLM and set it as a message reaction (fire-and-forget)."""
+        try:
+            emoji = await emoji_reactor.get_reaction(text, session_id=session_id)
+            if emoji and self._app is not None and hasattr(self._app.bot, "set_message_reaction"):
+                await self._app.bot.set_message_reaction(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reaction=[ReactionTypeEmoji(emoji=emoji)],
+                    is_big=False,
+                )
+        except (TelegramError, AttributeError, TypeError, OSError) as e:
+            logger.debug("Emoji reaction failed: %s - %s", type(e).__name__, e)
 
     async def _send_typing(self, chat_id: int) -> None:
         """Continuously send 'typing' action until cancelled.
