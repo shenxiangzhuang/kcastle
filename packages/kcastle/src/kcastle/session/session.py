@@ -100,7 +100,7 @@ class Session:
         self._runtime = runtime
         self._trace = trace
         self._trace_manager = trace_manager
-        self._running = False
+        self._running_count = 0
         self._runtime_started = False
 
     @property
@@ -134,7 +134,7 @@ class Session:
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        return self._running_count > 0
 
     @property
     def model_override(self) -> tuple[str, str] | None:
@@ -150,22 +150,23 @@ class Session:
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         """Run the agent with user input, streaming events.
 
+        Multiple concurrent calls are allowed — the runtime's mailbox
+        serialises signal processing, so each caller receives events only
+        for its own signal.
+
         Updates ``last_active_at`` in meta.json on completion.
         """
-        if self._running:
-            raise RuntimeError(f"Session {self.id} is already running")
-
         # Start runtime on first run
         if not self._runtime_started:
             await self._runtime.start()
             self._runtime_started = True
 
-        self._running = True
+        self._running_count += 1
         try:
             async for event in self._runtime.send(UserInput(text=user_input)):
                 yield event
         finally:
-            self._running = False
+            self._running_count -= 1
             self._touch()
 
     def abort(self) -> None:

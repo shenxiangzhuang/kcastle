@@ -79,6 +79,7 @@ class Castle:
         self._skill_tools = skill_tools
         self._otel_provider = otel_provider
         self._otel_log_provider = otel_log_provider
+        self._channel_tasks: list[asyncio.Task[None]] = []
 
     @property
     def config(self) -> CastleConfig:
@@ -275,11 +276,13 @@ class Castle:
             ", ".join(c.name for c in self._channels),
         )
 
-        tasks = [asyncio.create_task(ch.start(self)) for ch in self._channels]
+        self._channel_tasks = [asyncio.create_task(ch.start(self)) for ch in self._channels]
 
         try:
             # Wait for either all channels to finish or shutdown signal
-            _done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            _done, _pending = await asyncio.wait(
+                self._channel_tasks, return_when=asyncio.FIRST_COMPLETED
+            )
         except asyncio.CancelledError:
             pass
         finally:
@@ -305,8 +308,19 @@ class Castle:
         logger.info("Castle shut down")
 
     def _signal_handler(self) -> None:
-        """Handle SIGINT/SIGTERM."""
+        """Handle SIGINT/SIGTERM.
+
+        Only cancel channel tasks — NOT all asyncio tasks.  Libraries like
+        python-telegram-bot manage their own internal tasks (update fetcher,
+        etc.).  Cancelling those externally prevents their ``stop()`` methods
+        from shutting down gracefully, causing spurious CRITICAL logs.
+
+        The shutdown sequence is:
+        1. Cancel channel ``start()`` tasks (they catch ``CancelledError``).
+        2. ``Castle.run()`` falls through to ``finally → shutdown()``.
+        3. ``shutdown()`` calls each channel's ``stop()`` which gracefully
+           stops internal subsystems (updater, polling, etc.).
+        """
         logger.info("Received shutdown signal")
-        for task in asyncio.all_tasks():
-            if task is not asyncio.current_task():
-                task.cancel()
+        for task in self._channel_tasks:
+            task.cancel()
