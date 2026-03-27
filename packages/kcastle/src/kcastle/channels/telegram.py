@@ -27,13 +27,8 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    ReactionTypeEmoji,
 )
-
-# Try to import ReactionType if available (Bot API 6.7+)
-try:
-    from telegram import ReactionTypeEmoji
-except ImportError:
-    ReactionTypeEmoji = None
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -438,13 +433,7 @@ class TelegramChannel:
                 # Try to use the reaction API if available
                 # Note: set_message_reaction requires Bot API 6.7+
                 if hasattr(self._app.bot, "set_message_reaction"):
-                    # Try using ReactionTypeEmoji if available
-                    if ReactionTypeEmoji is not None:
-                        reaction = ReactionTypeEmoji(emoji=emoji_reaction)
-                    else:
-                        # Fallback to string format
-                        reaction = emoji_reaction
-
+                    reaction = ReactionTypeEmoji(emoji=emoji_reaction)
                     await self._app.bot.set_message_reaction(
                         chat_id=chat.id,
                         message_id=update.message.message_id,
