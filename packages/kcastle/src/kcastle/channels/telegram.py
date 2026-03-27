@@ -28,6 +28,12 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+
+# Try to import ReactionType if available (Bot API 6.7+)
+try:
+    from telegram import ReactionTypeEmoji
+except ImportError:
+    ReactionTypeEmoji = None
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -40,6 +46,7 @@ from telegram.ext import (
 from telegramify_markdown import markdownify  # pyright: ignore[reportMissingTypeStubs]
 
 from kcastle.log import logger
+from kcastle.tools import emoji_reactor
 
 if TYPE_CHECKING:
     from kcastle.castle import Castle
@@ -98,6 +105,9 @@ class TelegramChannel:
     async def start(self, castle: Castle) -> None:
         """Start the Telegram bot (long-polling)."""
         self._castle = castle
+
+        # Set castle for emoji reactor
+        emoji_reactor.set_castle(castle)
 
         self._app = Application.builder().token(self._token).build()
 
@@ -421,6 +431,51 @@ class TelegramChannel:
         manager = self._castle.session_manager
         session = manager.get_or_create(sid)
 
+        # React with an emoji based on the message content
+        emoji_reaction = await emoji_reactor.get_reaction(message_text, session_id=sid)
+        if emoji_reaction and self._app is not None:
+            try:
+                # Try to use the reaction API if available
+                # Note: set_message_reaction requires Bot API 6.7+
+                if hasattr(self._app.bot, "set_message_reaction"):
+                    # Try using ReactionTypeEmoji if available
+                    if ReactionTypeEmoji is not None:
+                        reaction = ReactionTypeEmoji(emoji=emoji_reaction)
+                    else:
+                        # Fallback to string format
+                        reaction = emoji_reaction
+
+                    await self._app.bot.set_message_reaction(
+                        chat_id=chat.id,
+                        message_id=update.message.message_id,
+                        reaction=[reaction],
+                        is_big=False,  # Small reaction
+                    )
+                else:
+                    # Fallback: Send emoji as a separate message if reactions not supported
+                    logger.debug("Reaction API not available, sending emoji as message")
+                    await self._app.bot.send_message(
+                        chat_id=chat.id,
+                        text=emoji_reaction,
+                        reply_to_message_id=update.message.message_id,
+                    )
+            except (TelegramError, AttributeError, TypeError) as e:
+                # Log the error type for debugging
+                logger.debug(
+                    "Failed to set emoji reaction (falling back to message): %s - %s",
+                    type(e).__name__,
+                    str(e),
+                )
+                # Fallback to sending as message on any error
+                try:
+                    await self._app.bot.send_message(
+                        chat_id=chat.id,
+                        text=emoji_reaction,
+                        reply_to_message_id=update.message.message_id,
+                    )
+                except Exception as fallback_error:
+                    logger.debug("Fallback emoji send also failed: %s", fallback_error)
+
         typing_task = asyncio.create_task(self._send_typing(chat.id))
 
         collected_events: list[Any] = []
@@ -437,20 +492,24 @@ class TelegramChannel:
                 await update.message.reply_text(
                     "\u26a0\ufe0f The AI provider blocked this request due to content moderation. "
                     "This may happen with certain topics or conversation contexts. "
-                    "Try rephrasing your message or starting a new conversation with /new."
+                    "Try rephrasing your message or starting a new conversation with /new.",
+                    reply_to_message_id=update.message.message_id,
                 )
             else:
-                await update.message.reply_text(f"\u274c Error: {e}")
+                await update.message.reply_text(
+                    f"\u274c Error: {e}",
+                    reply_to_message_id=update.message.message_id,
+                )
             return
         finally:
             typing_task.cancel()
 
         response = _render_events_to_text(collected_events)
         if response:
-            await self._send_markdown(update.message, response)
+            await self._send_markdown_reply(update.message, response)
 
-    async def _send_markdown(self, message: Any, text: str) -> None:
-        """Send *text* as MarkdownV2 via ``telegramify-markdown``.
+    async def _send_markdown_reply(self, message: Any, text: str) -> None:
+        """Send *text* as MarkdownV2 via ``telegramify-markdown``, replying to the original message.
 
         Falls back to plain text if the library is unavailable or
         the conversion / send fails.
@@ -465,14 +524,21 @@ class TelegramChannel:
             try:
                 for i in range(0, len(converted), 4096):
                     chunk = converted[i : i + 4096]
-                    await message.reply_text(chunk, parse_mode="MarkdownV2")
+                    await message.reply_text(
+                        chunk,
+                        parse_mode="MarkdownV2",
+                        reply_to_message_id=message.message_id,
+                    )
                 return
             except (TelegramError, OSError, RuntimeError, ValueError):
                 logger.debug("MarkdownV2 send failed — falling back to plain text", exc_info=True)
 
         for i in range(0, len(text), 4096):
             chunk = text[i : i + 4096]
-            await message.reply_text(chunk)
+            await message.reply_text(
+                chunk,
+                reply_to_message_id=message.message_id,
+            )
 
     async def _send_typing(self, chat_id: int) -> None:
         """Continuously send 'typing' action until cancelled.
