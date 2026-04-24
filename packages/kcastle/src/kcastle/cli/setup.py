@@ -32,7 +32,7 @@ _VENDOR_PRESETS: list[VendorPreset] = [
         display_name="DeepSeek",
         env_var="DEEPSEEK_API_KEY",
         provider="deepseek-openai",
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
     ),
     VendorPreset(
         display_name="MiniMax",

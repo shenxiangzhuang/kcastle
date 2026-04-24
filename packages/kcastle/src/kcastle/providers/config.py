@@ -35,7 +35,7 @@ class ModelConfig:
     """Configuration for a single model within a provider."""
 
     id: str
-    """Model identifier (e.g. ``deepseek-chat``, ``gpt-4o``)."""
+    """Model identifier (e.g. ``deepseek-v4-flash``, ``gpt-4o``)."""
 
     active: bool = True
     """Whether this model is available for use."""
