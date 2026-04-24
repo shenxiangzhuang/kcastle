@@ -21,12 +21,12 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -43,18 +43,18 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
   deepseek-anthropic:
     api_key: sk-test
     base_url: https://api.deepseek.com/anthropic
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
 
 default:
   provider: deepseek-anthropic
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -84,7 +84,7 @@ providers:
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -105,12 +105,12 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -127,23 +127,23 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
-      deepseek-reasoner:
+      deepseek-v4-pro:
         active: true
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
     cfg = load_config(home=tmp_path)
     provider = cfg.providers["deepseek-openai"]
-    provider_config = provider.to_provider_config("deepseek-reasoner")
+    provider_config = provider.to_provider_config("deepseek-v4-pro")
 
     assert provider_config.provider == "deepseek-openai"
-    assert provider_config.model == "deepseek-reasoner"
+    assert provider_config.model == "deepseek-v4-pro"
     assert provider_config.base_url == "https://api.deepseek.com"
 
 
@@ -156,18 +156,18 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
   deepseek-anthropic:
     api_key: sk-test
     base_url: https://api.deepseek.com/anthropic
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
 
 default:
   provider: deepseek-anthropic
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -176,7 +176,7 @@ default:
     active_config = cfg.active_provider_config()
     assert active_config.provider == "deepseek-anthropic"
 
-    explicit_config = cfg.provider_config("deepseek-openai", "deepseek-chat")
+    explicit_config = cfg.provider_config("deepseek-openai", "deepseek-v4-flash")
     assert explicit_config.provider == "deepseek-openai"
 
 
@@ -189,12 +189,12 @@ providers:
     api_key: sk-test
     base_url: https://api.deepseek.com
     models:
-      deepseek-chat:
+      deepseek-v4-flash:
         active: true
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -214,7 +214,7 @@ providers:
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
 
@@ -236,7 +236,7 @@ providers:
 
 default:
   provider: deepseek-openai
-  model: deepseek-chat
+  model: deepseek-v4-flash
 """,
     )
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel.example:4317")

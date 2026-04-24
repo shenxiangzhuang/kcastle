@@ -10,7 +10,7 @@ from kcastle.providers import ProviderConfig
 def test_provider_config_name_uses_lower_provider() -> None:
     cfg = ProviderConfig(
         provider="DeepSeek-OpenAI",
-        model="deepseek-chat",
+        model="deepseek-v4-flash",
     )
     assert cfg.name == "deepseek-openai"
 

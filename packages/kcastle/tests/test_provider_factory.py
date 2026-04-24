@@ -12,13 +12,13 @@ def test_create_provider_openai_completions() -> None:
     provider = create_provider(
         ProviderConfig(
             provider="deepseek-openai",
-            model="deepseek-chat",
+            model="deepseek-v4-flash",
             api_key="test-key",
             base_url="https://api.deepseek.com",
         )
     )
     assert isinstance(provider, DeepseekOpenAI)
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-v4-flash"
 
 
 def test_create_provider_openai_responses() -> None:

@@ -26,8 +26,8 @@ def builtin_provider_dicts() -> dict[str, dict[str, Any]]:
     field; missing fields fall back to these defaults.
     """
     ds_models: dict[str, object] = {
-        "deepseek-chat": {"active": True},
-        "deepseek-reasoner": {"active": True},
+        "deepseek-v4-flash": {"active": True},
+        "deepseek-v4-pro": {"active": True},
     }
     mm_models: dict[str, object] = {
         "MiniMax-M2.5": {"active": True},
