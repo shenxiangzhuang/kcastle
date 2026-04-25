@@ -13,6 +13,7 @@ from kai.providers import ProviderBase
 from kai.types.stream import StreamEvent
 
 from kcastle.castle import Castle
+from kcastle.channels.telegram import TelegramChannel
 from kcastle.config import CastleConfig, ChannelConfig
 from kcastle.providers import ModelConfig, ProviderConfig, ProviderEntry
 from kcastle.session.manager import SessionManager
@@ -89,6 +90,20 @@ def _make_castle(tmp_path: Path) -> Castle:
         system_prompt="",
         skill_tools=[],
     )
+
+
+def test_daemon_builds_telegram_channel_from_token_even_when_disabled(tmp_path: Path) -> None:
+    config = replace(_build_config(tmp_path), telegram_token="test-token")
+
+    channels = Castle._build_channels(
+        config,
+        session_id=None,
+        continue_latest=False,
+        daemon=True,
+    )
+
+    assert len(channels) == 1
+    assert isinstance(channels[0], TelegramChannel)
 
 
 def test_switch_model_requires_session_id(tmp_path: Path) -> None:

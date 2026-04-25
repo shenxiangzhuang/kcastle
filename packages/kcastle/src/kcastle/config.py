@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -197,14 +197,6 @@ def _parse_channel(
     return ChannelConfig(enabled=enabled, options=options)
 
 
-def _has_channel_section(data: dict[str, Any], channel: str) -> bool:
-    """Return whether a channel was explicitly configured."""
-    channels_raw: object = data.get("channels")
-    if not isinstance(channels_raw, dict):
-        return False
-    return channel in channels_raw
-
-
 def config_file_path(home: Path | None = None) -> Path:
     """Return the path to the configuration file."""
     return _resolve_home(home) / _CONFIG_FILENAME
@@ -254,8 +246,6 @@ def load_config(home: Path | None = None) -> CastleConfig:
     tg_token_opt: object = tg_cfg.options.get("token")
     tg_token = str(tg_token_opt) if tg_token_opt else ""
     tg_token = os.environ.get("KCASTLE_TG_TOKEN", tg_token) or tg_token
-    if tg_token and not _has_channel_section(data, "telegram"):
-        tg_cfg = replace(tg_cfg, enabled=True)
 
     return CastleConfig(
         home=home,

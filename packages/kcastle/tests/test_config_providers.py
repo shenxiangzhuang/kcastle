@@ -246,7 +246,7 @@ default:
     assert cfg.otel_endpoint == "http://otel.example:4317"
 
 
-def test_load_config_enables_telegram_when_token_env_is_set(
+def test_load_config_reads_telegram_token_env_without_enabling_channel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,11 +262,11 @@ default:
 
     cfg = load_config(home=tmp_path)
 
-    assert cfg.telegram.enabled
+    assert not cfg.telegram.enabled
     assert cfg.telegram_token == "test-token"
 
 
-def test_load_config_respects_explicit_telegram_disabled_with_token_env(
+def test_load_config_reads_telegram_token_env_when_explicitly_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
