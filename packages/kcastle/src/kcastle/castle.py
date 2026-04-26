@@ -230,7 +230,7 @@ class Castle:
         channels: list[Channel] = []
         if config.cli.enabled and not daemon:
             channels.append(CLIChannel(session_id=session_id, continue_latest=continue_latest))
-        if config.telegram.enabled and config.telegram_token and daemon:
+        if config.telegram_token and daemon:
             bot_username = config.telegram.options.get("bot_username", "")
             channels.append(
                 TelegramChannel(token=config.telegram_token, bot_username=str(bot_username))

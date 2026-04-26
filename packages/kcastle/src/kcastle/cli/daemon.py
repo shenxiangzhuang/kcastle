@@ -85,17 +85,12 @@ def _check_daemon_config(home: Path) -> str | None:
     except ValueError as exc:
         return str(exc)
 
-    if not (config.telegram.enabled and config.telegram_token):
+    if not config.telegram_token:
         cfg = home / "config.yaml"
         return (
             "No daemon channels configured\n"
-            f"  Enable Telegram in {_DIM}{cfg}{_RESET}:\n"
-            f"    {_DIM}channels:\n"
-            f"      telegram:\n"
-            f"        enabled: true\n"
-            f"        bot_username: YOUR_BOT{_RESET}\n"
-            f"  Set token via {_DIM}KCASTLE_TG_TOKEN{_RESET} env var"
-            f" or {_DIM}channels.telegram.token{_RESET} in config"
+            f"  Set token via {_DIM}KCASTLE_TG_TOKEN{_RESET} env var or"
+            f" {_DIM}channels.telegram.token{_RESET} in {_DIM}{cfg}{_RESET}."
         )
 
     return None

@@ -103,8 +103,12 @@ def main() -> None:
             daemon_status,
             daemon_stop,
         )
+        from .setup import needs_setup, run_setup
 
         resolved_home = home or _DEFAULT_HOME
+        if args.command in ("start", "restart") and needs_setup(resolved_home):
+            run_setup(resolved_home)
+
         if args.command == "start":
             daemon_start(resolved_home, verbose=args.verbose, debug=args.debug)
         elif args.command == "stop":

@@ -244,3 +244,46 @@ default:
     cfg = load_config(home=tmp_path)
 
     assert cfg.otel_endpoint == "http://otel.example:4317"
+
+
+def test_load_config_reads_telegram_token_env_without_enabling_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_config(
+        tmp_path,
+        """
+default:
+  provider: deepseek-openai
+  model: deepseek-v4-flash
+""",
+    )
+    monkeypatch.setenv("KCASTLE_TG_TOKEN", "test-token")
+
+    cfg = load_config(home=tmp_path)
+
+    assert not cfg.telegram.enabled
+    assert cfg.telegram_token == "test-token"
+
+
+def test_load_config_reads_telegram_token_env_when_explicitly_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_config(
+        tmp_path,
+        """
+default:
+  provider: deepseek-openai
+  model: deepseek-v4-flash
+channels:
+  telegram:
+    enabled: false
+""",
+    )
+    monkeypatch.setenv("KCASTLE_TG_TOKEN", "test-token")
+
+    cfg = load_config(home=tmp_path)
+
+    assert not cfg.telegram.enabled
+    assert cfg.telegram_token == "test-token"
