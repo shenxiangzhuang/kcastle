@@ -133,6 +133,9 @@ async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
         await pilot.press("escape")
 
         await app.resume(resumed)
+        transcript = app.query_one(Transcript)
+        assert transcript.query_one(".banner", Static) is not None
+        assert "earlier message" in transcript.query_one(".session-history", Markdown).source
         entry = agent.state.append_user("new message")
         assert agent.commit is not None
         await agent.commit(entry)

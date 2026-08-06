@@ -40,6 +40,8 @@ the OpenAI SDK directly instead of maintaining a provider abstraction.
 - Python 3.12+ and modern syntax.
 - `asyncio`, OpenAI Responses API, Pydantic, Textual.
 - Ruff line length 100; ty; pytest + pytest-asyncio; prek.
+- For bug fixes, first add and run a focused regression test that reproduces the failure; then
+  implement the fix and rerun that test plus the relevant package checks and tests.
 - Prefer a small concrete API over speculative extension points.
 - Conventional Commits: `<type>(<scope>): <subject>`.
 - Versions use minor bumps only; patch is always `0`.

@@ -85,7 +85,7 @@ class Transcript(VerticalScroll):
     async def load(self, state: State) -> None:
         """Replace the projection with the readable messages from a session."""
 
-        await self.remove_children()
+        await self.query(".entry, .session-history").remove()
         self._assistant = None
         transcript: list[str] = []
         for item in state.items():
