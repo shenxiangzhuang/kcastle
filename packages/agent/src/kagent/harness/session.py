@@ -79,10 +79,10 @@ class Session:
     async def commit(self) -> None:
         path = self.info.path
         async with self._lock:
-            records = self.state.records()
-            if len(records) < self._persisted_entries:
+            entry_count = len(self.state)
+            if entry_count < self._persisted_entries:
                 raise SessionError("Cannot commit state whose persisted history was removed")
-            pending = records[self._persisted_entries :]
+            pending = self.state.records(self._persisted_entries)
             if not pending:
                 return
             if self._persisted_entries == 0:
@@ -96,7 +96,7 @@ class Session:
                 await asyncio.to_thread(self._append, path, value)
             except OSError as error:
                 raise SessionError(f"Cannot commit session {path}: {error}") from error
-            self._persisted_entries = len(records)
+            self._persisted_entries = entry_count
 
     def _initial_title(self) -> str:
         for entry in self.state.entries:

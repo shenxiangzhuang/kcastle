@@ -48,6 +48,9 @@ class State:
     def __init__(self, entries: Iterable[StateEntry] = ()) -> None:
         self._entries = deepcopy(list(entries))
 
+    def __len__(self) -> int:
+        return len(self._entries)
+
     @property
     def entries(self) -> tuple[StateEntry, ...]:
         """A snapshot of the complete history."""
@@ -120,11 +123,11 @@ class State:
             None,
         )
 
-    def records(self) -> list[dict[str, object]]:
+    def records(self, start: int = 0) -> list[dict[str, object]]:
         """Return the plain-data records used by persistence adapters."""
 
         records: list[dict[str, object]] = []
-        for entry in self._entries:
+        for entry in self._entries[start:]:
             match entry:
                 case ItemEntry(id=entry_id, items=items):
                     records.append(

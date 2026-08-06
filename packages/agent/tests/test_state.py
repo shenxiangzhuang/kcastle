@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import cast
 
 import pytest
@@ -35,6 +37,28 @@ def test_state_records_are_plain_data() -> None:
 
     items = cast(list[dict[str, object]], state.records()[0]["items"])
     assert items[0]["content"] == "你好"
+
+
+def test_state_records_only_copy_the_requested_suffix() -> None:
+    class CopyProbe:
+        copies = 0
+
+        def __deepcopy__(self, _: object) -> CopyProbe:
+            self.copies += 1
+            return self
+
+    first = CopyProbe()
+    second = CopyProbe()
+    state = State()
+    state.append_items([{"value": first}])
+    state.append_items([{"value": second}])
+    first.copies = second.copies = 0
+
+    records = state.records(1)
+
+    assert len(records) == 1
+    assert first.copies == 0
+    assert second.copies == 1
 
 
 def test_state_history_is_append_only() -> None:
