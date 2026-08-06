@@ -15,9 +15,11 @@
 
 1. Create `release/<version>` from the default branch and update every project and internal
    dependency version consistently. Versions use minor bumps only; patch is always `0`.
-2. Open a pull request, wait for all CI checks to pass, and merge it.
-3. Publish a GitHub Release from the merged commit using tag `v<version>` to trigger the release
-   workflow. Mark versions containing `a` or `b` (alpha or beta) as pre-releases.
+2. Open a pull request and wait for all CI checks to pass. The pull request author must merge it;
+   agents and automation must not merge release pull requests.
+3. Only after confirming the pull request was merged, publish a GitHub Release from the merged
+   commit using tag `v<version>` to trigger the release workflow. Mark versions containing `a` or
+   `b` (alpha or beta) as pre-releases.
 
 ## Architecture
 
