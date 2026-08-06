@@ -1,0 +1,21 @@
+[project]
+name = "kcastle"
+version = "0.1.0a0"
+description = "Textual interface for kcastle-agent"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "kcastle-agent==0.1.0a0",
+    "textual>=8.2.0,<9.0.0",
+]
+
+[project.scripts]
+kcastle = "ktui.cli:main"
+k = "ktui.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.2,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ktui"

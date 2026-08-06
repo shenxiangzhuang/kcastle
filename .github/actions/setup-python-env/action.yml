@@ -10,16 +10,17 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Set up Python ${{ inputs.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ inputs.python-version }}
-
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@v9.0.0
       with:
         enable-cache: true
+        cache-dependency-glob: "uv.lock"
+        cache-suffix: "python-${{ inputs.python-version }}"
+
+    - name: Set up Python ${{ inputs.python-version }}
+      run: uv python install ${{ inputs.python-version }}
+      shell: bash
 
     - name: Install dependencies
-      run: uv sync --frozen
+      run: uv sync --frozen --python ${{ inputs.python-version }}
       shell: bash
