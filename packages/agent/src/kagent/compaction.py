@@ -9,7 +9,14 @@ from dataclasses import dataclass
 from openai import AsyncOpenAI
 from openai.types.responses import FunctionToolParam
 
-from kagent.state import CompactionEntry, Item, ItemEntry, State, estimate_tokens
+from kagent.state import (
+    CompactionEntry,
+    Item,
+    ItemEntry,
+    ResponseMetadata,
+    State,
+    estimate_tokens,
+)
 
 _SUMMARY_INSTRUCTIONS = """Summarize earlier agent work for continuation.
 
@@ -37,20 +44,17 @@ class CompactionConfig:
             raise ValueError("keep_recent_tokens must be positive")
 
 
-def context_tokens(state: State, *, instructions: str, tools: Sequence[FunctionToolParam]) -> int:
-    return estimate_tokens({"instructions": instructions, "tools": tools, "input": state.context()})
+def context_tokens(
+    context: list[Item], *, instructions: str, tools: Sequence[FunctionToolParam]
+) -> int:
+    return estimate_tokens({"instructions": instructions, "tools": tools, "input": context})
 
 
 def needs_compaction(
-    state: State,
+    tokens: int,
     config: CompactionConfig,
-    *,
-    instructions: str,
-    tools: Sequence[FunctionToolParam],
 ) -> bool:
-    return context_tokens(state, instructions=instructions, tools=tools) > (
-        config.context_window - config.reserve_tokens
-    )
+    return tokens > config.context_window - config.reserve_tokens
 
 
 async def compact_state(
@@ -59,8 +63,7 @@ async def compact_state(
     model: str,
     state: State,
     config: CompactionConfig,
-    instructions: str,
-    tools: Sequence[FunctionToolParam],
+    tokens_before: int,
     custom_instructions: str | None = None,
 ) -> CompactionEntry:
     batches = state.active_batches()
@@ -69,7 +72,6 @@ async def compact_state(
         raise ValueError("not enough safely compactable history")
 
     before, kept = batches[:cut], batches[cut:]
-    tokens_before = context_tokens(state, instructions=instructions, tools=tools)
     previous = state.latest_compaction
     prompt = _summary_prompt(before, previous.summary if previous else None, custom_instructions)
     response = await client.responses.create(
@@ -86,6 +88,11 @@ async def compact_state(
         summary=summary,
         first_kept_id=kept[0].id,
         tokens_before=tokens_before,
+        response=ResponseMetadata(
+            id=response.id,
+            model=response.model,
+            usage=response.usage,
+        ),
     )
     return entry
 

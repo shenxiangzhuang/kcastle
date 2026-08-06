@@ -23,7 +23,7 @@ from kagent.harness import (
     Tool,
     ToolRuntime,
 )
-from kagent.state import CompactionEntry, ItemEntry, State
+from kagent.state import CompactionEntry, ItemEntry, ResponseMetadata, State
 
 __all__ = [
     "Agent",
@@ -38,6 +38,7 @@ __all__ = [
     "ItemEntry",
     "MaxTurnsExceeded",
     "ModelStarted",
+    "ResponseMetadata",
     "RunFinished",
     "Session",
     "SessionError",

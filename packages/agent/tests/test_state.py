@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
-from kagent import ItemEntry, State
+from kagent import CompactionEntry, ItemEntry, State
 
 
 def test_state_round_trip_and_compacted_context() -> None:
@@ -13,7 +11,7 @@ def test_state_round_trip_and_compacted_context() -> None:
     state.append_compaction(summary="what happened", first_kept_id=kept.id, tokens_before=42)
     state.append_items([{"role": "user", "content": "new"}])
 
-    restored = State.from_records(state.records())
+    restored = State(state.entries)
 
     assert restored.entries == state.entries
     assert old.items[0] not in restored.context()
@@ -22,43 +20,24 @@ def test_state_round_trip_and_compacted_context() -> None:
     assert "what happened" in str(restored.context()[0]["content"])
 
 
-@pytest.mark.parametrize(
-    "value",
-    [{}, [{"type": "unknown", "id": 1}], [{"type": "items", "id": "1"}]],
-)
-def test_state_rejects_invalid_records(value: object) -> None:
+def test_state_restore_rejects_nonconsecutive_ids() -> None:
     with pytest.raises(ValueError):
-        State.from_records(value)
+        State.restore([ItemEntry(2, ({"role": "user", "content": "bad"},))])
 
 
-def test_state_records_are_plain_data() -> None:
+def test_state_restore_rejects_unknown_compaction_boundary() -> None:
+    with pytest.raises(ValueError):
+        State.restore([CompactionEntry(1, "bad", 99, 1)])
+
+
+def test_state_items_are_incremental_defensive_snapshots() -> None:
     state = State()
     state.append_items([{"role": "user", "content": "你好"}])
 
-    items = cast(list[dict[str, object]], state.records()[0]["items"])
-    assert items[0]["content"] == "你好"
+    item = next(state.items())
+    item["content"] = "changed"
 
-
-def test_state_records_only_copy_the_requested_suffix() -> None:
-    class CopyProbe:
-        copies = 0
-
-        def __deepcopy__(self, _: object) -> CopyProbe:
-            self.copies += 1
-            return self
-
-    first = CopyProbe()
-    second = CopyProbe()
-    state = State()
-    state.append_items([{"value": first}])
-    state.append_items([{"value": second}])
-    first.copies = second.copies = 0
-
-    records = state.records(1)
-
-    assert len(records) == 1
-    assert first.copies == 0
-    assert second.copies == 1
+    assert next(state.items())["content"] == "你好"
 
 
 def test_state_history_is_append_only() -> None:

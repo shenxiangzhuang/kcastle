@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
+
+from openai.types.responses import ResponseUsage
 
 type Item = dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseMetadata:
+    """Responses API metadata attached to one assistant output batch."""
+
+    id: str
+    model: str
+    usage: ResponseUsage | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +27,7 @@ class ItemEntry:
 
     id: int
     items: tuple[Item, ...]
+    response: ResponseMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +38,7 @@ class CompactionEntry:
     summary: str
     first_kept_id: int
     tokens_before: int
+    response: ResponseMetadata | None = None
 
 
 type StateEntry = ItemEntry | CompactionEntry
@@ -44,9 +56,25 @@ class State:
     """Full append-only history; ``context()`` returns the compacted projection."""
 
     _entries: list[StateEntry]
+    _active_start: int
+    _item_indexes: dict[int, int]
+    _latest_compaction: CompactionEntry | None
+    _latest_response: ResponseMetadata | None
 
     def __init__(self, entries: Iterable[StateEntry] = ()) -> None:
         self._entries = deepcopy(list(entries))
+        self._validate_history()
+        self._reindex()
+
+    @classmethod
+    def restore(cls, entries: Sequence[StateEntry]) -> State:
+        """Restore freshly decoded entries without copying their payloads again."""
+
+        state = cls()
+        state._entries = list(entries)
+        state._validate_history()
+        state._reindex()
+        return state
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -60,11 +88,19 @@ class State:
     def append_user(self, text: str) -> ItemEntry:
         return self.append_items([{"role": "user", "content": text}])
 
-    def append_items(self, items: list[Item]) -> ItemEntry:
+    def append_items(
+        self,
+        items: list[Item],
+        *,
+        response: ResponseMetadata | None = None,
+    ) -> ItemEntry:
         if not items:
             raise ValueError("items must not be empty")
-        entry = ItemEntry(self._next_id(), tuple(deepcopy(items)))
+        entry = ItemEntry(self._next_id(), tuple(deepcopy(items)), deepcopy(response))
+        self._item_indexes[entry.id] = len(self._entries)
         self._entries.append(entry)
+        if entry.response is not None:
+            self._latest_response = entry.response
         return deepcopy(entry)
 
     def append_compaction(
@@ -73,23 +109,33 @@ class State:
         summary: str,
         first_kept_id: int,
         tokens_before: int,
+        response: ResponseMetadata | None = None,
     ) -> CompactionEntry:
-        if not any(
-            isinstance(entry, ItemEntry) and entry.id == first_kept_id for entry in self._entries
-        ):
+        active_start = self._item_indexes.get(first_kept_id)
+        if active_start is None:
             raise ValueError(f"unknown first_kept_id: {first_kept_id}")
         entry = CompactionEntry(
             id=self._next_id(),
             summary=summary,
             first_kept_id=first_kept_id,
             tokens_before=tokens_before,
+            response=deepcopy(response),
         )
         self._entries.append(entry)
+        self._latest_compaction = entry
+        self._active_start = active_start
         return entry
 
+    def rollback(self, entry_id: int) -> None:
+        """Remove only an uncommitted tail entry after persistence fails."""
+
+        if not self._entries or self._entries[-1].id != entry_id:
+            raise ValueError(f"cannot roll back non-tail entry: {entry_id}")
+        self._entries.pop()
+        self._reindex()
+
     def context(self) -> list[Item]:
-        latest = self.latest_compaction
-        batches = self.active_batches()
+        latest = self._latest_compaction
         items: list[Item] = []
         if latest is not None:
             items.append(
@@ -103,103 +149,73 @@ class State:
                     ),
                 }
             )
-        for batch in batches:
-            items.extend(batch.items)
+        for entry in self._entries[self._active_start :]:
+            if isinstance(entry, ItemEntry):
+                items.extend(deepcopy(entry.items))
         return items
 
     def active_batches(self) -> list[ItemEntry]:
-        latest = self.latest_compaction
-        boundary = latest.first_kept_id if latest is not None else 0
         return [
             deepcopy(entry)
-            for entry in self._entries
-            if isinstance(entry, ItemEntry) and entry.id >= boundary
+            for entry in self._entries[self._active_start :]
+            if isinstance(entry, ItemEntry)
         ]
+
+    def items(self) -> Iterator[Item]:
+        """Yield defensive item snapshots without copying the complete history at once."""
+
+        for entry in self._entries:
+            if isinstance(entry, ItemEntry):
+                yield from deepcopy(entry.items)
+
+    def unresolved_tool_call_ids(self) -> tuple[str, ...]:
+        """Return active function calls that have no corresponding output."""
+
+        pending: dict[str, None] = {}
+        for entry in self._entries[self._active_start :]:
+            if not isinstance(entry, ItemEntry):
+                continue
+            for item in entry.items:
+                call_id = item.get("call_id")
+                if not isinstance(call_id, str):
+                    continue
+                if item.get("type") == "function_call":
+                    pending[call_id] = None
+                elif item.get("type") == "function_call_output":
+                    pending.pop(call_id, None)
+        return tuple(pending)
 
     @property
     def latest_compaction(self) -> CompactionEntry | None:
-        return next(
-            (entry for entry in reversed(self._entries) if isinstance(entry, CompactionEntry)),
-            None,
-        )
+        return self._latest_compaction
 
-    def records(self, start: int = 0) -> list[dict[str, object]]:
-        """Return the plain-data records used by persistence adapters."""
+    @property
+    def latest_response(self) -> ResponseMetadata | None:
+        return deepcopy(self._latest_response)
 
-        records: list[dict[str, object]] = []
-        for entry in self._entries[start:]:
-            match entry:
-                case ItemEntry(id=entry_id, items=items):
-                    records.append(
-                        {"type": "items", "id": entry_id, "items": deepcopy(list(items))}
-                    )
-                case CompactionEntry(
-                    id=entry_id,
-                    summary=summary,
-                    first_kept_id=first_kept_id,
-                    tokens_before=tokens_before,
-                ):
-                    records.append(
-                        {
-                            "type": "compaction",
-                            "id": entry_id,
-                            "summary": summary,
-                            "first_kept_id": first_kept_id,
-                            "tokens_before": tokens_before,
-                        }
-                    )
-        return records
+    def _validate_history(self) -> None:
+        if [entry.id for entry in self._entries] != list(range(1, len(self._entries) + 1)):
+            raise ValueError("state entry IDs must be consecutive from 1")
+        seen_items: set[int] = set()
+        for entry in self._entries:
+            if isinstance(entry, ItemEntry):
+                seen_items.add(entry.id)
+            elif entry.first_kept_id not in seen_items:
+                raise ValueError(f"unknown first_kept_id: {entry.first_kept_id}")
 
-    @classmethod
-    def from_records(cls, raw: object) -> State:
-        """Restore state from plain-data persistence records."""
-
-        def required_int(record: dict[str, object], key: str) -> int:
-            field = record.get(key)
-            if not isinstance(field, int) or isinstance(field, bool):
-                raise ValueError(f"{key} must be an integer")
-            return field
-
-        if not isinstance(raw, list):
-            raise ValueError("state records must be a list")
-
-        entries: list[StateEntry] = []
-        for untyped_record in cast(list[object], raw):
-            if not isinstance(untyped_record, dict):
-                raise ValueError("state entries must be objects")
-            record = cast(dict[str, object], untyped_record)
-            match record.get("type"):
-                case "items":
-                    raw_items = record.get("items")
-                    if not isinstance(raw_items, list) or not all(
-                        isinstance(item, dict) for item in cast(list[object], raw_items)
-                    ):
-                        raise ValueError("items entry contains invalid items")
-                    entries.append(
-                        ItemEntry(
-                            id=required_int(record, "id"),
-                            items=tuple(cast(Item, item) for item in cast(list[object], raw_items)),
-                        )
-                    )
-                case "compaction":
-                    summary = record.get("summary")
-                    if not isinstance(summary, str):
-                        raise ValueError("compaction summary must be a string")
-                    entries.append(
-                        CompactionEntry(
-                            id=required_int(record, "id"),
-                            summary=summary,
-                            first_kept_id=required_int(record, "first_kept_id"),
-                            tokens_before=required_int(record, "tokens_before"),
-                        )
-                    )
-                case other:
-                    raise ValueError(f"unknown state entry type: {other!r}")
-
-        ids = [entry.id for entry in entries]
-        if ids != sorted(set(ids)):
-            raise ValueError("state entry IDs must be unique and increasing")
-        return cls(entries)
+    def _reindex(self) -> None:
+        self._active_start = 0
+        self._item_indexes = {}
+        self._latest_compaction = None
+        self._latest_response = None
+        for index, entry in enumerate(self._entries):
+            if isinstance(entry, ItemEntry):
+                self._item_indexes[entry.id] = index
+                if entry.response is not None:
+                    self._latest_response = entry.response
+            else:
+                self._latest_compaction = entry
+                self._active_start = self._item_indexes[entry.first_kept_id]
 
     def _next_id(self) -> int:
         return self._entries[-1].id + 1 if self._entries else 1

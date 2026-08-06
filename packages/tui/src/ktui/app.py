@@ -12,7 +12,6 @@ from kagent import (
     CompactionConfig,
     CompactionFinished,
     CompactionStarted,
-    ItemEntry,
     ModelStarted,
     RunFinished,
     Session,
@@ -26,7 +25,7 @@ from kagent import (
     ToolStarted,
 )
 from openai import AsyncOpenAI
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult, SystemCommand
@@ -88,25 +87,26 @@ class Transcript(VerticalScroll):
 
         await self.remove_children()
         self._assistant = None
-        for entry in state.entries:
-            if not isinstance(entry, ItemEntry):
-                continue
-            for item in entry.items:
-                role = item.get("role")
-                content = item.get("content")
-                if role == "user" and isinstance(content, str):
-                    await self.write("You", content, style="bold green")
-                elif role == "assistant" and isinstance(content, list):
-                    parts: list[str] = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "output_text":
-                            value = part.get("text")
-                            if isinstance(value, str):
-                                parts.append(value)
-                    text = "".join(parts)
-                    if text:
-                        await self.start_assistant()
-                        await self.append_assistant(text)
+        transcript: list[str] = []
+        for item in state.items():
+            role = item.get("role")
+            content = item.get("content")
+            if role == "user" and isinstance(content, str):
+                transcript.append(f"**You**\n\n{content}")
+            elif role == "assistant" and isinstance(content, list):
+                parts: list[str] = []
+                for part in content:
+                    if not isinstance(part, dict) or part.get("type") != "output_text":
+                        continue
+                    value = part.get("text")
+                    if isinstance(value, str):
+                        parts.append(value)
+                text = "".join(parts)
+                if text:
+                    transcript.append(f"**K**\n\n{text}")
+        if transcript:
+            await self.mount(Markdown("\n\n---\n\n".join(transcript), classes="session-history"))
+            self.scroll_end(animate=False)
 
 
 class ApprovalScreen(ModalScreen[bool]):
@@ -163,7 +163,7 @@ class AgentTUI(App[None]):
 
     CSS = """
     Screen { layout: vertical; }
-    #banner {
+    .banner {
         height: auto;
         padding: 0 2;
         color: $text;
@@ -214,43 +214,53 @@ class AgentTUI(App[None]):
         self.session = session
         self.permission_mode = permission_mode
         self.activity = "idle"
+        self.cached_tokens = 0
+        self.used_tokens = 0
+        response = agent.state.latest_response
+        self._set_usage(None if response is None else response.usage)
         self.working_directory = tools.env.cwd if tools is not None else Path.cwd()
 
     def compose(self) -> ComposeResult:
-        yield Static(self.banner, id="banner")
         yield Transcript()
         yield Static(self.status_text, id="status")
         yield Input(placeholder="Message K…  / for commands", id="composer")
 
     async def on_mount(self) -> None:
+        transcript = self.query_one(Transcript)
         if self.session is not None:
-            await self.query_one(Transcript).load(self.session.state)
+            await transcript.load(self.session.state)
+        banner = Static(self.banner, classes="banner")
+        first_entry = transcript.children[0] if transcript.children else None
+        await transcript.mount(banner, before=first_entry)
         self.query_one("#composer", Input).focus()
 
     @property
     def banner(self) -> Text:
-        config = self.agent.compaction_config
-        context = "not configured" if config is None else f"{config.context_window:,} tokens"
         return Text.assemble(
             ("K CASTLE", "bold cyan"),
             ("  minimal agent harness", "dim"),
             "\n",
             ("cwd      ", "bold"),
             str(self.working_directory),
-            "\n",
-            ("model    ", "bold"),
-            self.agent.model,
-            ("   context  ", "bold"),
-            context,
         )
 
     @property
     def status_text(self) -> str:
-        return f"{self.activity} · permissions: {self.permission_mode.value}"
+        config = self.agent.compaction_config
+        window = "?" if config is None else f"{config.context_window:,}"
+        context = f"{self.cached_tokens:,}/{self.used_tokens:,}/{window}"
+        return (
+            f"{self.activity} · permissions: {self.permission_mode.value}"
+            f" · {self.agent.model} · context {context}"
+        )
 
     def show_status(self, activity: str) -> None:
         self.activity = activity
         self.query_one("#status", Static).update(self.status_text)
+
+    def _set_usage(self, usage: ResponseUsage | None) -> None:
+        self.cached_tokens = 0 if usage is None else usage.input_tokens_details.cached_tokens
+        self.used_tokens = 0 if usage is None else usage.total_tokens
 
     def get_system_commands(self, screen: Screen[object]) -> Iterable[SystemCommand]:
         del screen
@@ -336,7 +346,8 @@ class AgentTUI(App[None]):
                         self.show_status(f"compacting · ~{tokens:,} tokens")
                     case CompactionFinished():
                         await transcript.write("Context", "Compaction complete", style="dim")
-                    case RunFinished():
+                    case RunFinished(usage=usage):
+                        self._set_usage(usage)
                         self.show_status("idle")
         except Exception as error:
             self.show_status("error")
@@ -416,6 +427,9 @@ class AgentTUI(App[None]):
         self.agent.state = session.state
         self.agent.commit = session.commit
         self.session = session
+        self.permission_mode = PermissionMode.ASK
+        response = session.state.latest_response
+        self._set_usage(None if response is None else response.usage)
         await self.query_one(Transcript).load(session.state)
         self.show_status(f"resumed {session.info.title}")
 
@@ -442,7 +456,7 @@ class AgentTUI(App[None]):
         self.agent.client = backend.client
         self.agent.model = backend.model
         self.agent.compaction_config = CompactionConfig(context_window=backend.context_window)
-        self.query_one("#banner", Static).update(self.banner)
+        self._set_usage(None)
         self.show_status(f"model: {backend.model}")
 
     @work(group="control", exclusive=True, exit_on_error=False)

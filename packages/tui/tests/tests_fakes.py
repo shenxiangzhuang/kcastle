@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import cast
 
 from openai import AsyncOpenAI
+from openai.types.responses import ResponseUsage
 
 
 class Item:
@@ -20,9 +21,16 @@ class Item:
 
 class Response:
     id = "response"
+    model = "test"
     output_text = "hello"
     output = [Item()]
-    usage = None
+    usage = ResponseUsage(
+        input_tokens=120,
+        input_tokens_details={"cached_tokens": 80},
+        output_tokens=30,
+        output_tokens_details={"reasoning_tokens": 10},
+        total_tokens=150,
+    )
 
 
 class Event:

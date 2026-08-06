@@ -1,9 +1,9 @@
 import asyncio
 from pathlib import Path
 
-from kagent import Agent, CompactionConfig, Env, Session, ToolRuntime
+from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, ToolRuntime
 from ktui.app import AgentTUI, PermissionMode, Transcript
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from tests_fakes import fake_client
 from textual.command import CommandPalette
 from textual.widgets import Input, Markdown, OptionList, Static
@@ -14,7 +14,7 @@ async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
     path = session.info.path
     agent = Agent(
         client=fake_client("hello"),
-        model="test",
+        model="model-x",
         instructions="test",
         state=session.state,
         commit=session.commit,
@@ -24,17 +24,21 @@ async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
 
     async with app.run_test() as pilot:
         composer = app.query_one("#composer", Input)
-        banner = str(app.query_one("#banner").render())
+        transcript = app.query_one(Transcript)
+        banner_widget = app.query_one(".banner", Static)
+        banner = str(banner_widget.render())
         assert app.focused is composer
         assert composer.outer_size.height == 3
+        assert banner_widget.parent is transcript
         assert str(tmp_path) in banner
-        assert "test" in banner
-        assert "50,000 tokens" in banner
+        assert "model-x" not in banner
 
         await pilot.press("h", "i", "enter")
         await pilot.pause()
 
-        assert "idle" in str(app.query_one("#status").render())
+        status = str(app.query_one("#status").render())
+        assert "idle" in status
+        assert "model-x · context 80/150/50,000" in status
         assert path.exists()
 
 
@@ -105,8 +109,7 @@ async def test_permission_mode_defaults_to_ask_and_can_allow_all() -> None:
 async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
     current = Session.create(tmp_path)
     resumed = Session.create(tmp_path)
-    resumed.state.append_user("earlier message")
-    await resumed.commit()
+    await resumed.commit(resumed.state.append_user("earlier message"))
     resumed_path = resumed.info.path
     current_path = current.info.path
     resumed_created_at = resumed.info.created_at
@@ -130,9 +133,9 @@ async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
         await pilot.press("escape")
 
         await app.resume(resumed)
-        agent.state.append_user("new message")
+        entry = agent.state.append_user("new message")
         assert agent.commit is not None
-        await agent.commit()
+        await agent.commit(entry)
 
         assert app.session is resumed
         assert "earlier message" in str(agent.state.context())
@@ -142,8 +145,21 @@ async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
 
 async def test_resumed_session_is_rendered_on_start(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
-    session.state.append_user("earlier message")
-    await session.commit()
+    await session.commit(session.state.append_user("earlier message"))
+    usage = ResponseUsage(
+        input_tokens=120,
+        input_tokens_details={"cached_tokens": 80},
+        output_tokens=30,
+        output_tokens_details={"reasoning_tokens": 10},
+        total_tokens=150,
+    )
+    await session.commit(
+        session.state.append_items(
+            [{"role": "assistant", "content": []}],
+            response=ResponseMetadata(id="response", model="test", usage=usage),
+        )
+    )
+    session = Session.open(session.info.path)
     agent = Agent(
         client=fake_client("hello"),
         model="test",
@@ -159,6 +175,7 @@ async def test_resumed_session_is_rendered_on_start(tmp_path: Path) -> None:
             "earlier message" in str(widget.render())
             for widget in app.query_one(Transcript).query(Static)
         )
+        assert "context 80/150/?" in str(app.query_one("#status", Static).render())
 
 
 async def test_escape_cancels_the_active_agent_run() -> None:

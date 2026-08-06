@@ -30,9 +30,9 @@ from kagent.events import (
     ToolResult,
     ToolStarted,
 )
-from kagent.state import CompactionEntry, Item, State
+from kagent.state import CompactionEntry, Item, ResponseMetadata, State, StateEntry
 
-type Commit = Callable[[], Awaitable[None]]
+type Commit = Callable[[StateEntry], Awaitable[None]]
 
 
 class Agent:
@@ -105,9 +105,9 @@ class Agent:
         active_task = cast(asyncio.Task[object], current)
         self._active_task = active_task
         active_task.add_done_callback(self._clear_active_task)
-        await self._append_user(user_input)
 
         try:
+            await self._append_user(user_input)
             turn = 0
             final_response: Response | None = None
             while True:
@@ -115,8 +115,30 @@ class Agent:
                     if turn >= self.max_turns:
                         raise MaxTurnsExceeded(f"agent exceeded {self.max_turns} model turns")
 
-                    async for event in self._compact_if_needed():
-                        yield event
+                    context = self.state.context()
+                    config = self.compaction_config
+                    if config is not None:
+                        tokens_before = context_tokens(
+                            context,
+                            instructions=self.instructions,
+                            tools=self.tools,
+                        )
+                    if config is not None and needs_compaction(tokens_before, config):
+                        yield CompactionStarted(tokens_before)
+                        entry = await compact_state(
+                            client=self.client,
+                            model=self.model,
+                            state=self.state,
+                            config=config,
+                            tokens_before=tokens_before,
+                        )
+                        await self._commit(entry)
+                        yield CompactionFinished(
+                            tokens_before=entry.tokens_before,
+                            first_kept_id=entry.first_kept_id,
+                            summary=entry.summary,
+                        )
+                        context = self.state.context()
 
                     turn += 1
                     yield ModelStarted(turn)
@@ -124,7 +146,7 @@ class Agent:
                     stream = await self.client.responses.create(
                         model=self.model,
                         instructions=self.instructions,
-                        input=cast(ResponseInputParam, self.state.context()),
+                        input=cast(ResponseInputParam, context),
                         tools=self.tools,
                         store=False,
                         stream=True,
@@ -142,35 +164,48 @@ class Agent:
                         raise RuntimeError("Responses stream ended without response.completed")
 
                     output_items = cast(list[BaseModel], response.output)
-                    self.state.append_items(
+                    response_entry = self.state.append_items(
                         [
                             cast(Item, item.model_dump(mode="json", exclude_none=True))
                             for item in output_items
-                        ]
+                        ],
+                        response=ResponseMetadata(
+                            id=response.id,
+                            model=response.model,
+                            usage=response.usage,
+                        ),
                     )
-                    await self._commit()
+                    await self._commit(response_entry)
                     calls = [
                         item for item in output_items if isinstance(item, ResponseFunctionToolCall)
                     ]
-                    tool_outputs: list[Item] = []
                     for item in calls:
                         yield ToolStarted(item)
-                        outcome = (
-                            await execute_tool(item)
-                            if execute_tool is not None
-                            else ToolResult("No tool executor configured", is_error=True)
-                        )
+                        try:
+                            outcome = (
+                                await execute_tool(item)
+                                if execute_tool is not None
+                                else ToolResult(
+                                    "No tool executor configured",
+                                    is_error=True,
+                                )
+                            )
+                        except Exception as error:
+                            outcome = ToolResult(
+                                f"{type(error).__name__}: {error}",
+                                is_error=True,
+                            )
                         yield ToolFinished(item, outcome.output, outcome.is_error)
-                        tool_outputs.append(
-                            {
-                                "type": "function_call_output",
-                                "call_id": item.call_id,
-                                "output": outcome.output,
-                            }
+                        tool_entry = self.state.append_items(
+                            [
+                                {
+                                    "type": "function_call_output",
+                                    "call_id": item.call_id,
+                                    "output": outcome.output,
+                                }
+                            ]
                         )
-                    if tool_outputs:
-                        self.state.append_items(tool_outputs)
-                        await self._commit()
+                        await self._commit(tool_entry)
 
                     final_response = response
                     if self._steering:
@@ -190,6 +225,9 @@ class Agent:
                 response_id=final_response.id,
                 usage=final_response.usage,
             )
+        except asyncio.CancelledError:
+            await self._close_unresolved_tools()
+            raise
         finally:
             self._clear_active_task(active_task)
 
@@ -200,57 +238,54 @@ class Agent:
             raise AgentBusyError("cannot manually compact a running agent")
         if self.compaction_config is None:
             raise ValueError("compaction is not configured")
+        context = self.state.context()
+        tokens_before = context_tokens(
+            context,
+            instructions=self.instructions,
+            tools=self.tools,
+        )
         entry = await compact_state(
             client=self.client,
             model=self.model,
             state=self.state,
             config=self.compaction_config,
-            instructions=self.instructions,
-            tools=self.tools,
+            tokens_before=tokens_before,
             custom_instructions=instructions,
         )
-        await self._commit()
+        await self._commit(entry)
         return entry
 
-    async def _compact_if_needed(self) -> AsyncIterator[AgentEvent]:
-        config = self.compaction_config
-        tools = self.tools
-        if config is None or not needs_compaction(
-            self.state,
-            config,
-            instructions=self.instructions,
-            tools=tools,
-        ):
-            return
-
-        tokens_before = context_tokens(
-            self.state,
-            instructions=self.instructions,
-            tools=tools,
-        )
-        yield CompactionStarted(tokens_before)
-        entry = await compact_state(
-            client=self.client,
-            model=self.model,
-            state=self.state,
-            config=config,
-            instructions=self.instructions,
-            tools=tools,
-        )
-        await self._commit()
-        yield CompactionFinished(
-            tokens_before=entry.tokens_before,
-            first_kept_id=entry.first_kept_id,
-            summary=entry.summary,
-        )
-
     async def _append_user(self, message: str) -> None:
-        self.state.append_user(message)
-        await self._commit()
+        entry = self.state.append_user(message)
+        await self._commit(entry)
 
-    async def _commit(self) -> None:
-        if self.commit is not None:
-            await self.commit()
+    async def _commit(self, entry: StateEntry) -> None:
+        if self.commit is None:
+            return
+        try:
+            await self.commit(entry)
+        except Exception:
+            self.state.rollback(entry.id)
+            raise
+
+    async def _close_unresolved_tools(self) -> None:
+        call_ids = self.state.unresolved_tool_call_ids()
+        if not call_ids:
+            return
+        entry = self.state.append_items(
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": (
+                        "Tool execution was cancelled; its side effects are unknown. "
+                        "Do not retry automatically."
+                    ),
+                }
+                for call_id in call_ids
+            ]
+        )
+        await self._commit(entry)
 
     def _require_active(self, message: str) -> None:
         if not message.strip():

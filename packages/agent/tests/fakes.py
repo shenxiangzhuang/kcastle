@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from openai import AsyncOpenAI
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 
 
 class FakeItem:
@@ -47,11 +47,13 @@ class FakeResponse:
         response_id: str,
         text: str,
         items: list[FakeItem | ResponseFunctionToolCall] | None = None,
+        usage: ResponseUsage | None = None,
     ) -> None:
         self.id = response_id
+        self.model = "test"
         self.output_text = text
         self.output = items if items is not None else [FakeItem("message", text=text)]
-        self.usage = None
+        self.usage = usage
 
 
 @dataclass(slots=True)
@@ -72,9 +74,16 @@ class FakeStream:
 
 
 class FakeResponses:
-    def __init__(self, responses: list[FakeResponse], *, summary: str = "summary") -> None:
+    def __init__(
+        self,
+        responses: list[FakeResponse],
+        *,
+        summary: str = "summary",
+        summary_usage: ResponseUsage | None = None,
+    ) -> None:
         self.responses = list(responses)
         self.summary = summary
+        self.summary_usage = summary_usage
         self.requests: list[dict[str, object]] = []
 
     async def create(self, **request: object) -> object:
@@ -83,12 +92,22 @@ class FakeResponses:
             if not self.responses:
                 raise AssertionError("no fake response remaining")
             return FakeStream(self.responses.pop(0))
-        return FakeResponse("compaction", self.summary)
+        return FakeResponse("compaction", self.summary, usage=self.summary_usage)
 
 
 class FakeClient:
-    def __init__(self, responses: list[FakeResponse], *, summary: str = "summary") -> None:
-        self.responses = FakeResponses(responses, summary=summary)
+    def __init__(
+        self,
+        responses: list[FakeResponse],
+        *,
+        summary: str = "summary",
+        summary_usage: ResponseUsage | None = None,
+    ) -> None:
+        self.responses = FakeResponses(
+            responses,
+            summary=summary,
+            summary_usage=summary_usage,
+        )
 
     def as_openai(self) -> AsyncOpenAI:
         return cast(AsyncOpenAI, cast(object, self))
