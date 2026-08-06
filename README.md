@@ -1,15 +1,32 @@
 # K in Castle
 
-K is a small, stateful agent harness with a Textual interface.
+A minimal agent harness.
 
-The project deliberately has two boundaries:
+## Packages
 
-- [`agent`](packages/agent): the Agent core plus surrounding harness infrastructure. The core
-  owns cognition; `kagent.harness` provides Session, Env, and executable tools.
-- [`tui`](packages/tui): a thin Textual adapter. It selects a session path and environment, then
-  owns only terminal rendering, input, and approval prompts.
+| Package | PyPI | Description |
+| --- | --- | --- |
+| **[`kcastle-agent`](packages/agent)** | [![PyPI](https://img.shields.io/pypi/v/kcastle-agent?color=%2334D058)](https://pypi.org/project/kcastle-agent/) | Agent core and harness infrastructure |
+| **[`kcastle`](packages/tui)** | [![PyPI](https://img.shields.io/pypi/v/kcastle?color=%2334D058)](https://pypi.org/project/kcastle/) | Textual interface and CLI |
 
-## Run
+## Install
+
+K requires Python 3.12 or later. Run it directly with uv:
+
+```bash
+uvx kcastle
+```
+
+Or install a persistent command:
+
+```bash
+uv tool install kcastle
+kcastle
+```
+
+## Get started
+
+Configure one provider:
 
 ```bash
 # DeepSeek (deepseek-v4-flash)
@@ -19,10 +36,6 @@ export DEEPSEEK_API_KEY=...
 export OPENAI_API_KEY=...
 
 uvx kcastle
-
-# From a development checkout
-uv sync
-uv run kcastle
 ```
 
 K automatically selects the configured provider. DeepSeek takes precedence when both keys are
@@ -32,11 +45,19 @@ Each launch creates an append-only JSONL session under `~/.kcastle/sessions`; it
 the first user message and its metadata records the creation time. Use `--session PATH` to resume a
 specific session directly.
 
-Type `/` in an empty composer to open the command list. Use `/resume` to switch sessions,
-`/model` to switch detected backends, `/compact` to compact context, `/permissions` to switch
-between approval prompts and allowing all tools, or `/exit` to leave K. During a run, submit text
-normally to steer the next model turn or use `/queue message` to run it after the current task
-settles. Press `Escape` to cancel the active operation.
+Type `/` in an empty composer to open the built-in command list:
+
+- `/resume` — Switch to a saved session.
+- `/model` — Switch between detected model backends.
+- `/compact` — Compact the current context.
+- `/permissions` — Toggle between approval prompts and allowing all tools.
+- `/queue <message>` — Run a message after the current task settles. Available while K is running.
+- `/exit` — Exit K.
+
+During a run, submit text normally to steer the next model turn. Press `Escape` to cancel the
+active operation.
+
+From a development checkout, use `uv sync` followed by `uv run kcastle`.
 
 ## Develop
 
@@ -53,4 +74,4 @@ just build
 
 ## Acknowledgements
 
-Inspired by [pi-mono](https://github.com/badlogic/pi-mono).
+Inspired by [pi](https://github.com/earendil-works/pi).
