@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -53,6 +54,9 @@ def backends_from_env(env: Mapping[str, str]) -> tuple[Backend, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="K agent TUI")
+    commands = parser.add_subparsers(dest="command")
+    self_commands = commands.add_parser("self").add_subparsers(required=True)
+    self_commands.add_parser("update")
     parser.add_argument("--model")
     parser.add_argument("--context-window", type=int)
     parser.add_argument("--session", type=Path, help="resume a session JSONL file")
@@ -62,6 +66,10 @@ def main() -> None:
         default=Path.home() / ".kcastle" / "sessions",
     )
     args = parser.parse_args()
+
+    if args.command == "self":
+        subprocess.run(["uv", "tool", "upgrade", "kcastle", "--prerelease", "allow"], check=True)
+        return
 
     try:
         backends = backends_from_env(os.environ)

@@ -1,5 +1,22 @@
+import subprocess
+import sys
+from unittest.mock import Mock
+
 import pytest
+from ktui import cli
 from ktui.cli import backends_from_env
+
+
+def test_self_update_upgrades_kcastle_prerelease(monkeypatch: pytest.MonkeyPatch) -> None:
+    run = Mock()
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(sys, "argv", ["kcastle", "self", "update"])
+
+    cli.main()
+
+    run.assert_called_once_with(
+        ["uv", "tool", "upgrade", "kcastle", "--prerelease", "allow"], check=True
+    )
 
 
 def test_deepseek_backend_is_selected() -> None:
