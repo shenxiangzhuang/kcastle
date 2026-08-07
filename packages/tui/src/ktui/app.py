@@ -119,7 +119,10 @@ class Transcript(VerticalScroll):
         await self.query(".entry, .session-history").remove()
         self._assistant = None
         transcript: list[str] = []
-        for item in state.items():
+        latest = state.latest_compaction
+        if latest is not None:
+            transcript.append(f"**Earlier context (compacted)**\n\n{latest.summary}")
+        for item in state.active_items():
             role = item.get("role")
             content = item.get("content")
             if role == "user" and isinstance(content, str):

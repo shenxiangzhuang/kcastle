@@ -2,7 +2,7 @@ import asyncio
 from importlib.metadata import version
 from pathlib import Path
 
-from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, ToolRuntime
+from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, State, ToolRuntime
 from ktui.app import AgentTUI, PermissionMode, Transcript
 from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from tests_fakes import fake_client
@@ -84,6 +84,26 @@ async def test_assistant_messages_render_as_markdown() -> None:
         assert markdown.source == source
         assert len(markdown.query("MarkdownTable")) == 1
         assert "https://openai.com" in markdown.source
+
+
+async def test_compacted_history_renders_summary_and_active_suffix() -> None:
+    state = State()
+    state.append_user("old message")
+    kept = state.append_user("kept message")
+    state.append_compaction(summary="earlier summary", first_kept_id=kept.id, tokens_before=42)
+    agent = Agent(client=fake_client("hello"), model="test", instructions="test", state=state)
+    app = AgentTUI(agent=agent)
+
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        await transcript.load(state)
+        await pilot.pause()
+
+        source = transcript.query_one(".session-history", Markdown).source
+        assert "earlier summary" in source
+        assert "kept message" in source
+        assert "old message" not in source
+        assert "old message" in str(list(state.items()))
 
 
 async def test_permission_mode_defaults_to_ask_and_can_allow_all() -> None:
