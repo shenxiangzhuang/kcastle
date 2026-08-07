@@ -28,13 +28,13 @@ jobs:
         run: uv build --package kcastle --no-sources --out-dir dist/kcastle
 
       - name: Upload kcastle-agent artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-kcastle-agent
           path: dist/kcastle-agent/
 
       - name: Upload kcastle artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-kcastle
           path: dist/kcastle/
@@ -47,7 +47,7 @@ jobs:
     environment: pypi
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist-kcastle-agent
           path: dist/
@@ -66,7 +66,7 @@ jobs:
     environment: pypi
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dist-kcastle
           path: dist/
