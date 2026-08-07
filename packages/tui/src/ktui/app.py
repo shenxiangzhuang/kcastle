@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -247,6 +248,7 @@ class AgentTUI(App[None]):
         self.backends = tuple(backends)
         self.session = session
         self.permission_mode = permission_mode
+        self._approval_lock = asyncio.Lock()
         self.activity = "idle"
         self.cached_tokens = 0
         self.used_tokens = 0
@@ -395,7 +397,10 @@ class AgentTUI(App[None]):
     async def approve(self, call: ResponseFunctionToolCall) -> bool:
         if self.permission_mode is PermissionMode.ALLOW_ALL:
             return True
-        return await self.push_screen_wait(ApprovalScreen(call))
+        async with self._approval_lock:
+            if self.permission_mode is PermissionMode.ALLOW_ALL:
+                return True
+            return await self.push_screen_wait(ApprovalScreen(call))
 
     async def execute_tool(self, call: ResponseFunctionToolCall) -> ToolResult:
         if self.tools is None:

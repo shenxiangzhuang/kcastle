@@ -99,7 +99,7 @@ async def test_tool_result_is_returned_to_next_model_turn() -> None:
     assert all(response.usage == usage for response in responses)
 
 
-async def test_each_tool_result_is_persisted_before_the_next_tool(tmp_path: Path) -> None:
+async def test_tool_calls_execute_concurrently_and_persist_in_order(tmp_path: Path) -> None:
     calls: list[FakeItem | ResponseFunctionToolCall] = [
         ResponseFunctionToolCall(
             type="function_call",
@@ -109,16 +109,17 @@ async def test_each_tool_result_is_persisted_before_the_next_tool(tmp_path: Path
         )
         for index in (1, 2)
     ]
-    fake = FakeClient([FakeResponse("r1", "", calls)])
+    fake = FakeClient([FakeResponse("r1", "", calls), FakeResponse("r2", "done")])
     session = Session.create(tmp_path)
-    second_started = asyncio.Event()
+    both_started = asyncio.Event()
+    started: set[str] = set()
 
     async def execute(call: ResponseFunctionToolCall) -> ToolResult:
-        if call.call_id == "call-1":
-            return ToolResult("FIRST")
-        second_started.set()
-        await asyncio.Event().wait()
-        raise AssertionError("unreachable")
+        started.add(call.call_id)
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        return ToolResult(call.call_id.upper())
 
     agent = Agent(
         client=fake.as_openai(),
@@ -127,18 +128,61 @@ async def test_each_tool_result_is_persisted_before_the_next_tool(tmp_path: Path
         state=session.state,
         commit=session.commit,
     )
-    task = asyncio.create_task(collect(agent, "run both", execute))
-    await second_started.wait()
+    await asyncio.wait_for(collect(agent, "run both", execute), timeout=1)
 
-    assert "FIRST" in session.info.path.read_text()
-    agent.abort()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    outputs = [
+        item["output"]
+        for entry in agent.state.entries
+        if isinstance(entry, ItemEntry)
+        for item in entry.items
+        if item.get("type") == "function_call_output"
+    ]
+    assert outputs == ["CALL-1", "CALL-2"]
 
     restored = Session.open(session.info.path)
     assert restored.state.unresolved_tool_call_ids() == ()
-    assert "FIRST" in str(restored.state.context())
-    assert "side effects are unknown" in str(restored.state.context())
+    assert "CALL-1" in str(restored.state.context())
+    assert "CALL-2" in str(restored.state.context())
+
+
+async def test_abort_cancels_concurrent_tools() -> None:
+    calls: list[FakeItem | ResponseFunctionToolCall] = [
+        ResponseFunctionToolCall(
+            type="function_call",
+            call_id=f"call-{index}",
+            name="wait",
+            arguments="{}",
+        )
+        for index in (1, 2)
+    ]
+    agent = Agent(
+        client=FakeClient([FakeResponse("r1", "", calls)]).as_openai(),
+        model="test",
+        instructions="test",
+    )
+    both_started = asyncio.Event()
+    started: set[str] = set()
+    cancelled: set[str] = set()
+
+    async def execute(call: ResponseFunctionToolCall) -> ToolResult:
+        started.add(call.call_id)
+        if len(started) == 2:
+            both_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.add(call.call_id)
+        raise AssertionError("unreachable")
+
+    task = asyncio.create_task(collect(agent, "run both", execute))
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    agent.abort()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cancelled == {"call-1", "call-2"}
+    assert agent.state.unresolved_tool_call_ids() == ()
+    assert str(agent.state.context()).count("side effects are unknown") == 2
 
 
 async def test_steer_runs_at_next_turn_boundary() -> None:

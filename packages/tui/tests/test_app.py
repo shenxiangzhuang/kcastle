@@ -2,6 +2,7 @@ import asyncio
 from importlib.metadata import version
 from pathlib import Path
 
+import pytest
 from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, State, ToolRuntime
 from ktui.app import AgentTUI, PermissionMode, Transcript
 from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
@@ -128,6 +129,35 @@ async def test_permission_mode_defaults_to_ask_and_can_allow_all() -> None:
                 arguments='{"command":"pwd"}',
             )
         )
+
+
+async def test_approval_prompts_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = Agent(client=fake_client("hello"), model="test", instructions="test")
+    app = AgentTUI(agent=agent)
+    active = 0
+    peak = 0
+
+    async def prompt(_: object) -> bool:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return True
+
+    monkeypatch.setattr(app, "push_screen_wait", prompt)
+    calls = [
+        ResponseFunctionToolCall(
+            type="function_call",
+            call_id=f"call-{index}",
+            name="shell",
+            arguments='{"command":"pwd"}',
+        )
+        for index in (1, 2)
+    ]
+
+    assert all(await asyncio.gather(*(app.approve(call) for call in calls)))
+    assert peak == 1
 
 
 async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
