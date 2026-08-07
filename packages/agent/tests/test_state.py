@@ -18,6 +18,7 @@ def test_state_round_trip_and_compacted_context() -> None:
     assert kept.items[0] in restored.context()
     assert restored.context()[-1]["content"] == "new"
     assert "what happened" in str(restored.context()[0]["content"])
+    assert list(restored.active_items()) == [kept.items[0], {"role": "user", "content": "new"}]
 
 
 def test_state_restore_rejects_nonconsecutive_ids() -> None:

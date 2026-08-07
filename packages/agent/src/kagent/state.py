@@ -161,6 +161,13 @@ class State:
             if isinstance(entry, ItemEntry)
         ]
 
+    def active_items(self) -> Iterator[Item]:
+        """Yield defensive item snapshots from the current context suffix."""
+
+        for entry in self._entries[self._active_start :]:
+            if isinstance(entry, ItemEntry):
+                yield from deepcopy(entry.items)
+
     def items(self) -> Iterator[Item]:
         """Yield defensive item snapshots without copying the complete history at once."""
 
