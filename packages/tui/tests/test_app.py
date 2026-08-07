@@ -146,12 +146,38 @@ async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
         assert not current_path.exists()
 
 
+async def test_resume_reports_an_unreadable_session(tmp_path: Path) -> None:
+    current = Session.create(tmp_path)
+    damaged = Session.create(tmp_path)
+    await damaged.commit(damaged.state.append_user("damaged"))
+    with damaged.info.path.open("a") as file:
+        file.write('{"type":"items","id":2}\n')
+    agent = Agent(
+        client=fake_client("hello"),
+        model="test",
+        instructions="test",
+        state=current.state,
+        commit=current.commit,
+    )
+    app = AgentTUI(agent=agent, session=current)
+
+    async with app.run_test() as pilot:
+        app.action_resume()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert "session error" in str(app.query_one("#status").render())
+        error = app.query_one(Transcript).query(".entry").last()
+        assert "Cannot open session" in str(error.render())
+
+
 async def test_resumed_session_is_rendered_on_start(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
     await session.commit(session.state.append_user("earlier message"))
     usage = ResponseUsage(
         input_tokens=120,
-        input_tokens_details={"cached_tokens": 80},
+        input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},
         output_tokens=30,
         output_tokens_details={"reasoning_tokens": 10},
         total_tokens=150,

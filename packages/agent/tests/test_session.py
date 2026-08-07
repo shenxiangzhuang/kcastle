@@ -34,7 +34,7 @@ async def test_session_is_a_titled_append_only_jsonl_stream(tmp_path: Path) -> N
 async def test_response_usage_round_trips_with_its_item_entry(tmp_path: Path) -> None:
     usage = ResponseUsage(
         input_tokens=120,
-        input_tokens_details={"cached_tokens": 80},
+        input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},
         output_tokens=30,
         output_tokens_details={"reasoning_tokens": 10},
         total_tokens=150,
@@ -63,6 +63,36 @@ async def test_response_usage_round_trips_with_its_item_entry(tmp_path: Path) ->
     restored_compaction = restored.state.entries[-1]
     assert isinstance(restored_compaction, CompactionEntry)
     assert restored_compaction.response == compaction.response
+
+
+async def test_open_keeps_missing_cache_write_tokens_unknown(tmp_path: Path) -> None:
+    usage = ResponseUsage(
+        input_tokens=120,
+        input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},
+        output_tokens=30,
+        output_tokens_details={"reasoning_tokens": 10},
+        total_tokens=150,
+    )
+    session = Session.create(tmp_path)
+    await session.commit(
+        session.state.append_items(
+            [{"role": "assistant", "content": []}],
+            response=ResponseMetadata(id="response", model="test", usage=usage),
+        )
+    )
+    records = [json.loads(line) for line in session.info.path.read_text().splitlines()]
+    del records[1]["response"]["usage"]["input_tokens_details"]["cache_write_tokens"]
+    session.info.path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+    restored = Session.open(session.info.path)
+
+    response = restored.state.latest_response
+    assert response is not None and response.usage is not None
+    assert response.usage.input_tokens_details.cached_tokens == 80
+    assert response.usage.input_tokens_details.cache_write_tokens is None
+    assert "cache_write_tokens" not in response.usage.input_tokens_details.model_dump(
+        exclude_none=True
+    )
 
 
 async def test_each_created_session_gets_its_own_file(tmp_path: Path) -> None:
