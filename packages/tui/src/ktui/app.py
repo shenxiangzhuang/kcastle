@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -36,10 +37,28 @@ from textual.command import CommandPalette
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from textual.widgets import Button, Input, Label, Markdown, OptionList, Static
+from textual.widgets import Button, Collapsible, Input, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 _STREAM_FLUSH_INTERVAL = 0.05
+
+
+def _tool_summary(arguments: str) -> str:
+    """Return a compact, readable argument preview for a tool row."""
+
+    try:
+        value = json.loads(arguments)
+    except json.JSONDecodeError:
+        value = arguments
+    if isinstance(value, dict):
+        if len(value) == 1:
+            preview = str(next(iter(value.values())))
+        else:
+            preview = "  ".join(f"{key}={item}" for key, item in value.items())
+    else:
+        preview = str(value)
+    preview = " ".join(preview.split())
+    return f"  {preview[:117]}{'…' if len(preview) > 117 else ''}" if preview else ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +87,7 @@ class Transcript(VerticalScroll):
         self._assistant_buffer: list[str] = []
         self._assistant_flush_timer: Timer | None = None
         self._assistant_started = False
+        self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
 
     async def write(self, label: str, value: str, *, style: str = "") -> None:
         await self.mount(Static(Text.assemble((f"{label}\n", style), value), classes="entry"))
@@ -113,13 +133,48 @@ class Transcript(VerticalScroll):
         await self._assistant.append(delta)
         self.scroll_end(animate=False)
 
+    async def start_tool(self, call_id: str, name: str, arguments: str) -> None:
+        """Add one compact, expandable tool call."""
+
+        detail = Static(arguments, markup=False, classes="tool-detail")
+        tool = Collapsible(
+            detail,
+            title=f"◌  {name}{_tool_summary(arguments)}",
+            collapsed=True,
+            classes="tool-call",
+        )
+        self._tools[call_id] = (tool, detail, arguments, name)
+        await self.mount(tool)
+        self.scroll_end(animate=False)
+
+    async def finish_tool(self, call_id: str, name: str, output: str, *, is_error: bool) -> None:
+        """Complete a tool call without expanding its potentially large output."""
+
+        current = self._tools.pop(call_id, None)
+        if current is None:
+            return
+        tool, detail, arguments, _ = current
+        tool.title = f"{'!' if is_error else '✓'}  {name}{_tool_summary(arguments)}"
+        tool.set_class(is_error, "tool-error")
+        detail.update(f"Arguments\n{arguments}\n\nOutput\n{output}")
+        self.scroll_end(animate=False)
+
     async def load(self, state: State) -> None:
         """Replace the projection with the readable messages from a session."""
 
         await self.flush_assistant()
-        await self.query(".entry, .session-history").remove()
+        self.anchor()
+        await self.query(".entry, .tool-call, .session-history").remove()
         self._assistant = None
+        self._tools.clear()
         transcript: list[str] = []
+
+        async def flush_transcript() -> None:
+            if not transcript:
+                return
+            await self.mount(Markdown("\n\n---\n\n".join(transcript), classes="session-history"))
+            transcript.clear()
+
         latest = state.latest_compaction
         if latest is not None:
             transcript.append(f"**Earlier context (compacted)**\n\n{latest.summary}")
@@ -139,8 +194,25 @@ class Transcript(VerticalScroll):
                 text = "".join(parts)
                 if text:
                     transcript.append(f"**K**\n\n{text}")
-        if transcript:
-            await self.mount(Markdown("\n\n---\n\n".join(transcript), classes="session-history"))
+            elif item.get("type") == "function_call":
+                call_id = item.get("call_id")
+                name = item.get("name")
+                arguments = item.get("arguments")
+                if (
+                    isinstance(call_id, str)
+                    and isinstance(name, str)
+                    and isinstance(arguments, str)
+                ):
+                    await flush_transcript()
+                    await self.start_tool(call_id, name, arguments)
+            elif item.get("type") == "function_call_output":
+                call_id = item.get("call_id")
+                output = item.get("output")
+                current = self._tools.get(call_id) if isinstance(call_id, str) else None
+                if isinstance(call_id, str) and current is not None and isinstance(output, str):
+                    await self.finish_tool(call_id, current[3], output, is_error=False)
+        await flush_transcript()
+        if self.children:
             self.scroll_end(animate=False)
 
 
@@ -197,32 +269,68 @@ class AgentTUI(App[None]):
     """A thin Textual adapter over one continuing Agent instance."""
 
     CSS = """
-    Screen { layout: vertical; }
-    .banner {
-        height: auto;
-        padding: 0 2;
-        color: $text;
-        background: $panel;
-        border-bottom: solid $accent;
+    Screen {
+        layout: vertical;
+        color: #d8dee9;
+        background: #0d1117;
     }
-    #transcript { height: 1fr; padding: 1 2; }
-    .entry { width: 100%; height: auto; margin-bottom: 1; }
-    .assistant-label { height: 1; }
+    .banner {
+        height: 3;
+        padding: 1 3 0 3;
+        color: #8b949e;
+        background: #161b22;
+        border-bottom: solid #30363d;
+    }
+    #transcript { height: 1fr; padding: 1 3; background: #0d1117; }
+    .entry {
+        width: 100%;
+        height: auto;
+        margin-bottom: 1;
+        padding-left: 1;
+        border-left: solid #30363d;
+    }
+    .assistant-label { height: 1; color: #a5b4fc; }
     .assistant-body { height: auto; }
-    #status { height: 1; padding: 0 2; color: $text-muted; }
+    .tool-call {
+        height: auto;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        color: #8b949e;
+        background: #161b22;
+        border-left: solid #30363d;
+        border-top: none;
+    }
+    .tool-call:focus-within { background: #1c2128; }
+    .tool-call.tool-error { color: #ff7b72; border-left: solid #ff7b72; }
+    .tool-call > CollapsibleTitle { width: 100%; }
+    .tool-detail {
+        height: auto;
+        max-height: 14;
+        padding: 1;
+        color: #b1bac4;
+        background: #0d1117;
+        overflow-y: auto;
+    }
+    #status {
+        height: 2;
+        padding: 0 3 1 3;
+        color: #6e7681;
+        background: #0d1117;
+    }
     #composer {
         height: 3;
-        margin: 0 2 1 2;
+        margin: 0 3 1 3;
         padding: 0 1;
-        color: $text;
-        background: $surface;
-        border: round $accent;
+        color: #f0f3f6;
+        background: #161b22;
+        border: round #30363d;
     }
+    #composer:focus { border: round #7c8cff; }
     ApprovalScreen { align: center middle; }
-    #approval { width: 70%; height: auto; padding: 2; border: round $accent; }
+    #approval { width: 70%; height: auto; padding: 2; border: round #7c8cff; }
     #approval Button { margin-top: 1; margin-right: 1; }
     PickerScreen { align: center middle; }
-    #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round $accent; }
+    #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round #7c8cff; }
     #picker OptionList { height: auto; max-height: 20; margin-top: 1; }
     """
 
@@ -273,11 +381,9 @@ class AgentTUI(App[None]):
     @property
     def banner(self) -> Text:
         return Text.assemble(
-            ("K CASTLE", "bold cyan"),
+            ("K", "bold #a5b4fc"),
             (f" v{version('kcastle')}", "dim"),
-            ("  minimal agent harness", "dim"),
-            "\n",
-            ("cwd      ", "bold"),
+            ("  ·  ", "#484f58"),
             str(self.working_directory),
         )
 
@@ -359,6 +465,7 @@ class AgentTUI(App[None]):
     @work(exclusive=True, exit_on_error=False)
     async def run_agent(self, text: str) -> None:
         transcript = self.query_one(Transcript)
+        assistant_started = False
         try:
             executor = None if self.tools is None else self.execute_tool
             async for event in self.agent.run(text, execute_tool=executor):
@@ -367,20 +474,19 @@ class AgentTUI(App[None]):
                 match event:
                     case ModelStarted(turn=turn):
                         self.show_status(f"thinking · turn {turn}")
-                        await transcript.start_assistant()
+                        assistant_started = False
                     case TextDelta(text=delta):
+                        if not assistant_started:
+                            await transcript.start_assistant()
+                            assistant_started = True
                         await transcript.append_assistant(delta)
                     case ToolStarted(call=call):
                         self.show_status(f"running {call.name}")
-                        await transcript.write(
-                            "Tool",
-                            f"{call.name}({call.arguments})",
-                            style="bold blue",
-                        )
+                        await transcript.start_tool(call.call_id, call.name, call.arguments)
                     case ToolFinished(call=call, output=output, is_error=is_error):
-                        label = f"{call.name} {'error' if is_error else 'done'}"
-                        style = "bold red" if is_error else "dim"
-                        await transcript.write(label, output, style=style)
+                        await transcript.finish_tool(
+                            call.call_id, call.name, output, is_error=is_error
+                        )
                     case CompactionStarted(tokens_before=tokens):
                         self.show_status(f"compacting · ~{tokens:,} tokens")
                     case CompactionFinished():

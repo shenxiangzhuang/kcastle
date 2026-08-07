@@ -8,7 +8,7 @@ from ktui.app import AgentTUI, PermissionMode, Transcript
 from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from tests_fakes import fake_client
 from textual.command import CommandPalette
-from textual.widgets import Input, Markdown, OptionList, Static
+from textual.widgets import Collapsible, Input, Markdown, OptionList, Static
 
 
 async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
@@ -85,6 +85,35 @@ async def test_assistant_messages_render_as_markdown() -> None:
         assert markdown.source == source
         assert len(markdown.query("MarkdownTable")) == 1
         assert "https://openai.com" in markdown.source
+
+
+async def test_tool_output_stays_collapsed_until_requested() -> None:
+    agent = Agent(client=fake_client("hello"), model="test", instructions="test")
+    app = AgentTUI(agent=agent)
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="call-1",
+        name="shell",
+        arguments='{"command":"find ."}',
+    )
+
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        await transcript.start_tool(call.call_id, call.name, call.arguments)
+        await transcript.finish_tool(
+            call.call_id, call.name, "many\nlines\nwith [t,e] markup", is_error=False
+        )
+        await pilot.pause()
+
+        tool = transcript.query_one(Collapsible)
+        assert tool.collapsed
+        assert tool.title == "✓  shell  find ."
+        assert "many\nlines\nwith [t,e] markup" in str(
+            tool.query_one(".tool-detail", Static).render()
+        )
+        await pilot.click(".tool-call", offset=(30, 0))
+        await pilot.pause()
+        assert not tool.collapsed
 
 
 async def test_compacted_history_renders_summary_and_active_suffix() -> None:
@@ -229,6 +258,40 @@ async def test_resume_reports_an_unreadable_session(tmp_path: Path) -> None:
 async def test_resumed_session_is_rendered_on_start(tmp_path: Path) -> None:
     session = Session.create(tmp_path)
     await session.commit(session.state.append_user("earlier message"))
+    await session.commit(
+        session.state.append_items(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "shell",
+                    "arguments": '{"command":"pwd"}',
+                }
+            ]
+        )
+    )
+    await session.commit(
+        session.state.append_items(
+            [{"type": "function_call_output", "call_id": "call-1", "output": "/tmp"}]
+        )
+    )
+    await session.commit(
+        session.state.append_items(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call-2",
+                    "name": "shell",
+                    "arguments": '{"command":"git status"}',
+                }
+            ]
+        )
+    )
+    await session.commit(
+        session.state.append_items(
+            [{"type": "function_call_output", "call_id": "call-2", "output": "clean"}]
+        )
+    )
     usage = ResponseUsage(
         input_tokens=120,
         input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},
@@ -258,7 +321,41 @@ async def test_resumed_session_is_rendered_on_start(tmp_path: Path) -> None:
             "earlier message" in str(widget.render())
             for widget in app.query_one(Transcript).query(Static)
         )
+        transcript = app.query_one(Transcript)
+        tools = list(transcript.query(Collapsible))
+        assert [tool.title for tool in tools] == ["✓  shell  pwd", "✓  shell  git status"]
+        assert all(tool.collapsed for tool in tools)
+        assert tools[1].region.y == tools[0].region.bottom
+        assert "/tmp" in str(tools[0].query_one(".tool-detail", Static).render())
+        assert not transcript.query(".assistant-label")
         assert "context 80/150/?" in str(app.query_one("#status", Static).render())
+
+
+async def test_resume_stays_at_bottom_while_history_finishes_layout(tmp_path: Path) -> None:
+    current = Session.create(tmp_path)
+    resumed = Session.create(tmp_path)
+    for index in range(30):
+        await resumed.commit(resumed.state.append_user(f"message {index}"))
+    agent = Agent(
+        client=fake_client("hello"),
+        model="test",
+        instructions="test",
+        state=current.state,
+        commit=current.commit,
+    )
+    app = AgentTUI(agent=agent, session=current)
+
+    async with app.run_test() as pilot:
+        await app.resume(resumed)
+        await pilot.pause()
+        transcript = app.query_one(Transcript)
+        previous_max = transcript.max_scroll_y
+
+        await transcript.mount(Static("\n".join(f"late line {index}" for index in range(30))))
+        await pilot.pause()
+
+        assert transcript.max_scroll_y > previous_max
+        assert transcript.scroll_y == transcript.max_scroll_y
 
 
 async def test_escape_cancels_the_active_agent_run() -> None:
