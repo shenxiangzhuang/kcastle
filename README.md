@@ -24,6 +24,12 @@ uv tool install kcastle
 kcastle
 ```
 
+Upgrade a persistent installation, including pre-releases:
+
+```bash
+kcastle self update
+```
+
 ## Get started
 
 Configure one provider:
