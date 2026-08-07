@@ -421,7 +421,11 @@ class AgentTUI(App[None]):
             )
         )
         if info is not None:
-            await self.resume(Session.open(info.path))
+            try:
+                await self.resume(Session.open(info.path))
+            except SessionError as error:
+                self.show_status("session error")
+                await self.query_one(Transcript).write("Error", str(error), style="bold red")
 
     async def resume(self, session: Session) -> None:
         """Switch the continuing Agent to a persisted session."""

@@ -5,12 +5,12 @@ description = "A minimal OpenAI Responses agent harness"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "openai>=2.0.0,<3.0.0",
-    "pydantic>=2.12.0,<3.0.0",
+    "openai==2.53.0",
+    "pydantic==2.13.4",
 ]
 
 [build-system]
-requires = ["uv_build>=0.12.2,<0.13"]
+requires = ["uv_build==0.12.2"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

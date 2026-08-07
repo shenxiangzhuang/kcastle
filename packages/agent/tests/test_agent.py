@@ -62,7 +62,7 @@ async def test_tool_result_is_returned_to_next_model_turn() -> None:
     )
     usage = ResponseUsage(
         input_tokens=10,
-        input_tokens_details={"cached_tokens": 5},
+        input_tokens_details={"cached_tokens": 5, "cache_write_tokens": 0},
         output_tokens=2,
         output_tokens_details={"reasoning_tokens": 1},
         total_tokens=12,
@@ -236,7 +236,7 @@ async def test_context_is_projected_once_per_model_turn() -> None:
 async def test_manual_compaction_preserves_history_and_projects_summary() -> None:
     usage = ResponseUsage(
         input_tokens=100,
-        input_tokens_details={"cached_tokens": 0},
+        input_tokens_details={"cached_tokens": 0, "cache_write_tokens": 0},
         output_tokens=20,
         output_tokens_details={"reasoning_tokens": 5},
         total_tokens=120,

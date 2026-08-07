@@ -13,6 +13,7 @@ from typing import cast
 from uuid import uuid4
 
 from openai.types.responses import ResponseUsage
+from openai.types.responses.response_usage import InputTokensDetails
 
 from kagent.state import (
     CompactionEntry,
@@ -225,6 +226,16 @@ class Session:
             if not isinstance(response_id, str) or not isinstance(model, str):
                 raise ValueError("response metadata is invalid")
             usage = raw.get("usage")
+            if isinstance(usage, dict):
+                details = usage.get("input_tokens_details")
+                if isinstance(details, dict) and details.get("cache_write_tokens") is None:
+                    cached_tokens = details.get("cached_tokens")
+                    if not isinstance(cached_tokens, int) or isinstance(cached_tokens, bool):
+                        raise ValueError("cached_tokens must be an integer")
+                    usage = dict(usage)
+                    usage["input_tokens_details"] = InputTokensDetails.model_construct(
+                        cached_tokens=cached_tokens
+                    )
             return ResponseMetadata(
                 id=response_id,
                 model=model,

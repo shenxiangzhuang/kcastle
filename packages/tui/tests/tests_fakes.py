@@ -26,7 +26,7 @@ class Response:
     output = [Item()]
     usage = ResponseUsage(
         input_tokens=120,
-        input_tokens_details={"cached_tokens": 80},
+        input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},
         output_tokens=30,
         output_tokens_details={"reasoning_tokens": 10},
         total_tokens=150,
