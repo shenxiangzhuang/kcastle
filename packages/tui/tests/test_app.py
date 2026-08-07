@@ -74,12 +74,14 @@ async def test_assistant_messages_render_as_markdown() -> None:
     async with app.run_test() as pilot:
         transcript = app.query_one(Transcript)
         await transcript.start_assistant()
-        await transcript.append_assistant(
-            "| name | value |\n| --- | --- |\n| K | 1 |\n\n[OpenAI](https://openai.com)"
-        )
+        source = "| name | value |\n| --- | --- |\n| K | 1 |\n\n[OpenAI](https://openai.com)"
+        for delta in source:
+            await transcript.append_assistant(delta)
+        await transcript.flush_assistant()
         await pilot.pause()
 
         markdown = transcript.query_one(Markdown)
+        assert markdown.source == source
         assert len(markdown.query("MarkdownTable")) == 1
         assert "https://openai.com" in markdown.source
 
