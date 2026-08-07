@@ -1,6 +1,6 @@
 [project]
 name = "k"
-version = "0.1.0a0"
+version = "0.1.0a1"
 description = "A minimal agent harness and Textual interface"
 readme = "README.md"
 requires-python = ">=3.12"

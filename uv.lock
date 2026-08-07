@@ -188,7 +188,7 @@ wheels = [
 
 [[package]]
 name = "k"
-version = "0.1.0a0"
+version = "0.1.0a1"
 source = { virtual = "." }
 dependencies = [
     { name = "kcastle" },
@@ -217,7 +217,7 @@ dev = [
 
 [[package]]
 name = "kcastle"
-version = "0.1.0a0"
+version = "0.1.0a1"
 source = { editable = "packages/tui" }
 dependencies = [
     { name = "kcastle-agent" },
@@ -232,7 +232,7 @@ requires-dist = [
 
 [[package]]
 name = "kcastle-agent"
-version = "0.1.0a0"
+version = "0.1.0a1"
 source = { editable = "packages/agent" }
 dependencies = [
     { name = "openai" },
