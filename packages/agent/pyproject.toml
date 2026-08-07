@@ -1,6 +1,6 @@
 [project]
 name = "kcastle-agent"
-version = "0.1.0a3"
+version = "0.1.0a4"
 description = "A minimal OpenAI Responses agent harness"
 readme = "README.md"
 requires-python = ">=3.12"

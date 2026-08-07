@@ -1,10 +1,10 @@
 [project]
 name = "k"
-version = "0.1.0a3"
+version = "0.1.0a4"
 description = "A minimal agent harness and Textual interface"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["kcastle==0.1.0a3"]
+dependencies = ["kcastle==0.1.0a4"]
 
 [dependency-groups]
 dev = [
