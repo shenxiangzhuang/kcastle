@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib.metadata import version
 from pathlib import Path
 
 from kagent import (
@@ -238,6 +239,7 @@ class AgentTUI(App[None]):
     def banner(self) -> Text:
         return Text.assemble(
             ("K CASTLE", "bold cyan"),
+            (f" v{version('kcastle')}", "dim"),
             ("  minimal agent harness", "dim"),
             "\n",
             ("cwd      ", "bold"),
