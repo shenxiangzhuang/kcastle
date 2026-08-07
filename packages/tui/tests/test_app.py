@@ -1,4 +1,5 @@
 import asyncio
+from importlib.metadata import version
 from pathlib import Path
 
 from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, ToolRuntime
@@ -30,6 +31,7 @@ async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
         assert app.focused is composer
         assert composer.outer_size.height == 3
         assert banner_widget.parent is transcript
+        assert f"v{version('kcastle')}" in banner
         assert str(tmp_path) in banner
         assert "model-x" not in banner
 
