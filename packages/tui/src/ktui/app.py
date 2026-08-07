@@ -34,8 +34,11 @@ from textual.binding import Binding
 from textual.command import CommandPalette
 from textual.containers import Container, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.timer import Timer
 from textual.widgets import Button, Input, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
+
+_STREAM_FLUSH_INTERVAL = 0.05
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,13 +64,18 @@ class Transcript(VerticalScroll):
     def __init__(self) -> None:
         super().__init__(id="transcript")
         self._assistant: Markdown | None = None
+        self._assistant_buffer: list[str] = []
+        self._assistant_flush_timer: Timer | None = None
+        self._assistant_started = False
 
     async def write(self, label: str, value: str, *, style: str = "") -> None:
         await self.mount(Static(Text.assemble((f"{label}\n", style), value), classes="entry"))
         self.scroll_end(animate=False)
 
     async def start_assistant(self) -> None:
+        await self.flush_assistant()
         self._assistant = Markdown(classes="assistant-body")
+        self._assistant_started = False
         await self.mount(
             Vertical(
                 Static(Text("K", style="bold cyan"), classes="assistant-label"),
@@ -80,12 +88,34 @@ class Transcript(VerticalScroll):
     async def append_assistant(self, delta: str) -> None:
         if self._assistant is None:
             return
+        if not self._assistant_started:
+            self._assistant_started = True
+            await self._assistant.append(delta)
+            self.scroll_end(animate=False)
+        else:
+            self._assistant_buffer.append(delta)
+            if self._assistant_flush_timer is None:
+                self._assistant_flush_timer = self.set_timer(
+                    _STREAM_FLUSH_INTERVAL, self.flush_assistant
+                )
+
+    async def flush_assistant(self) -> None:
+        """Render buffered streaming text immediately."""
+
+        if self._assistant_flush_timer is not None:
+            self._assistant_flush_timer.stop()
+            self._assistant_flush_timer = None
+        if self._assistant is None or not self._assistant_buffer:
+            return
+        delta = "".join(self._assistant_buffer)
+        self._assistant_buffer.clear()
         await self._assistant.append(delta)
         self.scroll_end(animate=False)
 
     async def load(self, state: State) -> None:
         """Replace the projection with the readable messages from a session."""
 
+        await self.flush_assistant()
         await self.query(".entry, .session-history").remove()
         self._assistant = None
         transcript: list[str] = []
@@ -327,6 +357,8 @@ class AgentTUI(App[None]):
         try:
             executor = None if self.tools is None else self.execute_tool
             async for event in self.agent.run(text, execute_tool=executor):
+                if not isinstance(event, TextDelta):
+                    await transcript.flush_assistant()
                 match event:
                     case ModelStarted(turn=turn):
                         self.show_status(f"thinking · turn {turn}")
@@ -354,6 +386,8 @@ class AgentTUI(App[None]):
         except Exception as error:
             self.show_status("error")
             await transcript.write("Error", f"{type(error).__name__}: {error}", style="bold red")
+        finally:
+            await transcript.flush_assistant()
 
     async def approve(self, call: ResponseFunctionToolCall) -> bool:
         if self.permission_mode is PermissionMode.ALLOW_ALL:
