@@ -181,8 +181,10 @@ class Agent:
                     ]
                     for item in calls:
                         yield ToolStarted(item)
+
+                    async def run_tool(item: ResponseFunctionToolCall) -> ToolResult:
                         try:
-                            outcome = (
+                            return (
                                 await execute_tool(item)
                                 if execute_tool is not None
                                 else ToolResult(
@@ -191,10 +193,13 @@ class Agent:
                                 )
                             )
                         except Exception as error:
-                            outcome = ToolResult(
+                            return ToolResult(
                                 f"{type(error).__name__}: {error}",
                                 is_error=True,
                             )
+
+                    outcomes = await asyncio.gather(*(run_tool(item) for item in calls))
+                    for item, outcome in zip(calls, outcomes, strict=True):
                         yield ToolFinished(item, outcome.output, outcome.is_error)
                         tool_entry = self.state.append_items(
                             [

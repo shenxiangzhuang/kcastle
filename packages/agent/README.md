@@ -26,3 +26,5 @@ async for event in agent.run("Hello"):
 `Agent` is the brain: it owns causal State, the loop, steering, follow-ups, cancellation, events,
 and compaction. `kagent.harness` surrounds it with Session persistence, an explicit Env, and
 executable ToolRuntime adapters. User interfaces render events and provide approvals only.
+When one model response contains multiple function calls, `execute_tool` may run concurrently;
+custom executors must be safe for concurrent use.
