@@ -99,7 +99,7 @@ class Transcript(VerticalScroll):
         self._assistant_started = False
         await self.mount(
             Vertical(
-                Static(Text("K", style="bold cyan"), classes="assistant-label"),
+                Static(Text("K", style="bold #c4b5fd"), classes="assistant-label"),
                 self._assistant,
                 classes="entry",
             )
@@ -289,8 +289,16 @@ class AgentTUI(App[None]):
         padding-left: 1;
         border-left: solid #30363d;
     }
-    .assistant-label { height: 1; color: #a5b4fc; }
+    .assistant-label { height: 1; color: #c4b5fd; }
     .assistant-body { height: auto; }
+    .assistant-body, .session-history {
+        link-color: #c4b5fd;
+        link-color-hover: #ede9fe;
+        link-style: underline;
+    }
+    .assistant-body MarkdownHeader, .session-history MarkdownHeader { color: #e5e7eb; }
+    .assistant-body MarkdownTableContent > .header,
+    .session-history MarkdownTableContent > .header { color: #c4b5fd; }
     .tool-call {
         height: auto;
         margin: 0 0 0 1;
@@ -325,12 +333,12 @@ class AgentTUI(App[None]):
         background: #161b22;
         border: round #30363d;
     }
-    #composer:focus { border: round #7c8cff; }
+    #composer:focus { border: round #a78bfa; }
     ApprovalScreen { align: center middle; }
-    #approval { width: 70%; height: auto; padding: 2; border: round #7c8cff; }
+    #approval { width: 70%; height: auto; padding: 2; border: round #a78bfa; }
     #approval Button { margin-top: 1; margin-right: 1; }
     PickerScreen { align: center middle; }
-    #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round #7c8cff; }
+    #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round #a78bfa; }
     #picker OptionList { height: auto; max-height: 20; margin-top: 1; }
     """
 
@@ -381,7 +389,7 @@ class AgentTUI(App[None]):
     @property
     def banner(self) -> Text:
         return Text.assemble(
-            ("K", "bold #a5b4fc"),
+            ("K", "bold #c4b5fd"),
             (f" v{version('kcastle')}", "dim"),
             ("  ·  ", "#484f58"),
             str(self.working_directory),
