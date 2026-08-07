@@ -30,17 +30,32 @@ from kagent import (
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.command import CommandPalette
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.theme import Theme
 from textual.timer import Timer
 from textual.widgets import Button, Collapsible, Input, Label, Markdown, OptionList, Static
 from textual.widgets.option_list import Option
 
 _STREAM_FLUSH_INTERVAL = 0.05
+_THEME = Theme(
+    name="kcastle",
+    primary="#c4b5fd",
+    secondary="#a78bfa",
+    accent="#ddd6fe",
+    foreground="#d8dee9",
+    background="#0d1117",
+    surface="#161b22",
+    panel="#1c2128",
+    boost="#21262d",
+    success="#7ee787",
+    warning="#d29922",
+    error="#ff7b72",
+)
 
 
 def _tool_summary(arguments: str) -> str:
@@ -93,17 +108,41 @@ class Transcript(VerticalScroll):
         await self.mount(Static(Text.assemble((f"{label}\n", style), value), classes="entry"))
         self.scroll_end(animate=False)
 
-    async def start_assistant(self) -> None:
-        await self.flush_assistant()
-        self._assistant = Markdown(classes="assistant-body")
-        self._assistant_started = False
+    async def write_user(self, value: str) -> None:
         await self.mount(
-            Vertical(
-                Static(Text("K", style="bold #c4b5fd"), classes="assistant-label"),
-                self._assistant,
-                classes="entry",
+            Static(
+                Text.assemble(("›  ", "bold #c4b5fd"), (value, "bold #f0f3f6")),
+                classes="entry user-entry",
             )
         )
+        self.scroll_end(animate=False)
+
+    async def dismiss_banner(self) -> None:
+        """Remove startup-only metadata from the transcript."""
+
+        await self.query(".banner").remove()
+
+    def _focus_composer(self, text: str) -> None:
+        self.scroll_end(animate=False)
+        composer = self.app.query_one("#composer", Input)
+        composer.focus()
+        composer.insert_text_at_cursor(text)
+
+    def on_key(self, event: events.Key) -> None:
+        if not event.is_printable or event.character == "/":
+            return
+        event.stop()
+        self._focus_composer(event.character or "")
+
+    def on_paste(self, event: events.Paste) -> None:
+        event.stop()
+        self._focus_composer(event.text)
+
+    async def start_assistant(self) -> None:
+        await self.flush_assistant()
+        self._assistant = Markdown(classes="entry assistant-body")
+        self._assistant_started = False
+        await self.mount(self._assistant)
         self.scroll_end(animate=False)
 
     async def append_assistant(self, delta: str) -> None:
@@ -136,9 +175,10 @@ class Transcript(VerticalScroll):
     async def start_tool(self, call_id: str, name: str, arguments: str) -> None:
         """Add one compact, expandable tool call."""
 
-        detail = Static(arguments, markup=False, classes="tool-detail")
+        detail = Static(arguments, markup=False, classes="tool-detail-content")
+        viewport = VerticalScroll(detail, classes="tool-detail")
         tool = Collapsible(
-            detail,
+            viewport,
             title=f"◌  {name}{_tool_summary(arguments)}",
             collapsed=True,
             classes="tool-call",
@@ -164,7 +204,7 @@ class Transcript(VerticalScroll):
 
         await self.flush_assistant()
         self.anchor()
-        await self.query(".entry, .tool-call, .session-history").remove()
+        await self.query(".banner, .entry, .tool-call, .session-history").remove()
         self._assistant = None
         self._tools.clear()
         transcript: list[str] = []
@@ -172,7 +212,7 @@ class Transcript(VerticalScroll):
         async def flush_transcript() -> None:
             if not transcript:
                 return
-            await self.mount(Markdown("\n\n---\n\n".join(transcript), classes="session-history"))
+            await self.mount(Markdown("\n\n".join(transcript), classes="session-history"))
             transcript.clear()
 
         latest = state.latest_compaction
@@ -182,7 +222,7 @@ class Transcript(VerticalScroll):
             role = item.get("role")
             content = item.get("content")
             if role == "user" and isinstance(content, str):
-                transcript.append(f"**You**\n\n{content}")
+                transcript.append(f"> **›**  {content.replace(chr(10), f'{chr(10)}> ')}")
             elif role == "assistant" and isinstance(content, list):
                 parts: list[str] = []
                 for part in content:
@@ -193,7 +233,7 @@ class Transcript(VerticalScroll):
                         parts.append(value)
                 text = "".join(parts)
                 if text:
-                    transcript.append(f"**K**\n\n{text}")
+                    transcript.append(text)
             elif item.get("type") == "function_call":
                 call_id = item.get("call_id")
                 name = item.get("name")
@@ -226,10 +266,18 @@ class ApprovalScreen(ModalScreen[bool]):
         self.call = call
 
     def compose(self) -> ComposeResult:
+        try:
+            arguments = json.dumps(json.loads(self.call.arguments), ensure_ascii=False, indent=2)
+        except json.JSONDecodeError:
+            arguments = self.call.arguments
         with Container(id="approval"):
-            yield Label(f"Allow {self.call.name}?\n\n{self.call.arguments}")
-            yield Button("Allow", id="allow", variant="success")
-            yield Button("Deny", id="deny", variant="error")
+            yield Label("Permission required", id="approval-title")
+            yield Label(self.call.name, id="approval-tool")
+            with VerticalScroll(id="approval-details"):
+                yield Static(arguments, markup=False)
+            with Horizontal(id="approval-actions"):
+                yield Button("Deny", id="deny")
+                yield Button("Allow", id="allow")
 
     @on(Button.Pressed, "#allow")
     def allow(self) -> None:
@@ -281,16 +329,25 @@ class AgentTUI(App[None]):
         background: #161b22;
         border-bottom: solid #30363d;
     }
-    #transcript { height: 1fr; padding: 1 3; background: #0d1117; }
-    .entry {
+    #transcript {
         width: 100%;
+        height: 1fr;
+        padding: 0;
+        background: #0d1117;
+        scrollbar-size: 1 1;
+        scrollbar-background: #0d1117;
+        scrollbar-color: #30363d;
+        scrollbar-color-hover: #484f58;
+        scrollbar-color-active: #6e7681;
+    }
+    .entry {
+        width: 1fr;
         height: auto;
         margin-bottom: 1;
         padding-left: 1;
-        border-left: solid #30363d;
     }
-    .assistant-label { height: 1; color: #c4b5fd; }
-    .assistant-body { height: auto; }
+    .user-entry { margin-top: 1; border-left: solid #a78bfa; }
+    .assistant-body { height: auto; padding: 0 1; }
     .assistant-body, .session-history {
         link-color: #c4b5fd;
         link-color-hover: #ede9fe;
@@ -299,9 +356,16 @@ class AgentTUI(App[None]):
     .assistant-body MarkdownHeader, .session-history MarkdownHeader { color: #e5e7eb; }
     .assistant-body MarkdownTableContent > .header,
     .session-history MarkdownTableContent > .header { color: #c4b5fd; }
+    .session-history MarkdownBlockQuote {
+        margin: 1 0;
+        padding: 0 1;
+        color: #f0f3f6;
+        background: transparent;
+        border-left: solid #a78bfa;
+    }
     .tool-call {
         height: auto;
-        margin: 0 0 0 1;
+        margin: 0;
         padding: 0 1;
         color: #8b949e;
         background: #161b22;
@@ -317,7 +381,11 @@ class AgentTUI(App[None]):
         padding: 1;
         color: #b1bac4;
         background: #0d1117;
-        overflow-y: auto;
+        scrollbar-size: 1 1;
+        scrollbar-background: #0d1117;
+        scrollbar-color: #30363d;
+        scrollbar-color-hover: #484f58;
+        scrollbar-color-active: #6e7681;
     }
     #status {
         height: 2;
@@ -334,9 +402,67 @@ class AgentTUI(App[None]):
         border: round #30363d;
     }
     #composer:focus { border: round #a78bfa; }
-    ApprovalScreen { align: center middle; }
-    #approval { width: 70%; height: auto; padding: 2; border: round #a78bfa; }
-    #approval Button { margin-top: 1; margin-right: 1; }
+    CommandPalette {
+        background: #0d1117 80%;
+        align-horizontal: center;
+    }
+    CommandPalette #--container {
+        width: 72;
+        max-width: 90%;
+        height: auto;
+        max-height: 70%;
+        margin-top: 4;
+        padding: 1;
+        color: #d8dee9;
+        background: #161b22;
+        border: round #30363d;
+    }
+    CommandPalette #--input {
+        height: 3;
+        color: #f0f3f6;
+        background: #0d1117;
+        border: none;
+    }
+    CommandPalette #--input.--list-visible { border-bottom: solid #30363d; }
+    CommandPalette #--results { max-height: 20; background: #161b22; }
+    CommandPalette OptionList { padding: 0; background: #161b22; border: none; }
+    CommandPalette OptionList > .option-list--option { padding: 0 1; }
+    CommandPalette OptionList > .option-list--option-highlighted {
+        color: #ede9fe;
+        background: #2d2740;
+        text-style: none;
+    }
+    CommandPalette > .command-palette--help-text { color: #6e7681; }
+    ApprovalScreen { align: center middle; background: #0d1117 80%; }
+    #approval {
+        width: 64;
+        max-width: 90%;
+        height: auto;
+        max-height: 80%;
+        padding: 1 2;
+        color: #d8dee9;
+        background: #161b22;
+        border: round #30363d;
+    }
+    #approval-title { height: 1; color: #f0f3f6; text-style: bold; }
+    #approval-tool { height: 1; margin-top: 1; color: #c4b5fd; }
+    #approval-details {
+        height: auto;
+        max-height: 12;
+        margin-top: 1;
+        padding: 1;
+        color: #b1bac4;
+        background: #0d1117;
+        scrollbar-size: 1 1;
+        scrollbar-background: #0d1117;
+        scrollbar-color: #30363d;
+    }
+    #approval-actions { height: 3; margin-top: 1; align-horizontal: right; }
+    #approval Button { min-width: 10; height: 3; margin-left: 1; border: none; }
+    #deny { color: #b1bac4; background: #21262d; }
+    #deny:hover { color: #f0f3f6; background: #30363d; }
+    #allow { color: #0d1117; background: #c4b5fd; text-style: bold; }
+    #allow:hover { background: #ddd6fe; }
     PickerScreen { align: center middle; }
     #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round #a78bfa; }
     #picker OptionList { height: auto; max-height: 20; margin-top: 1; }
@@ -359,6 +485,8 @@ class AgentTUI(App[None]):
         permission_mode: PermissionMode = PermissionMode.ASK,
     ) -> None:
         super().__init__()
+        self.register_theme(_THEME)
+        self.theme = _THEME.name
         self.agent = agent
         self.tools = tools
         self.backends = tuple(backends)
@@ -467,7 +595,8 @@ class AgentTUI(App[None]):
             await transcript.write("Steer", text, style="bold magenta")
             return
 
-        await transcript.write("You", text, style="bold green")
+        await transcript.dismiss_banner()
+        await transcript.write_user(text)
         self.run_agent(text)
 
     @work(exclusive=True, exit_on_error=False)
@@ -522,11 +651,16 @@ class AgentTUI(App[None]):
         return await self.tools.execute(call, approve=self.approve)
 
     def action_slash(self) -> None:
+        if isinstance(self.screen, (CommandPalette, ModalScreen)):
+            return
         focused = self.focused
         if isinstance(focused, Input) and focused.id == "composer" and not focused.value:
             self.push_screen(CommandPalette(id="--command-palette"))
         elif isinstance(focused, Input):
             focused.insert_text_at_cursor("/")
+        else:
+            self.query_one(Transcript).scroll_end(animate=False)
+            self.push_screen(CommandPalette(id="--command-palette"))
 
     def action_cancel(self) -> None:
         if self.agent.is_running:
@@ -593,7 +727,7 @@ class AgentTUI(App[None]):
         response = session.state.latest_response
         self._set_usage(None if response is None else response.usage)
         await self.query_one(Transcript).load(session.state)
-        self.show_status(f"resumed {session.info.title}")
+        self.show_status("idle")
 
     @staticmethod
     def _session_label(info: SessionInfo) -> str:
