@@ -203,6 +203,27 @@ async def test_permission_mode_defaults_to_ask_and_can_allow_all() -> None:
         )
 
 
+async def test_approval_can_allow_all() -> None:
+    agent = Agent(client=fake_client("hello"), model="test", instructions="test")
+    app = AgentTUI(agent=agent)
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="call",
+        name="shell",
+        arguments='{"command":"pwd"}',
+    )
+
+    async with app.run_test() as pilot:
+        approval = app.run_worker(app.approve(call))
+        await pilot.pause()
+
+        await pilot.click("#allow-all")
+        assert await approval.wait()
+        assert app.permission_mode is PermissionMode.ALLOW_ALL
+        assert "permissions: allow all" in str(app.query_one("#status").render())
+        assert await app.approve(call)
+
+
 async def test_approval_prompts_are_serialized(monkeypatch: pytest.MonkeyPatch) -> None:
     agent = Agent(client=fake_client("hello"), model="test", instructions="test")
     app = AgentTUI(agent=agent)
@@ -254,6 +275,7 @@ async def test_approval_panel_formats_tool_arguments() -> None:
         assert [button.id for button in app.screen.query("#approval-actions Button")] == [
             "deny",
             "allow",
+            "allow-all",
         ]
 
 

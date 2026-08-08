@@ -93,6 +93,14 @@ class PermissionMode(StrEnum):
     ALLOW_ALL = "allow all"
 
 
+class ApprovalDecision(StrEnum):
+    """One response to a tool approval request."""
+
+    DENY = "deny"
+    ALLOW = "allow"
+    ALLOW_ALL = "allow all"
+
+
 class Transcript(VerticalScroll):
     """Append-only transcript with one mutable assistant streaming block."""
 
@@ -256,7 +264,7 @@ class Transcript(VerticalScroll):
             self.scroll_end(animate=False)
 
 
-class ApprovalScreen(ModalScreen[bool]):
+class ApprovalScreen(ModalScreen[ApprovalDecision]):
     """Confirmation boundary for tools with external effects."""
 
     BINDINGS = [("escape", "deny", "Deny")]
@@ -278,14 +286,19 @@ class ApprovalScreen(ModalScreen[bool]):
             with Horizontal(id="approval-actions"):
                 yield Button("Deny", id="deny")
                 yield Button("Allow", id="allow")
+                yield Button("Allow all", id="allow-all")
 
     @on(Button.Pressed, "#allow")
     def allow(self) -> None:
-        self.dismiss(True)
+        self.dismiss(ApprovalDecision.ALLOW)
+
+    @on(Button.Pressed, "#allow-all")
+    def allow_all(self) -> None:
+        self.dismiss(ApprovalDecision.ALLOW_ALL)
 
     @on(Button.Pressed, "#deny")
     def deny(self) -> None:
-        self.dismiss(False)
+        self.dismiss(ApprovalDecision.DENY)
 
 
 class PickerScreen[T](ModalScreen[T | None]):
@@ -643,7 +656,11 @@ class AgentTUI(App[None]):
         async with self._approval_lock:
             if self.permission_mode is PermissionMode.ALLOW_ALL:
                 return True
-            return await self.push_screen_wait(ApprovalScreen(call))
+            decision = await self.push_screen_wait(ApprovalScreen(call))
+            if decision is ApprovalDecision.ALLOW_ALL:
+                self.permission_mode = PermissionMode.ALLOW_ALL
+                self.show_status(self.activity)
+            return decision is not ApprovalDecision.DENY
 
     async def execute_tool(self, call: ResponseFunctionToolCall) -> ToolResult:
         if self.tools is None:
