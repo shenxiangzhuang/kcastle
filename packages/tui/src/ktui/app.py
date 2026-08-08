@@ -111,7 +111,7 @@ class Transcript(VerticalScroll):
     async def write_user(self, value: str) -> None:
         await self.mount(
             Static(
-                Text.assemble(("›  ", "bold #c4b5fd"), (value, "bold #f0f3f6")),
+                Text(value, style="bold #f0f3f6"),
                 classes="entry user-entry",
             )
         )
@@ -222,7 +222,7 @@ class Transcript(VerticalScroll):
             role = item.get("role")
             content = item.get("content")
             if role == "user" and isinstance(content, str):
-                transcript.append(f"> **›**  {content.replace(chr(10), f'{chr(10)}> ')}")
+                transcript.append(f"> {content.replace(chr(10), f'{chr(10)}> ')}")
             elif role == "assistant" and isinstance(content, list):
                 parts: list[str] = []
                 for part in content:
@@ -346,7 +346,11 @@ class AgentTUI(App[None]):
         margin-bottom: 1;
         padding-left: 1;
     }
-    .user-entry { margin-top: 1; border-left: solid #a78bfa; }
+    .user-entry {
+        margin-top: 1;
+        padding: 1 2;
+        background: #21262d;
+    }
     .assistant-body { height: auto; padding: 0 1; }
     .assistant-body, .session-history {
         link-color: #c4b5fd;
@@ -358,10 +362,10 @@ class AgentTUI(App[None]):
     .session-history MarkdownTableContent > .header { color: #c4b5fd; }
     .session-history MarkdownBlockQuote {
         margin: 1 0;
-        padding: 0 1;
+        padding: 1 2;
         color: #f0f3f6;
-        background: transparent;
-        border-left: solid #a78bfa;
+        background: #21262d;
+        border-left: none;
     }
     .tool-call {
         height: auto;
