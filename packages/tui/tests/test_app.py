@@ -44,7 +44,7 @@ async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
 
         status = str(app.query_one("#status").render())
         user = str(transcript.query_one(".user-entry", Static).render())
-        assert "›  hi" in user
+        assert user == "hi"
         assert not transcript.query(".assistant-label")
         assert "idle" in status
         assert "model-x · context 80/150/50,000" in status
@@ -175,6 +175,7 @@ async def test_compacted_history_renders_summary_and_active_suffix() -> None:
         source = transcript.query_one(".session-history", Markdown).source
         assert "earlier summary" in source
         assert "kept message" in source
+        assert "›" not in source
         assert "old message" not in source
         assert "old message" in str(list(state.items()))
 
