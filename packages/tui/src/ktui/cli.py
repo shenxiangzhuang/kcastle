@@ -6,7 +6,7 @@ import argparse
 import os
 import subprocess
 from collections.abc import Mapping
-from dataclasses import replace
+from importlib.metadata import version
 from pathlib import Path
 
 from kagent import Agent, CompactionConfig, Env, Session, ToolRuntime
@@ -19,6 +19,38 @@ _DEFAULT_INSTRUCTIONS = """You are K, a capable agent working in the current dir
 Use the available tools to inspect reality, act, verify results, and continue until the user's
 request is genuinely complete. Keep the user informed through concise final answers.
 """
+
+_HELP = """A minimal agent.
+
+Usage: {prog} [OPTIONS] [COMMAND]
+
+Commands:
+  self  Manage the kcastle executable
+
+Options:
+  -h, --help     Display the concise help for this command
+  -V, --version  Display the kcastle version
+"""
+
+_SELF_HELP = """Manage the kcastle executable
+
+Usage: {prog} [OPTIONS] <COMMAND>
+
+Commands:
+  update  Update kcastle
+
+Options:
+  -h, --help  Display the concise help for this command
+"""
+
+
+class _HelpParser(argparse.ArgumentParser):
+    help_text: str | None = None
+
+    def format_help(self) -> str:
+        if self.help_text is None:
+            return super().format_help()
+        return self.help_text.format(prog=self.prog)
 
 
 def backends_from_env(env: Mapping[str, str]) -> tuple[Backend, ...]:
@@ -53,18 +85,25 @@ def backends_from_env(env: Mapping[str, str]) -> tuple[Backend, ...]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="K agent TUI")
-    commands = parser.add_subparsers(dest="command")
-    self_commands = commands.add_parser("self").add_subparsers(required=True)
-    self_commands.add_parser("update")
-    parser.add_argument("--model")
-    parser.add_argument("--context-window", type=int)
-    parser.add_argument("--session", type=Path, help="resume a session JSONL file")
-    parser.add_argument(
-        "--session-dir",
-        type=Path,
-        default=Path.home() / ".kcastle" / "sessions",
+    parser = _HelpParser(
+        usage="%(prog)s [OPTIONS] [COMMAND]",
+        add_help=False,
     )
+    parser.help_text = _HELP
+    parser.add_argument("-h", "--help", action="help")
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {version('kcastle')}",
+    )
+    commands = parser.add_subparsers(dest="command")
+    self_parser = commands.add_parser("self", add_help=False)
+    self_parser.prog = "kcastle self"
+    self_parser.help_text = _SELF_HELP
+    self_parser.add_argument("-h", "--help", action="help")
+    self_commands = self_parser.add_subparsers(required=True)
+    self_commands.add_parser("update")
     args = parser.parse_args()
 
     if args.command == "self":
@@ -76,15 +115,7 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
     backend = backends[0]
-    if args.model is not None:
-        backend = replace(backend, model=args.model)
-    if args.context_window is not None:
-        backend = replace(backend, context_window=args.context_window)
-    backends = (backend, *backends[1:])
-
-    session = (
-        Session.open(args.session) if args.session is not None else Session.create(args.session_dir)
-    )
+    session = Session.create(Path.home() / ".kcastle" / "sessions")
     tools = ToolRuntime(Env(Path.cwd()), [shell_tool])
     agent = Agent(
         client=backend.client,
