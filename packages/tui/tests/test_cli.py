@@ -1,10 +1,37 @@
 import subprocess
 import sys
+from importlib.metadata import version
 from unittest.mock import Mock
 
 import pytest
 from ktui import cli
 from ktui.cli import backends_from_env
+
+
+def test_help_and_version(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["kcastle", "--help"])
+    with pytest.raises(SystemExit, match="0"):
+        cli.main()
+    help_text = capsys.readouterr().out
+    assert help_text.startswith("A minimal agent.\n\nUsage: kcastle [OPTIONS] [COMMAND]")
+    assert "Commands:\n  self  Manage the kcastle executable" in help_text
+    assert "--model" not in help_text
+
+    monkeypatch.setattr(sys, "argv", ["kcastle", "self", "--help"])
+    with pytest.raises(SystemExit, match="0"):
+        cli.main()
+    self_help = capsys.readouterr().out
+    assert self_help.startswith(
+        "Manage the kcastle executable\n\nUsage: kcastle self [OPTIONS] <COMMAND>"
+    )
+    assert "Commands:\n  update  Update kcastle" in self_help
+
+    monkeypatch.setattr(sys, "argv", ["kcastle", "-V"])
+    with pytest.raises(SystemExit, match="0"):
+        cli.main()
+    assert capsys.readouterr().out == f"kcastle {version('kcastle')}\n"
 
 
 def test_self_update_upgrades_kcastle_prerelease(monkeypatch: pytest.MonkeyPatch) -> None:

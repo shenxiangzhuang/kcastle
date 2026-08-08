@@ -45,11 +45,10 @@ uvx kcastle
 ```
 
 K automatically selects the configured provider. DeepSeek takes precedence when both keys are
-present. Use `--model` or `--context-window` to override the provider defaults.
+present.
 
 Each launch creates an append-only JSONL session under `~/.kcastle/sessions`; its title comes from
-the first user message and its metadata records the creation time. Use `--session PATH` to resume a
-specific session directly.
+the first user message and its metadata records the creation time. Use `/resume` to switch sessions.
 
 Type `/` in an empty composer to open the built-in command list:
 
