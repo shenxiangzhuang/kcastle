@@ -1,11 +1,11 @@
 [project]
 name = "kcastle"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "Textual interface for kcastle-agent"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "kcastle-agent==0.1.0a4",
+    "kcastle-agent==0.1.0a5",
     "textual==8.2.8",
 ]
 
