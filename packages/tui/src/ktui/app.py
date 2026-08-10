@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib.metadata import version
 from pathlib import Path
+from uuid import uuid4
 
 from kagent import (
     Agent,
@@ -91,6 +93,36 @@ class PermissionMode(StrEnum):
 
     ASK = "ask"
     ALLOW_ALL = "allow all"
+
+
+class ApprovalDecision(StrEnum):
+    """One response to a tool approval request."""
+
+    DENY = "deny"
+    ALLOW = "allow"
+    ALLOW_ALL = "allow all"
+
+
+def _read_permission_mode(
+    session: Session, default: PermissionMode = PermissionMode.ASK
+) -> PermissionMode:
+    try:
+        return PermissionMode(session.info.path.with_suffix(".permissions").read_text().strip())
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError):
+        return PermissionMode.ASK
+
+
+def _write_permission_mode(session: Session, mode: PermissionMode) -> None:
+    path = session.info.path.with_suffix(".permissions")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(f"{mode.value}\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class Transcript(VerticalScroll):
@@ -256,14 +288,23 @@ class Transcript(VerticalScroll):
             self.scroll_end(animate=False)
 
 
-class ApprovalScreen(ModalScreen[bool]):
+class ApprovalScreen(ModalScreen[ApprovalDecision]):
     """Confirmation boundary for tools with external effects."""
 
-    BINDINGS = [("escape", "deny", "Deny")]
+    BINDINGS = [
+        ("escape", "deny", "Deny"),
+        Binding("pageup", "details_page_up", show=False),
+        Binding("pagedown", "details_page_down", show=False),
+        Binding("home", "details_home", show=False),
+        Binding("end", "details_end", show=False),
+    ]
 
     def __init__(self, call: ResponseFunctionToolCall) -> None:
         super().__init__()
         self.call = call
+
+    def on_mount(self) -> None:
+        self.query_one("#allow", Button).focus()
 
     def compose(self) -> ComposeResult:
         try:
@@ -273,18 +314,67 @@ class ApprovalScreen(ModalScreen[bool]):
         with Container(id="approval"):
             yield Label("Permission required", id="approval-title")
             yield Label(self.call.name, id="approval-tool")
-            with VerticalScroll(id="approval-details"):
+            with VerticalScroll(id="approval-details", can_focus=False):
                 yield Static(arguments, markup=False)
             with Horizontal(id="approval-actions"):
                 yield Button("Deny", id="deny")
                 yield Button("Allow", id="allow")
+                yield Button("Allow all", id="allow-all")
 
     @on(Button.Pressed, "#allow")
     def allow(self) -> None:
-        self.dismiss(True)
+        self.dismiss(ApprovalDecision.ALLOW)
+
+    @on(Button.Pressed, "#allow-all")
+    def allow_all(self) -> None:
+        self.dismiss(ApprovalDecision.ALLOW_ALL)
 
     @on(Button.Pressed, "#deny")
     def deny(self) -> None:
+        self.dismiss(ApprovalDecision.DENY)
+
+    def action_details_page_up(self) -> None:
+        self.query_one("#approval-details", VerticalScroll).scroll_page_up(animate=False)
+
+    def action_details_page_down(self) -> None:
+        self.query_one("#approval-details", VerticalScroll).scroll_page_down(animate=False)
+
+    def action_details_home(self) -> None:
+        self.query_one("#approval-details", VerticalScroll).scroll_home(animate=False)
+
+    def action_details_end(self) -> None:
+        self.query_one("#approval-details", VerticalScroll).scroll_end(animate=False)
+
+
+class AllowAllScreen(ModalScreen[bool]):
+    """Warn before allowing tools to run without further approval."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Container(id="approval"):
+            yield Label("Enable allow all?", id="approval-title")
+            yield Static(
+                "Allow all can execute any command without asking again.\n"
+                "Only continue if you trust this session.",
+                id="allow-all-warning",
+            )
+            with Horizontal(id="approval-actions"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Enable allow all", id="confirm-allow-all")
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel", Button).focus()
+
+    @on(Button.Pressed, "#confirm-allow-all")
+    def confirm(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_cancel(self) -> None:
         self.dismiss(False)
 
 
@@ -437,7 +527,7 @@ class AgentTUI(App[None]):
         text-style: none;
     }
     CommandPalette > .command-palette--help-text { color: #6e7681; }
-    ApprovalScreen { align: center middle; background: #0d1117 80%; }
+    ApprovalScreen, AllowAllScreen { align: center middle; background: #0d1117 80%; }
     #approval {
         width: 64;
         max-width: 90%;
@@ -450,6 +540,7 @@ class AgentTUI(App[None]):
     }
     #approval-title { height: 1; color: #f0f3f6; text-style: bold; }
     #approval-tool { height: 1; margin-top: 1; color: #c4b5fd; }
+    #allow-all-warning { height: auto; margin-top: 1; color: #d29922; }
     #approval-details {
         height: auto;
         max-height: 12;
@@ -462,11 +553,17 @@ class AgentTUI(App[None]):
         scrollbar-color: #30363d;
     }
     #approval-actions { height: 3; margin-top: 1; align-horizontal: right; }
-    #approval Button { min-width: 10; height: 3; margin-left: 1; border: none; }
-    #deny { color: #b1bac4; background: #21262d; }
-    #deny:hover { color: #f0f3f6; background: #30363d; }
-    #allow { color: #0d1117; background: #c4b5fd; text-style: bold; }
-    #allow:hover { background: #ddd6fe; }
+    #approval Button {
+        min-width: 10;
+        height: 3;
+        margin-left: 1;
+        color: #b1bac4;
+        background: #21262d;
+        border: none;
+    }
+    #approval Button:hover { color: #f0f3f6; background: #30363d; }
+    #approval Button:focus { color: #0d1117; background: #c4b5fd; text-style: bold; }
+    #approval Button:focus:hover { background: #ddd6fe; }
     PickerScreen { align: center middle; }
     #picker { width: 70%; height: auto; max-height: 70%; padding: 2; border: round #a78bfa; }
     #picker OptionList { height: auto; max-height: 20; margin-top: 1; }
@@ -495,7 +592,9 @@ class AgentTUI(App[None]):
         self.tools = tools
         self.backends = tuple(backends)
         self.session = session
-        self.permission_mode = permission_mode
+        self.permission_mode = (
+            permission_mode if session is None else _read_permission_mode(session, permission_mode)
+        )
         self._approval_lock = asyncio.Lock()
         self.activity = "idle"
         self.cached_tokens = 0
@@ -647,7 +746,10 @@ class AgentTUI(App[None]):
         async with self._approval_lock:
             if self.permission_mode is PermissionMode.ALLOW_ALL:
                 return True
-            return await self.push_screen_wait(ApprovalScreen(call))
+            decision = await self.push_screen_wait(ApprovalScreen(call))
+            if decision is ApprovalDecision.ALLOW_ALL:
+                return await self._confirm_allow_all()
+            return decision is ApprovalDecision.ALLOW
 
     async def execute_tool(self, call: ResponseFunctionToolCall) -> ToolResult:
         if self.tools is None:
@@ -680,13 +782,33 @@ class AgentTUI(App[None]):
         composer.cursor_position = len(composer.value)
         composer.focus()
 
-    def action_permissions(self) -> None:
-        self.permission_mode = (
-            PermissionMode.ALLOW_ALL
-            if self.permission_mode is PermissionMode.ASK
-            else PermissionMode.ASK
-        )
+    @work(group="permissions", exclusive=True, exit_on_error=False)
+    async def action_permissions(self) -> None:
+        if self.permission_mode is PermissionMode.ASK:
+            await self._confirm_allow_all()
+            return
+        try:
+            self._set_permission_mode(PermissionMode.ASK)
+        except OSError:
+            self.show_status("permission save failed")
+            return
         self.show_status("idle" if not self.agent.is_running else self.activity)
+
+    async def _confirm_allow_all(self) -> bool:
+        if not await self.push_screen_wait(AllowAllScreen()):
+            return False
+        try:
+            self._set_permission_mode(PermissionMode.ALLOW_ALL)
+        except OSError:
+            self.show_status("permission save failed")
+            return False
+        self.show_status("idle" if not self.agent.is_running else self.activity)
+        return True
+
+    def _set_permission_mode(self, mode: PermissionMode) -> None:
+        if self.session is not None:
+            _write_permission_mode(self.session, mode)
+        self.permission_mode = mode
 
     def action_exit(self) -> None:
         self.exit()
@@ -727,7 +849,7 @@ class AgentTUI(App[None]):
         self.agent.state = session.state
         self.agent.commit = session.commit
         self.session = session
-        self.permission_mode = PermissionMode.ASK
+        self.permission_mode = _read_permission_mode(session)
         response = session.state.latest_response
         self._set_usage(None if response is None else response.usage)
         await self.query_one(Transcript).load(session.state)
