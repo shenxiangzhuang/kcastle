@@ -4,13 +4,20 @@ from pathlib import Path
 
 import pytest
 from kagent import Agent, CompactionConfig, Env, ResponseMetadata, Session, State, ToolRuntime
-from ktui.app import AgentTUI, ApprovalScreen, PermissionMode, Transcript
+from ktui.app import (
+    AgentTUI,
+    AllowAllScreen,
+    ApprovalDecision,
+    ApprovalScreen,
+    PermissionMode,
+    Transcript,
+)
 from openai.types.responses import ResponseFunctionToolCall, ResponseUsage
 from tests_fakes import fake_client
 from textual import events
 from textual.command import CommandPalette
 from textual.containers import VerticalScroll
-from textual.widgets import Collapsible, Input, Label, Markdown, OptionList, Static
+from textual.widgets import Button, Collapsible, Input, Label, Markdown, OptionList, Static
 
 
 async def test_app_starts_and_accepts_input(tmp_path: Path) -> None:
@@ -192,6 +199,18 @@ async def test_permission_mode_defaults_to_ask_and_can_allow_all() -> None:
         await pilot.press("/", *"permissions", "enter")
         await pilot.pause()
 
+        assert isinstance(app.screen, AllowAllScreen)
+        assert app.permission_mode is PermissionMode.ASK
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.permission_mode is PermissionMode.ASK
+
+        await pilot.press("/", *"permissions", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, AllowAllScreen)
+        await pilot.press("tab", "enter")
+        await pilot.pause()
+
         assert app.permission_mode is PermissionMode.ALLOW_ALL
         assert "permissions: allow all" in str(app.query_one("#status").render())
         assert await app.approve(
@@ -218,7 +237,39 @@ async def test_approval_can_allow_all() -> None:
         approval = app.run_worker(app.approve(call))
         await pilot.pause()
 
-        await pilot.click("#allow-all")
+        assert app.focused is app.screen.query_one("#allow", Button)
+        await pilot.press("tab")
+        await pilot.pause()
+        deny = app.screen.query_one("#deny", Button)
+        allow = app.screen.query_one("#allow", Button)
+        allow_all = app.screen.query_one("#allow-all", Button)
+        assert allow.rich_style.bgcolor == deny.rich_style.bgcolor
+        assert allow_all.rich_style.bgcolor != allow.rich_style.bgcolor
+
+        await pilot.press("tab")
+        assert app.focused is deny
+        await pilot.press("shift+tab")
+        assert app.focused is allow_all
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, AllowAllScreen)
+        assert "execute any command" in str(app.screen.query_one("#allow-all-warning").render())
+        assert app.permission_mode is PermissionMode.ASK
+        assert app.focused is app.screen.query_one("#cancel", Button)
+
+        await pilot.press("enter")
+        assert not await approval.wait()
+        assert app.permission_mode is PermissionMode.ASK
+
+        approval = app.run_worker(app.approve(call))
+        await pilot.pause()
+        await pilot.press("tab", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, AllowAllScreen)
+
+        await pilot.press("tab", "enter")
         assert await approval.wait()
         assert app.permission_mode is PermissionMode.ALLOW_ALL
         assert "permissions: allow all" in str(app.query_one("#status").render())
@@ -231,13 +282,13 @@ async def test_approval_prompts_are_serialized(monkeypatch: pytest.MonkeyPatch) 
     active = 0
     peak = 0
 
-    async def prompt(_: object) -> bool:
+    async def prompt(_: object) -> ApprovalDecision:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
         await asyncio.sleep(0)
         active -= 1
-        return True
+        return ApprovalDecision.ALLOW
 
     monkeypatch.setattr(app, "push_screen_wait", prompt)
     calls = [
@@ -261,7 +312,9 @@ async def test_approval_panel_formats_tool_arguments() -> None:
         type="function_call",
         call_id="call-1",
         name="shell",
-        arguments='{"command":"pwd"}',
+        arguments='{"command":"pwd","padding":['
+        + ",".join(f'"line {index}"' for index in range(30))
+        + "]}",
     )
 
     async with app.run_test() as pilot:
@@ -278,6 +331,12 @@ async def test_approval_panel_formats_tool_arguments() -> None:
             "allow",
             "allow-all",
         ]
+        details = app.screen.query_one("#approval-details", VerticalScroll)
+        assert details.max_scroll_y > 0
+        assert app.focused is app.screen.query_one("#allow", Button)
+        await pilot.press("end")
+        await pilot.pause()
+        assert details.scroll_y == details.max_scroll_y
 
 
 async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
@@ -319,6 +378,46 @@ async def test_resume_switches_state_and_commit_target(tmp_path: Path) -> None:
         assert "earlier message" in str(agent.state.context())
         assert "new message" in resumed_path.read_text()
         assert not current_path.exists()
+
+
+async def test_resume_restores_each_sessions_permission_mode(tmp_path: Path) -> None:
+    first = Session.create(tmp_path)
+    second = Session.create(tmp_path)
+    await first.commit(first.state.append_user("first"))
+    await second.commit(second.state.append_user("second"))
+    agent = Agent(
+        client=fake_client("hello"),
+        model="test",
+        instructions="test",
+        state=first.state,
+        commit=first.commit,
+    )
+    app = AgentTUI(agent=agent, session=first)
+
+    async with app.run_test() as pilot:
+        permissions = app.action_permissions()
+        await pilot.pause()
+        await pilot.press("tab", "enter")
+        await permissions.wait()
+        assert app.permission_mode is PermissionMode.ALLOW_ALL
+
+    reopened = Session.open(second.info.path)
+    resumed_app = AgentTUI(
+        agent=Agent(
+            client=fake_client("hello"),
+            model="test",
+            instructions="test",
+            state=reopened.state,
+            commit=reopened.commit,
+        ),
+        session=reopened,
+    )
+
+    async with resumed_app.run_test():
+        assert resumed_app.permission_mode is PermissionMode.ASK
+
+        await resumed_app.resume(Session.open(first.info.path))
+        assert resumed_app.permission_mode is PermissionMode.ALLOW_ALL
 
 
 async def test_resume_reports_an_unreadable_session(tmp_path: Path) -> None:
