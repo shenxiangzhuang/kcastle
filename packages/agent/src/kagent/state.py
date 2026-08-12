@@ -114,6 +114,8 @@ class State:
         active_start = self._item_indexes.get(first_kept_id)
         if active_start is None:
             raise ValueError(f"unknown first_kept_id: {first_kept_id}")
+        if active_start < self._active_start:
+            raise ValueError("first_kept_id must be in the active history")
         entry = CompactionEntry(
             id=self._next_id(),
             summary=summary,
@@ -124,7 +126,7 @@ class State:
         self._entries.append(entry)
         self._latest_compaction = entry
         self._active_start = active_start
-        return entry
+        return deepcopy(entry)
 
     def rollback(self, entry_id: int) -> None:
         """Remove only an uncommitted tail entry after persistence fails."""
@@ -194,7 +196,7 @@ class State:
 
     @property
     def latest_compaction(self) -> CompactionEntry | None:
-        return self._latest_compaction
+        return deepcopy(self._latest_compaction)
 
     @property
     def latest_response(self) -> ResponseMetadata | None:
@@ -203,12 +205,18 @@ class State:
     def _validate_history(self) -> None:
         if [entry.id for entry in self._entries] != list(range(1, len(self._entries) + 1)):
             raise ValueError("state entry IDs must be consecutive from 1")
-        seen_items: set[int] = set()
-        for entry in self._entries:
+        active_start = 0
+        item_indexes: dict[int, int] = {}
+        for index, entry in enumerate(self._entries):
             if isinstance(entry, ItemEntry):
-                seen_items.add(entry.id)
-            elif entry.first_kept_id not in seen_items:
+                item_indexes[entry.id] = index
+                continue
+            boundary = item_indexes.get(entry.first_kept_id)
+            if boundary is None:
                 raise ValueError(f"unknown first_kept_id: {entry.first_kept_id}")
+            if boundary < active_start:
+                raise ValueError("compaction boundary must not restore inactive history")
+            active_start = boundary
 
     def _reindex(self) -> None:
         self._active_start = 0

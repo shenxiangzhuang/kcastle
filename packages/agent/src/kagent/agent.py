@@ -123,22 +123,22 @@ class Agent:
                             instructions=self.instructions,
                             tools=self.tools,
                         )
-                    if config is not None and needs_compaction(tokens_before, config):
-                        yield CompactionStarted(tokens_before)
-                        entry = await compact_state(
-                            client=self.client,
-                            model=self.model,
-                            state=self.state,
-                            config=config,
-                            tokens_before=tokens_before,
-                        )
-                        await self._commit(entry)
-                        yield CompactionFinished(
-                            tokens_before=entry.tokens_before,
-                            first_kept_id=entry.first_kept_id,
-                            summary=entry.summary,
-                        )
-                        context = self.state.context()
+                        if needs_compaction(tokens_before, config):
+                            yield CompactionStarted(tokens_before)
+                            entry = await compact_state(
+                                client=self.client,
+                                model=self.model,
+                                state=self.state,
+                                config=config,
+                                tokens_before=tokens_before,
+                            )
+                            await self._commit(entry)
+                            yield CompactionFinished(
+                                tokens_before=entry.tokens_before,
+                                first_kept_id=entry.first_kept_id,
+                                summary=entry.summary,
+                            )
+                            context = self.state.context()
 
                     turn += 1
                     yield ModelStarted(turn)

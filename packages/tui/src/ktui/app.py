@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from importlib.metadata import version
 from pathlib import Path
+from typing import ClassVar
 from uuid import uuid4
 
 from kagent import (
@@ -291,7 +292,7 @@ class Transcript(VerticalScroll):
 class ApprovalScreen(ModalScreen[ApprovalDecision]):
     """Confirmation boundary for tools with external effects."""
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding | tuple[str, str, str]]] = [
         ("escape", "deny", "Deny"),
         Binding("pageup", "details_page_up", show=False),
         Binding("pagedown", "details_page_down", show=False),
@@ -349,7 +350,7 @@ class ApprovalScreen(ModalScreen[ApprovalDecision]):
 class AllowAllScreen(ModalScreen[bool]):
     """Warn before allowing tools to run without further approval."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("escape", "cancel", "Cancel")]
 
     def compose(self) -> ComposeResult:
         with Container(id="approval"):
@@ -381,7 +382,7 @@ class AllowAllScreen(ModalScreen[bool]):
 class PickerScreen[T](ModalScreen[T | None]):
     """Small modal picker backed by Textual's native option list."""
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("escape", "cancel", "Cancel")]
 
     def __init__(self, heading: str, choices: tuple[tuple[str, T], ...]) -> None:
         super().__init__()
@@ -570,7 +571,7 @@ class AgentTUI(App[None]):
     """
 
     ENABLE_COMMAND_PALETTE = False
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("/", "slash", show=False, priority=True),
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+q", "ignore", show=False, priority=True),
