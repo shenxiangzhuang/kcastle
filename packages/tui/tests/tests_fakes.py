@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import ClassVar, cast
 
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseUsage
@@ -23,7 +23,7 @@ class Response:
     id = "response"
     model = "test"
     output_text = "hello"
-    output = [Item()]
+    output: ClassVar[list[Item]] = [Item()]
     usage = ResponseUsage(
         input_tokens=120,
         input_tokens_details={"cached_tokens": 80, "cache_write_tokens": 0},

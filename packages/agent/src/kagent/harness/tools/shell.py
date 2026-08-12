@@ -33,7 +33,8 @@ async def run_shell(params: ShellParams, env: Env) -> str:
                 process.kill()
             await process.wait()
     output = stdout.decode(errors="replace")
-    return f"exit_code={process.returncode}\n{output}"[-100_000:]
+    prefix = f"exit_code={process.returncode}\n"
+    return prefix + output[-(100_000 - len(prefix)) :]
 
 
 shell_tool = Tool(

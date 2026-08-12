@@ -3,9 +3,9 @@
 A minimal OpenAI Responses Agent core with optional harness infrastructure.
 
 ```python
-from openai import AsyncOpenAI
-
 from pathlib import Path
+
+from openai import AsyncOpenAI
 
 from kagent import Agent, Session
 

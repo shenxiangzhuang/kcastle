@@ -84,7 +84,7 @@ async def compact_state(
     if not summary:
         raise RuntimeError("compaction returned an empty summary")
 
-    entry = state.append_compaction(
+    return state.append_compaction(
         summary=summary,
         first_kept_id=kept[0].id,
         tokens_before=tokens_before,
@@ -94,7 +94,6 @@ async def compact_state(
             usage=response.usage,
         ),
     )
-    return entry
 
 
 def _find_cut(batches: list[ItemEntry], keep_recent_tokens: int) -> int | None:

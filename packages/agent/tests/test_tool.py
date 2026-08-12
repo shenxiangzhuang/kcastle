@@ -80,3 +80,30 @@ async def test_shell_timeout_kills_the_process(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.is_error
     assert process.killed
+
+
+async def test_shell_keeps_exit_code_when_truncating_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CompletedProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, None]:
+            return b"x" * 100_001, None
+
+    async def create_process(*_: object, **__: object) -> CompletedProcess:
+        return CompletedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", create_process)
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="large-output",
+        name="shell",
+        arguments='{"command":"anything"}',
+    )
+
+    result = await shell_tool.execute(call, Env(Path.cwd()))
+
+    assert not result.is_error
+    assert result.output.startswith("exit_code=0\n")
+    assert len(result.output) == 100_000

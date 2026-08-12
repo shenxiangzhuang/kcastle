@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import Self, cast
 from uuid import uuid4
 
 from openai.types.responses import ResponseUsage
@@ -61,13 +60,13 @@ class Session:
         self._failed = False
 
     @classmethod
-    def create(cls, directory: Path) -> Session:
+    def create(cls, directory: Path) -> Self:
         created_at = datetime.now(UTC)
         name = f"{created_at:%Y%m%dT%H%M%S}-{uuid4().hex[:8]}.jsonl"
         return cls(info=SessionInfo(directory / name, "Untitled session", created_at))
 
     @classmethod
-    def open(cls, path: Path) -> Session:
+    def open(cls, path: Path) -> Self:
         try:
             info, entries, tail_offset, missing_newline = cls._read(path)
             if tail_offset is not None:
@@ -85,7 +84,11 @@ class Session:
         """List valid persisted sessions newest first using only their headers."""
 
         infos: list[SessionInfo] = []
-        for path in directory.glob("*.jsonl"):
+        try:
+            paths = tuple(directory.glob("*.jsonl"))
+        except OSError as error:
+            raise SessionError(f"Cannot list sessions in {directory}: {error}") from error
+        for path in paths:
             try:
                 with path.open("rb") as file:
                     raw = file.readline(_HEADER_LIMIT + 1)
@@ -346,7 +349,7 @@ class Session:
         try:
             with temporary.open("x", encoding="utf-8") as file:
                 file.write(value)
-            os.replace(temporary, path)
+            temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)
 
@@ -367,6 +370,6 @@ class Session:
                         raise OSError("session ended before the repair boundary")
                     target.write(chunk)
                     remaining -= len(chunk)
-            os.replace(temporary, path)
+            temporary.replace(path)
         finally:
             temporary.unlink(missing_ok=True)

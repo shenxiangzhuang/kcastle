@@ -163,7 +163,7 @@ async def test_tool_output_stays_collapsed_until_requested() -> None:
         await pilot.press("end")
         await pilot.pause()
         assert detail.max_scroll_y > 0
-        assert detail.scroll_y == detail.max_scroll_y
+        assert detail.scroll_target_y == detail.max_scroll_y
 
 
 async def test_compacted_history_renders_summary_and_active_suffix() -> None:

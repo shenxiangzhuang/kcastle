@@ -30,7 +30,7 @@ target-version = "py312"
 docstring-code-format = true
 
 [tool.ruff.lint]
-select = ["E", "F", "UP", "B", "SIM", "I"]
+select = ["E", "F", "B", "C4", "I", "PERF", "PIE", "RET", "RUF012", "SIM", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages"]
