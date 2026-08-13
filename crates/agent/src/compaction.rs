@@ -1,5 +1,6 @@
 use async_openai::types::responses::{InputItem, Tool};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::state::{State, estimate_tokens};
 
@@ -84,6 +85,8 @@ pub(crate) fn prepare_compaction(
     let compacted = batches[..cut]
         .iter()
         .flat_map(|(_, items)| items.iter())
+        .filter_map(|item| serde_json::to_value(item).ok())
+        .map(truncate_tool_output)
         .collect::<Vec<_>>();
     prompt.push_str("New history to incorporate:\n");
     prompt.push_str(&serde_json::to_string_pretty(&compacted).ok()?);
@@ -94,6 +97,28 @@ pub(crate) fn prepare_compaction(
     })
 }
 
+fn truncate_tool_output(mut item: Value) -> Value {
+    let Some(object) = item.as_object_mut() else {
+        return item;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("function_call_output") {
+        return item;
+    }
+    let Some(output) = object.get_mut("output") else {
+        return item;
+    };
+    let Some(text) = output.as_str() else {
+        return item;
+    };
+    let count = text.chars().count();
+    if count <= 2_000 {
+        return item;
+    }
+    let kept = text.chars().take(2_000).collect::<String>();
+    *output = Value::String(format!("{kept}\n… [{} chars omitted]", count - 2_000));
+    item
+}
+
 fn batch_starts_with_tool_output(items: &[InputItem]) -> bool {
     matches!(
         items.first(),
@@ -101,4 +126,23 @@ fn batch_starts_with_tool_output(items: &[InputItem]) -> bool {
             async_openai::types::responses::Item::FunctionCallOutput(_)
         ))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::truncate_tool_output;
+
+    #[test]
+    fn summary_prompt_truncates_large_tool_output() {
+        let item = truncate_tool_output(json!({
+            "type": "function_call_output",
+            "call_id": "call",
+            "output": "x".repeat(2_100),
+        }));
+        let output = item["output"].as_str().unwrap();
+        assert!(output.ends_with("… [100 chars omitted]"));
+        assert!(output.len() < 2_100);
+    }
 }

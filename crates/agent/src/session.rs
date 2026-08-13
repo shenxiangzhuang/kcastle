@@ -1,9 +1,10 @@
 use std::fs::{self, OpenOptions as StdOpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_openai::types::responses::{InputItem, ResponseUsage};
+use async_openai::types::responses::{FunctionCallOutputItemParam, InputItem, Item, ResponseUsage};
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs::{File, OpenOptions};
@@ -40,6 +41,22 @@ enum Record {
 pub struct Session {
     info: SessionInfo,
     state: State,
+    file: Option<File>,
+}
+
+pub trait StateCommit: Send + Sync {
+    fn info(&self) -> &SessionInfo;
+
+    fn set_initial_title<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<(), SessionError>>;
+
+    fn commit<'a>(&'a mut self, entry: &'a StateEntry) -> BoxFuture<'a, Result<(), SessionError>>;
+}
+
+struct SessionCommit {
+    info: SessionInfo,
     file: Option<File>,
 }
 
@@ -104,11 +121,28 @@ impl Session {
         }
         let state = State::restore(entries).map_err(SessionError::Invalid)?;
         let file = OpenOptions::new().append(true).open(&path).await?;
-        Ok(Self {
+        let mut session = Self {
             info,
             state,
             file: Some(file),
-        })
+        };
+        let unresolved = session.state.unresolved_tool_call_ids();
+        if !unresolved.is_empty() {
+            let items = unresolved
+                .into_iter()
+                .map(|call_id| {
+                    InputItem::from(Item::from(FunctionCallOutputItemParam {
+                        call_id,
+                        output: "Tool execution was interrupted; its side effects are unknown. Do not retry automatically."
+                            .into(),
+                        id: None,
+                        status: None,
+                    }))
+                })
+                .collect();
+            session.append_items(items, None).await?;
+        }
+        Ok(session)
     }
 
     pub fn list(directory: impl AsRef<Path>) -> Result<Vec<SessionInfo>, SessionError> {
@@ -121,7 +155,7 @@ impl Session {
         let mut sessions = entries
             .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-            .filter_map(|entry| read_session(&entry.path()).ok().map(|value| value.0))
+            .filter_map(|entry| read_session_info(&entry.path()).ok())
             .collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
         Ok(sessions)
@@ -135,15 +169,23 @@ impl Session {
         &self.state
     }
 
+    pub fn into_parts(self) -> (State, Box<dyn StateCommit>) {
+        (
+            self.state,
+            Box::new(SessionCommit {
+                info: self.info,
+                file: self.file,
+            }),
+        )
+    }
+
     pub async fn set_initial_title(&mut self, message: &str) -> Result<(), SessionError> {
         if self.info.title != "Untitled session" {
             return Ok(());
         }
-        let title = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        let title = title.chars().take(80).collect::<String>();
-        if title.is_empty() {
+        let Some(title) = initial_title(message) else {
             return Ok(());
-        }
+        };
         self.write(&Record::Title {
             title: title.clone(),
         })
@@ -219,6 +261,52 @@ impl Session {
     }
 }
 
+impl StateCommit for SessionCommit {
+    fn info(&self) -> &SessionInfo {
+        &self.info
+    }
+
+    fn set_initial_title<'a>(
+        &'a mut self,
+        message: &'a str,
+    ) -> BoxFuture<'a, Result<(), SessionError>> {
+        Box::pin(async move {
+            if self.info.title != "Untitled session" {
+                return Ok(());
+            }
+            let Some(title) = initial_title(message) else {
+                return Ok(());
+            };
+            if let Some(file) = &mut self.file {
+                write_record(
+                    file,
+                    &Record::Title {
+                        title: title.clone(),
+                    },
+                )
+                .await?;
+            }
+            self.info.title = title;
+            Ok(())
+        })
+    }
+
+    fn commit<'a>(&'a mut self, entry: &'a StateEntry) -> BoxFuture<'a, Result<(), SessionError>> {
+        Box::pin(async move {
+            if let Some(file) = &mut self.file {
+                write_record(
+                    file,
+                    &Record::Entry {
+                        entry: entry.clone(),
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        })
+    }
+}
+
 async fn write_record(file: &mut File, record: &Record) -> Result<(), SessionError> {
     let mut encoded = serde_json::to_vec(record)?;
     encoded.push(b'\n');
@@ -245,7 +333,11 @@ fn read_session(path: &Path) -> Result<(SessionInfo, Vec<StateEntry>, bool), Ses
         }
         let record = match serde_json::from_slice::<Record>(line) {
             Ok(record) => record,
-            Err(_error) if valid_end + chunk.len() == bytes.len() && !chunk.ends_with(b"\n") => {
+            Err(error)
+                if error.classify() != serde_json::error::Category::Data
+                    && valid_end + chunk.len() == bytes.len()
+                    && !chunk.ends_with(b"\n") =>
+            {
                 StdOpenOptions::new()
                     .write(true)
                     .open(path)?
@@ -285,6 +377,52 @@ fn read_session(path: &Path) -> Result<(SessionInfo, Vec<StateEntry>, bool), Ses
     ))
 }
 
+#[derive(Deserialize)]
+struct HeaderRecord {
+    record: String,
+    title: Option<String>,
+    created_at: Option<u64>,
+}
+
+fn read_session_info(path: &Path) -> Result<SessionInfo, SessionError> {
+    let file = StdOpenOptions::new().read(true).open(path)?;
+    let mut title = None;
+    let mut created_at = None;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let record: HeaderRecord = match serde_json::from_str(&line) {
+            Ok(record) => record,
+            Err(_) if title.is_some() => break,
+            Err(error) => return Err(error.into()),
+        };
+        match record.record.as_str() {
+            "session" => {
+                title = record.title;
+                created_at = record.created_at;
+            }
+            "title" => {
+                if let Some(value) = record.title {
+                    title = Some(value);
+                }
+            }
+            "entry" => break,
+            _ => {}
+        }
+    }
+    Ok(SessionInfo {
+        path: path.to_path_buf(),
+        title: title.ok_or_else(|| SessionError::Invalid("missing session header".into()))?,
+        created_at: created_at
+            .ok_or_else(|| SessionError::Invalid("missing creation time".into()))?,
+    })
+}
+
+fn initial_title(message: &str) -> Option<String> {
+    let title = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title.chars().take(80).collect::<String>();
+    (!title.is_empty()).then_some(title)
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -296,17 +434,13 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    use async_openai::types::responses::{EasyInputMessage, InputItem};
+    use async_openai::types::responses::{EasyInputMessage, FunctionToolCall, InputItem, Item};
 
     use super::Session;
 
     #[tokio::test]
     async fn round_trips_and_repairs_a_torn_tail() {
-        let directory = std::env::temp_dir().join(format!(
-            "kcastle-session-test-{}-{}",
-            std::process::id(),
-            super::now_secs()
-        ));
+        let directory = test_directory("tail");
         let mut session = Session::create(&directory).await.unwrap();
         session
             .set_initial_title("hello native session")
@@ -330,5 +464,84 @@ mod tests {
         assert_eq!(session.state().entries().len(), 1);
         drop(session);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_closes_interrupted_tool_calls() {
+        let directory = test_directory("tool-recovery");
+        let mut session = Session::create(&directory).await.unwrap();
+        let call = FunctionToolCall {
+            arguments: r#"{"command":"touch maybe"}"#.into(),
+            call_id: "call_1".into(),
+            namespace: None,
+            name: "shell".into(),
+            id: None,
+            status: None,
+        };
+        session
+            .append_items(vec![InputItem::from(Item::from(call))], None)
+            .await
+            .unwrap();
+        let path = session.info().path.clone();
+        drop(session);
+
+        let session = Session::open(&path).await.unwrap();
+        assert!(session.state().unresolved_tool_call_ids().is_empty());
+        assert!(format!("{:?}", session.state().context()).contains("side effects are unknown"));
+        drop(session);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_uses_headers_even_when_history_is_damaged() {
+        let directory = test_directory("header-list");
+        let mut session = Session::create(&directory).await.unwrap();
+        session.set_initial_title("listed session").await.unwrap();
+        session
+            .append_items(vec![InputItem::from(EasyInputMessage::from("hello"))], None)
+            .await
+            .unwrap();
+        let path = session.info().path.clone();
+        let expected = session.info().clone();
+        drop(session);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"not-json\n")
+            .unwrap();
+
+        assert_eq!(Session::list(&directory).unwrap(), [expected]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_rejects_semantically_invalid_final_record() {
+        let directory = test_directory("semantic-tail");
+        let session = Session::create(&directory).await.unwrap();
+        let path = session.info().path.clone();
+        drop(session);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"record":"entry","entry":{"type":"items","id":2}}"#)
+            .unwrap();
+        let damaged = std::fs::read(&path).unwrap();
+
+        assert!(Session::open(&path).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn test_directory(label: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "kcastle-session-{label}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 }

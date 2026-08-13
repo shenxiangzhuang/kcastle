@@ -6,6 +6,6 @@ mod tool;
 
 pub use agent::{ActiveAgent, Agent, AgentError, AgentEvent, Model, RunControl, RunSummary};
 pub use compaction::CompactionConfig;
-pub use session::{Session, SessionError, SessionInfo};
+pub use session::{Session, SessionError, SessionInfo, StateCommit};
 pub use state::{ResponseMetadata, State, StateEntry, TranscriptItem};
-pub use tool::{Env, ShellTool, ToolResult};
+pub use tool::{AgentTool, Env, ShellTool, ToolResult};

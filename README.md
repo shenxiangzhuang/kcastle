@@ -46,8 +46,14 @@ For a non-interactive run:
 kcastle --prompt "Explain this repository"
 ```
 
-K writes append-only native JSONL sessions under `~/.kcastle/sessions`. Type `/` commands directly
-in the composer:
+Tools are denied in non-interactive mode unless explicitly enabled:
+
+```bash
+kcastle --prompt "Inspect the repository" --allow-tools
+```
+
+K writes append-only native JSONL sessions under `~/.kcastle/sessions`. Press `/` in an empty
+composer to open the searchable command dashboard:
 
 - `/resume` — open a saved session
 - `/model` — switch between configured backends
@@ -58,7 +64,9 @@ in the composer:
 - `/exit` — exit
 
 Submitting ordinary text during a run steers the next model turn. Press `Escape` to abort the
-active model or tool operation and `Ctrl-C` to exit.
+active model or tool operation and `Ctrl-C` to exit. Tool calls are collapsed by default; press
+`Tab` to select one and `Enter` to expand it, or click it. The allow-all permission mode is
+confirmed explicitly and stored per session.
 
 ## Develop
 

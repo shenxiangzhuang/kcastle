@@ -19,6 +19,9 @@ serde_json = "=1.0.151"
 thiserror = "=2.0.20"
 tokio = "=1.53.1"
 tokio-util = "=0.7.19"
+markdown-stream = { package = "codewandler-markdown-stream", version = "=0.2.1" }
+markdown-ratatui = { package = "codewandler-markdown-ratatui", version = "=0.2.1" }
+time = { version = "=0.3.55", features = ["formatting", "macros"] }
 
 kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.0" }
 

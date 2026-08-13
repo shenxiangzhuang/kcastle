@@ -26,7 +26,7 @@ K is a minimal Rust workspace with two packages:
 
 | Package | Crate | Responsibility |
 | --- | --- | --- |
-| `kcastle-agent` | `kcastle_agent` | Agent, state, Session, compaction, Env, and shell tool |
+| `kcastle-agent` | `kcastle_agent` | Agent, state, commit port, Session, compaction, Env, and tools |
 | `kcastle` | binary | Ratatui rendering, input, approvals, and dependency composition |
 
 The package dependency direction is `kcastle -> kcastle-agent`. The agent package must never
@@ -35,7 +35,8 @@ abstraction.
 
 ## Core semantics
 
-- An idle `Agent` owns its append-only `Session` and `State`.
+- An idle `Agent` owns append-only `State` plus a `StateCommit` persistence port.
+- `Session` is the default JSONL adapter; `AgentTool` values provide executable capabilities.
 - `Agent::start(self, input)` transfers the agent to one background task; `ActiveAgent::finish()`
   returns ownership after the operation settles.
 - `RunControl` sends steering, follow-up, approval, and cancellation signals without shared mutable

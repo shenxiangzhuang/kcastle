@@ -2,5 +2,7 @@
 
 Native Rust agent harness used by [K in Castle](https://github.com/shenxiangzhuang/kcastle).
 
-It provides a concrete OpenAI Responses run loop, append-only state and JSONL sessions, context
-compaction, cancellation-safe tool execution, and a local shell capability.
+It provides an OpenAI Responses run loop, append-only state and JSONL sessions, context compaction,
+cancellation-safe tool execution, and a local shell capability. Applications can construct the
+default session-backed agent or inject their own `StateCommit` and `AgentTool` implementations with
+`Agent::from_parts`.

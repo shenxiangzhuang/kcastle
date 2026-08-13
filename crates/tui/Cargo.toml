@@ -20,3 +20,6 @@ kcastle-agent.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
+markdown-stream.workspace = true
+markdown-ratatui.workspace = true
+time.workspace = true

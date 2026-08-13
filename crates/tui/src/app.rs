@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use kcastle_agent::{AgentEvent, Model, SessionInfo, TranscriptItem};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -8,6 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_textarea::TextArea;
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 const ACCENT: Color = Color::Rgb(196, 181, 253);
 
@@ -21,6 +23,7 @@ enum Entry {
         arguments: String,
         output: Option<String>,
         failed: bool,
+        expanded: bool,
     },
     Notice(String),
 }
@@ -40,14 +43,37 @@ enum Modal {
         names: Vec<String>,
         selected: usize,
     },
+    Commands {
+        items: Vec<CommandItem>,
+        query: String,
+        selected: usize,
+    },
+    AllowAll {
+        pending_call_id: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CommandItem {
+    command: String,
+    description: String,
+    prefill: bool,
 }
 
 pub enum UiAction {
     None,
     Submit(String),
-    Approve { call_id: String, allow: bool },
+    Approve {
+        call_id: String,
+        allow: bool,
+    },
     Resume(PathBuf),
     SelectModel(usize),
+    SetPermissions {
+        allow_all: bool,
+        pending_call_id: Option<String>,
+    },
+    Prefill(String),
     Abort,
     Exit,
 }
@@ -55,8 +81,16 @@ pub enum UiAction {
 pub struct App {
     entries: Vec<Entry>,
     input: TextArea<'static>,
-    status: String,
+    activity: String,
+    model: String,
+    session: String,
+    cwd: PathBuf,
+    context_window: usize,
+    cached_tokens: u32,
+    used_tokens: u32,
     modal: Option<Modal>,
+    tool_rows: Vec<(u16, usize)>,
+    selected_tool: Option<usize>,
     follow: bool,
     scroll: u16,
     allow_all: bool,
@@ -64,20 +98,36 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(model: &Model, session: &SessionInfo, transcript: Vec<TranscriptItem>) -> Self {
+    pub fn new(
+        model: &Model,
+        session: &SessionInfo,
+        transcript: Vec<TranscriptItem>,
+        cwd: &Path,
+        usage: Option<(u32, u32)>,
+        allow_all: bool,
+    ) -> Self {
         let mut input = TextArea::default();
         input.set_cursor_line_style(Style::default());
-        input.set_placeholder_text("Message K…");
+        input.set_placeholder_text("Message K…  / for commands");
         let mut app = Self {
             entries: Vec::new(),
             input,
-            status: format!("{} · {} · {}", model.name(), model.model(), session.title),
+            activity: "idle".into(),
+            model: format!("{} · {}", model.name(), model.model()),
+            session: session.title.clone(),
+            cwd: cwd.to_path_buf(),
+            context_window: model.context_window(),
+            cached_tokens: 0,
+            used_tokens: 0,
             modal: None,
+            tool_rows: Vec::new(),
+            selected_tool: None,
             follow: true,
             scroll: 0,
-            allow_all: false,
+            allow_all,
             should_exit: false,
         };
+        app.set_usage(usage);
         app.load_transcript(transcript);
         app
     }
@@ -93,7 +143,7 @@ impl App {
             ])
             .split(area);
 
-        let lines = self.transcript_lines();
+        let (lines, tool_lines) = self.transcript_lines(layout[0].width.saturating_sub(2) as usize);
         let viewport_height = layout[0].height.saturating_sub(2);
         if self.follow {
             self.scroll = (lines.len() as u16).saturating_sub(viewport_height);
@@ -107,14 +157,16 @@ impl App {
             .scroll((self.scroll, 0));
         frame.render_widget(transcript, layout[0]);
 
-        let activity = if running { "running" } else { "idle" };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!(" {activity} "), Style::default().fg(ACCENT)),
-                Span::raw(&self.status),
-            ])),
-            layout[1],
-        );
+        self.tool_rows = tool_lines
+            .into_iter()
+            .filter_map(|(line, entry)| {
+                let row = line as u16;
+                (row >= self.scroll && row < self.scroll.saturating_add(viewport_height))
+                    .then_some((layout[0].y + 1 + row - self.scroll, entry))
+            })
+            .collect();
+
+        frame.render_widget(Paragraph::new(self.status_line(running)), layout[1]);
 
         self.input.set_block(
             Block::default()
@@ -137,6 +189,10 @@ impl App {
         }
         match key.code {
             KeyCode::Esc if running => UiAction::Abort,
+            KeyCode::Char('/') if self.input.lines().iter().all(String::is_empty) => {
+                self.show_commands(running);
+                UiAction::None
+            }
             KeyCode::PageUp => {
                 self.follow = false;
                 self.scroll = self.scroll.saturating_sub(10);
@@ -151,14 +207,38 @@ impl App {
                 self.follow = true;
                 UiAction::None
             }
+            KeyCode::Tab => {
+                let tools = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        matches!(entry, Entry::Tool { .. }).then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if !tools.is_empty() {
+                    let position = self
+                        .selected_tool
+                        .and_then(|selected| tools.iter().position(|index| *index == selected))
+                        .map_or(0, |position| (position + 1) % tools.len());
+                    self.selected_tool = Some(tools[position]);
+                }
+                UiAction::None
+            }
             KeyCode::Enter => {
                 let value = self.input.lines().join("\n");
                 if value.trim().is_empty() {
+                    if let Some(index) = self.selected_tool
+                        && let Some(Entry::Tool { expanded, .. }) = self.entries.get_mut(index)
+                    {
+                        *expanded = !*expanded;
+                    }
                     return UiAction::None;
                 }
                 self.input = TextArea::default();
                 self.input.set_cursor_line_style(Style::default());
-                self.input.set_placeholder_text("Message K…");
+                self.input
+                    .set_placeholder_text("Message K…  / for commands");
                 UiAction::Submit(value)
             }
             _ => {
@@ -178,6 +258,14 @@ impl App {
                 self.follow = false;
                 self.scroll = self.scroll.saturating_add(3);
             }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, entry)) = self.tool_rows.iter().find(|(row, _)| *row == event.row)
+                    && let Some(Entry::Tool { expanded, .. }) = self.entries.get_mut(*entry)
+                {
+                    self.selected_tool = Some(*entry);
+                    *expanded = !*expanded;
+                }
+            }
             _ => {}
         }
     }
@@ -188,9 +276,9 @@ impl App {
 
     pub fn apply_event(&mut self, event: AgentEvent) -> Option<(String, bool)> {
         match event {
-            AgentEvent::RunStarted(_) => self.status = "thinking".into(),
+            AgentEvent::RunStarted(_) => self.activity = "thinking".into(),
             AgentEvent::ModelStarted(turn) => {
-                self.status = format!("model turn {turn}");
+                self.activity = format!("model turn {turn}");
                 self.entries.push(Entry::Assistant(String::new()));
                 self.follow = true;
             }
@@ -219,6 +307,7 @@ impl App {
                     arguments: call.arguments,
                     output: None,
                     failed: false,
+                    expanded: false,
                 });
             }
             AgentEvent::ToolFinished { call, result } => {
@@ -230,20 +319,22 @@ impl App {
                 }
             }
             AgentEvent::CompactionStarted { tokens_before } => {
-                self.status = format!("compacting {tokens_before} estimated tokens");
+                self.activity = format!("compacting {tokens_before} estimated tokens");
             }
             AgentEvent::CompactionFinished { .. } => {
-                self.status = "compaction finished".into();
+                self.activity = "compaction finished".into();
             }
             AgentEvent::RunFinished(summary) => {
-                self.status = summary.usage.map_or_else(
-                    || "finished".into(),
-                    |usage| format!("{} tokens", usage.total_tokens),
+                self.activity = "idle".into();
+                self.set_usage(
+                    summary.usage.as_ref().map(|usage| {
+                        (usage.input_tokens_details.cached_tokens, usage.total_tokens)
+                    }),
                 );
             }
-            AgentEvent::RunAborted => self.status = "aborted".into(),
+            AgentEvent::RunAborted => self.activity = "aborted".into(),
             AgentEvent::RunFailed(error) => {
-                self.status = "failed".into();
+                self.activity = "failed".into();
                 self.entries.push(Entry::Notice(format!("Error: {error}")));
             }
         }
@@ -261,7 +352,13 @@ impl App {
     }
 
     pub fn set_identity(&mut self, model: &Model, session: &SessionInfo) {
-        self.status = format!("{} · {} · {}", model.name(), model.model(), session.title);
+        self.model = format!("{} · {}", model.name(), model.model());
+        self.context_window = model.context_window();
+        self.session = session.title.clone();
+    }
+
+    pub fn set_usage_values(&mut self, usage: Option<(u32, u32)>) {
+        self.set_usage(usage);
     }
 
     pub fn load_transcript(&mut self, transcript: Vec<TranscriptItem>) {
@@ -280,6 +377,7 @@ impl App {
                     arguments,
                     output: None,
                     failed: false,
+                    expanded: false,
                 }),
                 TranscriptItem::ToolOutput { call_id, output } => {
                     if let Some(Entry::Tool {
@@ -321,10 +419,40 @@ impl App {
         });
     }
 
-    pub fn toggle_permissions(&mut self) {
-        self.allow_all = !self.allow_all;
-        let mode = if self.allow_all { "allow all" } else { "ask" };
-        self.notice(format!("Tool permissions: {mode}"));
+    pub fn show_commands(&mut self, running: bool) {
+        self.modal = Some(Modal::Commands {
+            items: command_items(running),
+            query: String::new(),
+            selected: 0,
+        });
+    }
+
+    pub fn request_permission_toggle(&mut self) -> Option<bool> {
+        if self.allow_all {
+            self.allow_all = false;
+            Some(false)
+        } else {
+            self.modal = Some(Modal::AllowAll {
+                pending_call_id: None,
+            });
+            None
+        }
+    }
+
+    pub fn set_permission_mode(&mut self, allow_all: bool) {
+        self.allow_all = allow_all;
+        self.notice(format!(
+            "Tool permissions: {}",
+            if allow_all { "allow all" } else { "ask" }
+        ));
+    }
+
+    pub fn prefill(&mut self, value: &str) {
+        self.input = TextArea::default();
+        self.input.set_cursor_line_style(Style::default());
+        self.input
+            .set_placeholder_text("Message K…  / for commands");
+        self.input.insert_str(value);
     }
 
     pub fn request_exit(&mut self) {
@@ -333,6 +461,26 @@ impl App {
 
     pub fn should_exit(&self) -> bool {
         self.should_exit
+    }
+
+    fn set_usage(&mut self, usage: Option<(u32, u32)>) {
+        (self.cached_tokens, self.used_tokens) = usage.unwrap_or((0, 0));
+    }
+
+    fn status_line(&self, running: bool) -> Line<'static> {
+        let activity = if running { &self.activity } else { "idle" };
+        Line::from(vec![
+            Span::styled(format!(" {activity} "), Style::default().fg(ACCENT)),
+            Span::raw(format!(
+                "permissions: {} · {} · context {}/{}/{} · {}",
+                if self.allow_all { "allow all" } else { "ask" },
+                self.model,
+                self.cached_tokens,
+                self.used_tokens,
+                self.context_window,
+                self.session,
+            )),
+        ])
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) -> Option<UiAction> {
@@ -344,11 +492,10 @@ impl App {
                     allow: true,
                 }),
                 KeyCode::Char('a') => {
-                    self.allow_all = true;
-                    Some(UiAction::Approve {
-                        call_id: call_id.clone(),
-                        allow: true,
-                    })
+                    self.modal = Some(Modal::AllowAll {
+                        pending_call_id: Some(call_id.clone()),
+                    });
+                    return Some(UiAction::None);
                 }
                 KeyCode::Char('n') | KeyCode::Esc => Some(UiAction::Approve {
                     call_id: call_id.clone(),
@@ -382,6 +529,50 @@ impl App {
                 KeyCode::Esc => Some(UiAction::None),
                 _ => None,
             },
+            Modal::Commands {
+                items,
+                query,
+                selected,
+            } => {
+                let visible = filtered_commands(items, query);
+                match key.code {
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        None
+                    }
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(visible.len().saturating_sub(1));
+                        None
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        *selected = 0;
+                        None
+                    }
+                    KeyCode::Char(character) => {
+                        query.push(character);
+                        *selected = 0;
+                        None
+                    }
+                    KeyCode::Enter => visible.get(*selected).map(|item| {
+                        if item.prefill {
+                            UiAction::Prefill(format!("{} ", item.command))
+                        } else {
+                            UiAction::Submit(item.command.clone())
+                        }
+                    }),
+                    KeyCode::Esc => Some(UiAction::None),
+                    _ => None,
+                }
+            }
+            Modal::AllowAll { pending_call_id } => match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => Some(UiAction::SetPermissions {
+                    allow_all: true,
+                    pending_call_id: pending_call_id.clone(),
+                }),
+                KeyCode::Char('n') | KeyCode::Esc => Some(UiAction::None),
+                _ => None,
+            },
         };
         if action.is_some() {
             self.modal = None;
@@ -389,22 +580,26 @@ impl App {
         action.or(Some(UiAction::None))
     }
 
-    fn transcript_lines(&self) -> Vec<Line<'static>> {
+    fn transcript_lines(&self, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
         if self.entries.is_empty() {
-            return vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    "  A minimal native agent harness.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-                Line::from(Span::styled(
-                    "  Type /help for commands.",
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ];
+            return (
+                vec![
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        format!("  {}", self.cwd.display()),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                    Line::from(Span::styled(
+                        "  Type / for commands.",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ],
+                Vec::new(),
+            );
         }
         let mut lines = Vec::new();
-        for entry in &self.entries {
+        let mut tool_lines = Vec::new();
+        for (entry_index, entry) in self.entries.iter().enumerate() {
             match entry {
                 Entry::User(text) => push_text(
                     &mut lines,
@@ -415,13 +610,26 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Entry::Assistant(text) if !text.is_empty() => {
-                    push_text(&mut lines, "K", text, Style::default())
+                    lines.push(Line::from(Span::styled(
+                        "K",
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    )));
+                    lines.extend(
+                        markdown_ratatui::render_with(
+                            &markdown_stream::parse(text),
+                            &markdown_ratatui::Theme::default(),
+                            width,
+                        )
+                        .lines,
+                    );
+                    lines.push(Line::from(""));
                 }
                 Entry::Tool {
                     name,
                     arguments,
                     output,
                     failed,
+                    expanded,
                     ..
                 } => {
                     let mark = if *failed {
@@ -432,18 +640,31 @@ impl App {
                         "·"
                     };
                     let color = if *failed { Color::Red } else { Color::Cyan };
-                    lines.push(Line::from(vec![
+                    tool_lines.push((lines.len(), entry_index));
+                    let mut line = Line::from(vec![
                         Span::styled(format!("{mark} {name}"), Style::default().fg(color)),
                         Span::styled(
                             format!("  {}", compact(arguments, 100)),
                             Style::default().fg(Color::DarkGray),
                         ),
-                    ]));
-                    if let Some(output) = output {
+                    ]);
+                    if self.selected_tool == Some(entry_index) {
+                        line = line.style(Style::default().bg(Color::DarkGray));
+                    }
+                    lines.push(line);
+                    if *expanded {
                         lines.push(Line::from(Span::styled(
-                            format!("  {}", compact(output, 180)),
+                            format!("  Arguments: {arguments}"),
                             Style::default().fg(Color::DarkGray),
                         )));
+                        if let Some(output) = output {
+                            for line in output.lines() {
+                                lines.push(Line::from(Span::styled(
+                                    format!("  {line}"),
+                                    Style::default().fg(Color::DarkGray),
+                                )));
+                            }
+                        }
                     }
                     lines.push(Line::from(""));
                 }
@@ -457,7 +678,7 @@ impl App {
                 Entry::Assistant(_) => {}
             }
         }
-        lines
+        (lines, tool_lines)
     }
 }
 
@@ -481,6 +702,83 @@ fn compact(value: &str, limit: usize) -> String {
     }
 }
 
+fn command_items(running: bool) -> Vec<CommandItem> {
+    let mut items = vec![
+        CommandItem {
+            command: "/resume".into(),
+            description: "Switch to a saved session".into(),
+            prefill: false,
+        },
+        CommandItem {
+            command: "/model".into(),
+            description: "Switch model backend".into(),
+            prefill: false,
+        },
+        CommandItem {
+            command: "/compact".into(),
+            description: "Compact the active context".into(),
+            prefill: false,
+        },
+        CommandItem {
+            command: "/permissions".into(),
+            description: "Switch tool approval policy".into(),
+            prefill: false,
+        },
+        CommandItem {
+            command: "/help".into(),
+            description: "Show command help".into(),
+            prefill: false,
+        },
+        CommandItem {
+            command: "/exit".into(),
+            description: "Exit K".into(),
+            prefill: false,
+        },
+    ];
+    if running {
+        items.insert(
+            4,
+            CommandItem {
+                command: "/queue".into(),
+                description: "Queue a message after the active task".into(),
+                prefill: true,
+            },
+        );
+    }
+    items
+}
+
+fn filtered_commands<'a>(items: &'a [CommandItem], query: &str) -> Vec<&'a CommandItem> {
+    let query = query.trim_start_matches('/').to_ascii_lowercase();
+    let mut matches = items
+        .iter()
+        .filter(|item| {
+            query.is_empty()
+                || item.command.to_ascii_lowercase().contains(&query)
+                || item.description.to_ascii_lowercase().contains(&query)
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|item| {
+        let command = item.command.trim_start_matches('/').to_ascii_lowercase();
+        (!command.starts_with(&query), !command.contains(&query))
+    });
+    matches
+}
+
+fn session_label(session: &SessionInfo) -> String {
+    let timestamp = i64::try_from(session.created_at)
+        .ok()
+        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+        .and_then(|time| {
+            time.format(format_description!(
+                "[year]-[month]-[day] [hour]:[minute] UTC"
+            ))
+            .ok()
+        })
+        .unwrap_or_else(|| session.created_at.to_string());
+    format!("{} · {timestamp}", session.title)
+}
+
 fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
     frame.render_widget(Clear, area);
     match modal {
@@ -500,7 +798,7 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
         Modal::Sessions { sessions, selected } => {
             let items = sessions
                 .iter()
-                .map(|session| ListItem::new(session.title.clone()))
+                .map(|session| ListItem::new(session_label(session)))
                 .collect::<Vec<_>>();
             let mut state = ListState::default().with_selected(Some(*selected));
             frame.render_stateful_widget(
@@ -525,6 +823,45 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
                 &mut state,
             );
         }
+        Modal::Commands {
+            items,
+            query,
+            selected,
+        } => {
+            let visible = filtered_commands(items, query);
+            let rows = visible
+                .iter()
+                .map(|item| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{:<14}", item.command), Style::default().fg(ACCENT)),
+                        Span::raw(&item.description),
+                    ]))
+                })
+                .collect::<Vec<_>>();
+            let mut state =
+                ListState::default().with_selected((!rows.is_empty()).then_some(*selected));
+            frame.render_stateful_widget(
+                List::new(rows)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" Commands /{query} ")),
+                    )
+                    .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White)),
+                area,
+                &mut state,
+            );
+        }
+        Modal::AllowAll { .. } => {
+            frame.render_widget(
+                Paragraph::new(
+                    "Allow all can execute any command without asking again.\n\nOnly continue if you trust this session.\n\n[y/Enter] enable   [n/Esc] cancel",
+                )
+                .block(Block::default().borders(Borders::ALL).title(" Enable allow all? "))
+                .wrap(Wrap { trim: false }),
+                area,
+            );
+        }
     }
 }
 
@@ -541,4 +878,118 @@ fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use kcastle_agent::{Model, SessionInfo};
+    use ratatui::style::Modifier;
+
+    use super::{App, Entry, Modal, UiAction, filtered_commands, session_label};
+
+    fn app() -> App {
+        App::new(
+            &Model::new("test", "key", "http://localhost", "test-model", 10_000),
+            &SessionInfo {
+                path: PathBuf::from("session.jsonl"),
+                title: "session".into(),
+                created_at: 0,
+            },
+            Vec::new(),
+            std::path::Path::new("/work"),
+            Some((12, 34)),
+            false,
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn slash_palette_filters_and_selects_commands() {
+        let mut app = app();
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('/')), false),
+            UiAction::None
+        ));
+        let Modal::Commands { items, query, .. } = app.modal.as_ref().unwrap() else {
+            panic!("command palette not opened")
+        };
+        assert_eq!(filtered_commands(items, query).len(), 6);
+
+        app.handle_key(key(KeyCode::Char('m')), false);
+        let Modal::Commands { items, query, .. } = app.modal.as_ref().unwrap() else {
+            panic!("command palette closed")
+        };
+        assert_eq!(filtered_commands(items, query)[0].command, "/model");
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter), false),
+            UiAction::Submit(value) if value == "/model"
+        ));
+    }
+
+    #[test]
+    fn allow_all_requires_confirmation() {
+        let mut app = app();
+        assert_eq!(app.request_permission_toggle(), None);
+        assert!(matches!(app.modal, Some(Modal::AllowAll { .. })));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter), false),
+            UiAction::SetPermissions {
+                allow_all: true,
+                ..
+            }
+        ));
+        assert!(!app.allow_all);
+    }
+
+    #[test]
+    fn markdown_and_full_tool_details_are_rendered() {
+        let mut app = app();
+        app.entries.push(Entry::Assistant("**bold**".into()));
+        app.entries.push(Entry::Tool {
+            call_id: "call".into(),
+            name: "shell".into(),
+            arguments: r#"{"command":"printf hello"}"#.into(),
+            output: Some("exit_code=0\nfull output".into()),
+            failed: false,
+            expanded: true,
+        });
+        let (lines, tools) = app.transcript_lines(80);
+        assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
+            span.content == "bold" && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+        let rendered = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("full output"));
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn status_contains_permissions_usage_and_context_window() {
+        let app = app();
+        let status = app
+            .status_line(false)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(status.contains("permissions: ask"));
+        assert!(status.contains("context 12/34/10000"));
+        assert_eq!(
+            session_label(&SessionInfo {
+                path: PathBuf::new(),
+                title: "saved".into(),
+                created_at: 0,
+            }),
+            "saved · 1970-01-01 00:00 UTC"
+        );
+    }
 }

@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
@@ -18,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::compaction::{
     CompactionConfig, SUMMARY_INSTRUCTIONS, context_tokens, prepare_compaction,
 };
-use crate::session::{Session, SessionError, SessionInfo};
-use crate::state::{ResponseMetadata, TranscriptItem};
-use crate::tool::{Env, ShellTool, ToolResult};
+use crate::session::{Session, SessionError, SessionInfo, StateCommit};
+use crate::state::{ResponseMetadata, State, StateEntry, TranscriptItem};
+use crate::tool::{AgentTool, Env, ShellTool, ToolResult};
 
 const DEFAULT_MAX_TURNS: usize = 100;
 
@@ -122,10 +123,10 @@ pub enum AgentEvent {
 pub struct Agent {
     model: Model,
     instructions: String,
-    session: Session,
+    state: State,
+    commit: Box<dyn StateCommit>,
     env: Env,
-    tools: Vec<Tool>,
-    shell: ShellTool,
+    tools: Vec<Arc<dyn AgentTool>>,
     compaction: Option<CompactionConfig>,
     max_turns: usize,
 }
@@ -137,18 +138,44 @@ impl Agent {
         session: Session,
         cwd: impl Into<PathBuf>,
     ) -> Self {
-        let shell = ShellTool;
         let context_window = model.context_window();
+        let (state, commit) = session.into_parts();
         Self {
             model,
             instructions: instructions.into(),
-            session,
+            state,
+            commit,
             env: Env { cwd: cwd.into() },
-            tools: vec![shell.schema()],
-            shell,
+            tools: vec![Arc::new(ShellTool)],
             compaction: Some(CompactionConfig::new(context_window)),
             max_turns: DEFAULT_MAX_TURNS,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        model: Model,
+        instructions: impl Into<String>,
+        state: State,
+        commit: Box<dyn StateCommit>,
+        cwd: impl Into<PathBuf>,
+        tools: Vec<Arc<dyn AgentTool>>,
+        compaction: Option<CompactionConfig>,
+        max_turns: usize,
+    ) -> Result<Self, AgentError> {
+        if max_turns == 0 {
+            return Err(AgentError::MaxTurns(0));
+        }
+        Ok(Self {
+            model,
+            instructions: instructions.into(),
+            state,
+            commit,
+            env: Env { cwd: cwd.into() },
+            tools,
+            compaction,
+            max_turns,
+        })
     }
 
     pub fn model(&self) -> &Model {
@@ -156,16 +183,15 @@ impl Agent {
     }
 
     pub fn session_info(&self) -> &SessionInfo {
-        self.session.info()
+        self.commit.info()
     }
 
     pub fn transcript(&self) -> Vec<TranscriptItem> {
-        self.session.state().transcript()
+        self.state.transcript()
     }
 
     pub fn latest_usage(&self) -> Option<&ResponseUsage> {
-        self.session
-            .state()
+        self.state
             .latest_response()
             .and_then(|response| response.usage.as_ref())
     }
@@ -176,7 +202,11 @@ impl Agent {
     }
 
     pub fn set_session(&mut self, session: Session) {
-        self.session = session;
+        (self.state, self.commit) = session.into_parts();
+    }
+
+    fn tool_schemas(&self) -> Vec<Tool> {
+        self.tools.iter().map(|tool| tool.schema()).collect()
     }
 
     pub fn start(self, input: impl Into<String>) -> ActiveAgent {
@@ -298,11 +328,12 @@ impl Agent {
                     .await
                     .map_err(|error| AgentError::Task(error.to_string()))?;
 
+                let tool_schemas = self.tool_schemas();
                 let request = CreateResponseArgs::default()
                     .model(self.model.model.clone())
                     .instructions(self.instructions.clone())
-                    .input(self.session.state().context())
-                    .tools(self.tools.clone())
+                    .input(self.state.context())
+                    .tools(tool_schemas)
                     .store(false)
                     .build()?;
                 let responses = self.model.client.responses();
@@ -362,16 +393,15 @@ impl Agent {
                     .cloned()
                     .map(InputItem::from)
                     .collect();
-                self.session
-                    .append_items(
-                        response_items,
-                        Some(ResponseMetadata {
-                            id: response.id.clone(),
-                            model: response.model.clone(),
-                            usage: response.usage.clone(),
-                        }),
-                    )
-                    .await?;
+                self.append_items(
+                    response_items,
+                    Some(ResponseMetadata {
+                        id: response.id.clone(),
+                        model: response.model.clone(),
+                        usage: response.usage.clone(),
+                    }),
+                )
+                .await?;
 
                 let outcomes = self.execute_tools(&calls, channels, events).await?;
                 for (call, result) in calls.iter().zip(outcomes) {
@@ -382,8 +412,7 @@ impl Agent {
                         })
                         .await
                         .map_err(|error| AgentError::Task(error.to_string()))?;
-                    self.session
-                        .append_items(vec![function_output(call, result.output)], None)
+                    self.append_items(vec![function_output(call, result.output)], None)
                         .await?;
                 }
 
@@ -419,8 +448,12 @@ impl Agent {
     ) -> Result<Vec<ToolResult>, AgentError> {
         let mut allowed = Vec::with_capacity(calls.len());
         for call in calls {
-            if !self.shell.handles(call) {
+            let Some(tool) = self.tools.iter().find(|tool| tool.name() == call.name) else {
                 allowed.push(false);
+                continue;
+            };
+            if !tool.requires_approval() {
+                allowed.push(true);
                 continue;
             }
             events
@@ -449,12 +482,10 @@ impl Agent {
                 .map_err(|error| AgentError::Task(error.to_string()))?;
         }
         let futures = calls.iter().zip(allowed).map(|(call, allow)| async move {
-            if !self.shell.handles(call) {
-                ToolResult::error(format!("Tool not found: {}", call.name))
-            } else if !allow {
-                ToolResult::error("Tool call denied by user")
-            } else {
-                self.shell.execute(call, &self.env).await
+            match self.tools.iter().find(|tool| tool.name() == call.name) {
+                None => ToolResult::error(format!("Tool not found: {}", call.name)),
+                Some(_) if !allow => ToolResult::error("Tool call denied by user"),
+                Some(tool) => tool.execute(call, &self.env).await,
             }
         });
         tokio::select! {
@@ -467,16 +498,49 @@ impl Agent {
         if message.trim().is_empty() {
             return Err(AgentError::EmptyInput);
         }
-        self.session.set_initial_title(&message).await?;
-        self.session
-            .append_items(
-                vec![InputItem::from(
-                    async_openai::types::responses::EasyInputMessage::from(message),
-                )],
-                None,
-            )
-            .await?;
+        self.commit.set_initial_title(&message).await?;
+        self.append_items(
+            vec![InputItem::from(
+                async_openai::types::responses::EasyInputMessage::from(message),
+            )],
+            None,
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn append_items(
+        &mut self,
+        items: Vec<InputItem>,
+        response: Option<ResponseMetadata>,
+    ) -> Result<StateEntry, AgentError> {
+        let entry = self
+            .state
+            .append_items(items, response)
+            .map_err(AgentError::State)?;
+        if let Err(error) = self.commit.commit(&entry).await {
+            self.state.rollback(entry.id()).map_err(AgentError::State)?;
+            return Err(error.into());
+        }
+        Ok(entry)
+    }
+
+    async fn append_compaction(
+        &mut self,
+        summary: String,
+        first_kept_id: u64,
+        tokens_before: usize,
+        response: ResponseMetadata,
+    ) -> Result<StateEntry, AgentError> {
+        let entry = self
+            .state
+            .append_compaction(summary, first_kept_id, tokens_before, Some(response))
+            .map_err(AgentError::State)?;
+        if let Err(error) = self.commit.commit(&entry).await {
+            self.state.rollback(entry.id()).map_err(AgentError::State)?;
+            return Err(error.into());
+        }
+        Ok(entry)
     }
 
     async fn compact_once(
@@ -493,15 +557,14 @@ impl Agent {
                 Ok(())
             };
         };
-        let tokens_before = context_tokens(self.session.state(), &self.instructions, &self.tools);
+        let tool_schemas = self.tool_schemas();
+        let tokens_before = context_tokens(&self.state, &self.instructions, &tool_schemas);
         if !force && !config.needs_compaction(tokens_before) {
             return Ok(());
         }
-        let Some(prepared) = prepare_compaction(
-            self.session.state(),
-            config.keep_recent_tokens,
-            custom_instructions,
-        ) else {
+        let Some(prepared) =
+            prepare_compaction(&self.state, config.keep_recent_tokens, custom_instructions)
+        else {
             return if force {
                 Err(AgentError::NothingToCompact)
             } else {
@@ -529,16 +592,17 @@ impl Agent {
                 "compaction returned an empty summary".into(),
             ));
         }
-        self.session
-            .append_compaction(
-                summary.clone(),
-                prepared.first_kept_id,
-                tokens_before,
-                response.id,
-                response.model,
-                response.usage,
-            )
-            .await?;
+        self.append_compaction(
+            summary.clone(),
+            prepared.first_kept_id,
+            tokens_before,
+            ResponseMetadata {
+                id: response.id,
+                model: response.model,
+                usage: response.usage,
+            },
+        )
+        .await?;
         events
             .send(AgentEvent::CompactionFinished {
                 tokens_before,
@@ -552,8 +616,7 @@ impl Agent {
 
     async fn close_unresolved_tools(&mut self) -> Result<(), AgentError> {
         let items = self
-            .session
-            .state()
+            .state
             .unresolved_tool_call_ids()
             .into_iter()
             .map(|call_id| {
@@ -565,7 +628,7 @@ impl Agent {
             })
             .collect::<Vec<_>>();
         if !items.is_empty() {
-            self.session.append_items(items, None).await?;
+            self.append_items(items, None).await?;
         }
         Ok(())
     }
@@ -647,13 +710,20 @@ fn function_output_by_id(call_id: String, output: String) -> InputItem {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
 
+    use async_openai::types::responses::{FunctionTool, FunctionToolCall, Tool};
+    use futures_util::future::BoxFuture;
+    use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{Agent, AgentEvent, Model};
-    use crate::Session;
+    use crate::{
+        AgentTool, Env, Session, SessionError, SessionInfo, State, StateCommit, StateEntry,
+        ToolResult,
+    };
 
     #[tokio::test]
     async fn streams_a_response_into_state() {
@@ -701,6 +771,116 @@ mod tests {
         server.await.unwrap();
         assert_eq!(text, "hello");
         assert!(finished);
-        assert_eq!(agent.session.state().entries().len(), 2);
+        assert_eq!(agent.state.entries().len(), 2);
+    }
+
+    struct EchoTool;
+
+    impl AgentTool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn schema(&self) -> Tool {
+            Tool::Function(FunctionTool {
+                name: "echo".into(),
+                description: Some("Echo text".into()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": false
+                })),
+                strict: Some(false),
+                defer_loading: None,
+            })
+        }
+
+        fn requires_approval(&self) -> bool {
+            false
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: &'a FunctionToolCall,
+            _env: &'a Env,
+        ) -> BoxFuture<'a, ToolResult> {
+            Box::pin(async move { ToolResult::ok(call.arguments.clone()) })
+        }
+    }
+
+    #[test]
+    fn accepts_injected_tools_and_commit_port() {
+        let (state, commit) = Session::memory().into_parts();
+        let agent = Agent::from_parts(
+            Model::new("test", "key", "http://localhost", "model", 10_000),
+            "test",
+            state,
+            commit,
+            ".",
+            vec![Arc::new(EchoTool)],
+            None,
+            3,
+        )
+        .unwrap();
+        assert!(matches!(
+            agent.tool_schemas().as_slice(),
+            [Tool::Function(tool)] if tool.name == "echo"
+        ));
+    }
+
+    struct FailingCommit {
+        info: SessionInfo,
+    }
+
+    impl StateCommit for FailingCommit {
+        fn info(&self) -> &SessionInfo {
+            &self.info
+        }
+
+        fn set_initial_title<'a>(
+            &'a mut self,
+            _message: &'a str,
+        ) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn commit<'a>(
+            &'a mut self,
+            _entry: &'a StateEntry,
+        ) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Err(SessionError::Invalid("commit failed".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_commit_rolls_back_state() {
+        let agent = Agent::from_parts(
+            Model::new("test", "key", "http://localhost", "model", 10_000),
+            "test",
+            State::default(),
+            Box::new(FailingCommit {
+                info: SessionInfo {
+                    path: PathBuf::new(),
+                    title: "test".into(),
+                    created_at: 0,
+                },
+            }),
+            ".",
+            Vec::new(),
+            None,
+            3,
+        )
+        .unwrap();
+        let mut active = agent.start("hello");
+        let mut failed = false;
+        while let Some(event) = active.next_event().await {
+            if matches!(event, AgentEvent::RunFailed(_)) {
+                failed = true;
+            }
+        }
+        let agent = active.finish().await.unwrap();
+        assert!(failed);
+        assert!(agent.state.entries().is_empty());
     }
 }
