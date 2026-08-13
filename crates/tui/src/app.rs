@@ -148,15 +148,15 @@ impl App {
 
         let (lines, tool_lines) = self.transcript_lines(layout[0].width.saturating_sub(2) as usize);
         let viewport_height = layout[0].height.saturating_sub(2);
-        let content_height = lines.len();
         let transcript = Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
                 format!(" K CASTLE v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )))
             .wrap(Wrap { trim: false });
-        self.max_scroll = content_height
-            .saturating_sub(viewport_height as usize)
+        self.max_scroll = transcript
+            .line_count(layout[0].width.saturating_sub(2))
+            .saturating_sub(layout[0].height as usize)
             .min(u16::MAX as usize) as u16;
         self.scroll = if self.follow {
             self.max_scroll
@@ -171,7 +171,7 @@ impl App {
             .filter_map(|(line, entry)| {
                 let row = line as u16;
                 (row >= self.scroll && row < self.scroll.saturating_add(viewport_height))
-                    .then_some((layout[0].y + 1 + row - self.scroll, entry))
+                    .then(|| (layout[0].y + 1 + row - self.scroll, entry))
             })
             .collect();
 
@@ -297,7 +297,6 @@ impl App {
                 } else {
                     self.entries.push(Entry::Assistant(delta));
                 }
-                self.follow = true;
             }
             AgentEvent::ApprovalRequired(call) => {
                 if self.allow_all {
@@ -914,7 +913,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use kcastle_agent::{Model, SessionInfo};
+    use kcastle_agent::{AgentEvent, Model, SessionInfo};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
@@ -1077,6 +1076,8 @@ mod tests {
         });
         assert_eq!(app.scroll, app.max_scroll - 3);
         assert!(!app.follow);
+        app.apply_event(AgentEvent::TextDelta("more".into()));
+        assert!(!app.follow);
 
         for _ in 0..20 {
             app.handle_mouse(MouseEvent {
@@ -1088,5 +1089,28 @@ mod tests {
         }
         assert_eq!(app.scroll, app.max_scroll);
         assert!(app.follow);
+    }
+
+    #[test]
+    fn follow_reaches_tail_of_wrapped_transcript_content() {
+        let mut app = app();
+        app.entries.push(Entry::Tool {
+            call_id: "call".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+            output: Some(format!("{} TAIL", "wrapped words ".repeat(20))),
+            failed: false,
+            expanded: true,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("TAIL"));
     }
 }

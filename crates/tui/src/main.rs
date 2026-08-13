@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use app::{App, UiAction};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
@@ -211,16 +212,24 @@ async fn tui_loop(
     runtime: &mut Runtime,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminal_events = EventStream::new();
+    let mut render_tick = tokio::time::interval(Duration::from_millis(33));
+    render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut dirty = true;
     while !app.should_exit() {
-        terminal.draw(|frame| app.render(frame, runtime.active.is_some()))?;
+        if dirty && runtime.active.is_none() {
+            terminal.draw(|frame| app.render(frame, false))?;
+            dirty = false;
+        }
         enum Next {
             Terminal(Option<Result<Event, io::Error>>),
             Agent(Option<AgentEvent>),
+            Render,
         }
         let next = if let Some(active) = runtime.active.as_mut() {
             tokio::select! {
                 event = terminal_events.next() => Next::Terminal(event),
                 event = active.next_event() => Next::Agent(event),
+                _ = render_tick.tick() => Next::Render,
             }
         } else {
             Next::Terminal(terminal_events.next().await)
@@ -246,7 +255,15 @@ async fn tui_loop(
                 }
             }
             Next::Agent(None) => finish_active(app, runtime).await?,
+            Next::Render => {
+                if dirty {
+                    terminal.draw(|frame| app.render(frame, true))?;
+                    dirty = false;
+                }
+                continue;
+            }
         }
+        dirty = true;
     }
 
     if let Some(control) = &runtime.control {
