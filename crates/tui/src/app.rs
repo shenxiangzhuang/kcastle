@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 const ACCENT: Color = Color::Rgb(196, 181, 253);
-const USER_BACKGROUND: Color = Color::Rgb(33, 38, 45);
+const USER_BACKGROUND: Color = Color::Rgb(65, 69, 77);
 
 #[derive(Debug)]
 enum Entry {
@@ -612,10 +612,6 @@ impl App {
             match entry {
                 Entry::User(text) => push_user(&mut lines, text, width),
                 Entry::Assistant(text) if !text.is_empty() => {
-                    lines.push(Line::from(Span::styled(
-                        "K",
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                    )));
                     lines.extend(
                         markdown_ratatui::render_with(
                             &markdown_stream::parse(text),
@@ -1005,6 +1001,19 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("full output"));
         assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn assistant_message_has_no_role_marker() {
+        let mut app = app();
+        app.entries.push(Entry::Assistant("answer".into()));
+        let (lines, _) = app.transcript_lines(20);
+        let rendered = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "answer");
     }
 
     #[test]
