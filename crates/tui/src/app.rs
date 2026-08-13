@@ -137,25 +137,32 @@ impl App {
 
     pub fn render(&mut self, frame: &mut Frame<'_>, running: bool) {
         let area = frame.area();
+        let compact = area.height < 8;
+        let input_height = if area.height >= 4 { 3 } else { 1 };
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(4),
-                Constraint::Length(1),
-                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(if compact { 0 } else { 1 }),
+                Constraint::Length(input_height),
             ])
             .split(area);
 
-        let (lines, tool_lines) = self.transcript_lines(layout[0].width.saturating_sub(2) as usize);
-        let viewport_height = layout[0].height.saturating_sub(2);
-        let transcript = Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL).title(Span::styled(
+        let border = u16::from(!compact);
+        let content_width = layout[0].width.saturating_sub(border * 2);
+        let viewport_height = layout[0].height.saturating_sub(border * 2);
+        let (lines, tool_lines) = self.transcript_lines(content_width as usize);
+        let transcript = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let transcript = if compact {
+            transcript
+        } else {
+            transcript.block(Block::default().borders(Borders::ALL).title(Span::styled(
                 format!(" K CASTLE v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )))
-            .wrap(Wrap { trim: false });
+        };
         self.max_scroll = transcript
-            .line_count(layout[0].width.saturating_sub(2))
+            .line_count(content_width)
             .saturating_sub(layout[0].height as usize)
             .min(u16::MAX as usize) as u16;
         self.scroll = if self.follow {
@@ -171,17 +178,21 @@ impl App {
             .filter_map(|(line, entry)| {
                 let row = line as u16;
                 (row >= self.scroll && row < self.scroll.saturating_add(viewport_height))
-                    .then(|| (layout[0].y + 1 + row - self.scroll, entry))
+                    .then(|| (layout[0].y + border + row - self.scroll, entry))
             })
             .collect();
 
-        frame.render_widget(Paragraph::new(self.status_line(running)), layout[1]);
+        if !compact {
+            frame.render_widget(Paragraph::new(self.status_line(running)), layout[1]);
+        }
 
-        self.input.set_block(
+        self.input.set_block(if input_height >= 3 {
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(if running { Color::DarkGray } else { ACCENT })),
-        );
+                .border_style(Style::default().fg(if running { Color::DarkGray } else { ACCENT }))
+        } else {
+            Block::default()
+        });
         frame.render_widget(&self.input, layout[2]);
 
         if let Some(modal) = &self.modal {
@@ -1112,5 +1123,25 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("TAIL"));
+    }
+
+    #[test]
+    fn resize_to_small_terminal_keeps_tail_visible() {
+        let mut app = app();
+        app.entries
+            .push(Entry::Assistant(format!("{}TAIL", "line\n".repeat(20))));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        terminal.backend_mut().resize(30, 6);
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("TAIL"));
+        assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "└");
     }
 }
