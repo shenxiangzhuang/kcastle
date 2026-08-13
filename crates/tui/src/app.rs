@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use time::macros::format_description;
 
 const ACCENT: Color = Color::Rgb(196, 181, 253);
+const USER_BACKGROUND: Color = Color::Rgb(33, 38, 45);
 
 #[derive(Debug)]
 enum Entry {
@@ -609,14 +610,7 @@ impl App {
         let mut tool_lines = Vec::new();
         for (entry_index, entry) in self.entries.iter().enumerate() {
             match entry {
-                Entry::User(text) => push_text(
-                    &mut lines,
-                    "YOU",
-                    text,
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Entry::User(text) => push_user(&mut lines, text, width),
                 Entry::Assistant(text) if !text.is_empty() => {
                     lines.push(Line::from(Span::styled(
                         "K",
@@ -690,15 +684,46 @@ impl App {
     }
 }
 
-fn push_text(lines: &mut Vec<Line<'static>>, label: &str, text: &str, style: Style) {
-    lines.push(Line::from(Span::styled(
-        label.to_owned(),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-    )));
-    for line in text.lines() {
-        lines.push(Line::from(Span::styled(line.to_owned(), style)));
-    }
+fn push_user(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
+    let style = Style::default()
+        .fg(Color::White)
+        .bg(USER_BACKGROUND)
+        .add_modifier(Modifier::BOLD);
+    let inner_width = width.saturating_sub(4).max(1);
     lines.push(Line::from(""));
+    lines.push(Line::from(" ".repeat(width)).style(style));
+    for source in text.split('\n') {
+        let mut row = String::new();
+        let mut row_width = 0;
+        for character in source.chars() {
+            let character_width = Span::raw(character.to_string()).width();
+            if row_width + character_width > inner_width && !row.is_empty() {
+                push_user_row(lines, &row, row_width, width, style);
+                row.clear();
+                row_width = 0;
+            }
+            row.push(character);
+            row_width += character_width;
+        }
+        push_user_row(lines, &row, row_width, width, style);
+    }
+    lines.push(Line::from(" ".repeat(width)).style(style));
+}
+
+fn push_user_row(
+    lines: &mut Vec<Line<'static>>,
+    row: &str,
+    row_width: usize,
+    width: usize,
+    style: Style,
+) {
+    lines.push(
+        Line::from(format!(
+            "  {row}{}",
+            " ".repeat(width.saturating_sub(row_width + 2))
+        ))
+        .style(style),
+    );
 }
 
 fn compact(value: &str, limit: usize) -> String {
@@ -898,7 +923,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
 
-    use super::{App, Entry, Modal, UiAction, filtered_commands, session_label};
+    use super::{App, Entry, Modal, USER_BACKGROUND, UiAction, filtered_commands, session_label};
 
     fn app() -> App {
         App::new(
@@ -980,6 +1005,27 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("full output"));
         assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn user_message_is_a_full_width_highlight_without_a_marker() {
+        let mut app = app();
+        app.push_user("hi".into());
+        let (lines, _) = app.transcript_lines(20);
+        let highlighted = lines
+            .iter()
+            .filter(|line| line.style.bg == Some(USER_BACKGROUND))
+            .collect::<Vec<_>>();
+        assert_eq!(highlighted.len(), 3);
+        assert!(highlighted.iter().all(|line| line.width() == 20));
+        let rendered = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("hi"));
+        assert!(!rendered.contains("YOU"));
+        assert!(!rendered.contains('›'));
     }
 
     #[test]
