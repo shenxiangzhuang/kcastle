@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use app::{App, UiAction};
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
 use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, RunControl, Session, SessionInfo};
 
@@ -194,8 +194,14 @@ async fn run_tui(
         session_path,
     };
     let mut terminal = ratatui::init();
+    if let Err(error) = crossterm::execute!(io::stdout(), EnableMouseCapture) {
+        ratatui::restore();
+        return Err(error.into());
+    }
     let result = tui_loop(&mut terminal, &mut app, &mut runtime).await;
+    let mouse_result = crossterm::execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
+    mouse_result?;
     result
 }
 

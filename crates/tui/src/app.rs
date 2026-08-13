@@ -93,6 +93,7 @@ pub struct App {
     selected_tool: Option<usize>,
     follow: bool,
     scroll: u16,
+    max_scroll: u16,
     allow_all: bool,
     should_exit: bool,
 }
@@ -124,6 +125,7 @@ impl App {
             selected_tool: None,
             follow: true,
             scroll: 0,
+            max_scroll: 0,
             allow_all,
             should_exit: false,
         };
@@ -145,16 +147,22 @@ impl App {
 
         let (lines, tool_lines) = self.transcript_lines(layout[0].width.saturating_sub(2) as usize);
         let viewport_height = layout[0].height.saturating_sub(2);
-        if self.follow {
-            self.scroll = (lines.len() as u16).saturating_sub(viewport_height);
-        }
+        let content_height = lines.len();
         let transcript = Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL).title(Span::styled(
                 format!(" K CASTLE v{} ", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )))
-            .wrap(Wrap { trim: false })
-            .scroll((self.scroll, 0));
+            .wrap(Wrap { trim: false });
+        self.max_scroll = content_height
+            .saturating_sub(viewport_height as usize)
+            .min(u16::MAX as usize) as u16;
+        self.scroll = if self.follow {
+            self.max_scroll
+        } else {
+            self.scroll.min(self.max_scroll)
+        };
+        let transcript = transcript.scroll((self.scroll, 0));
         frame.render_widget(transcript, layout[0]);
 
         self.tool_rows = tool_lines
@@ -199,8 +207,8 @@ impl App {
                 UiAction::None
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
-                self.follow = false;
+                self.scroll = self.scroll.saturating_add(10).min(self.max_scroll);
+                self.follow = self.scroll == self.max_scroll;
                 UiAction::None
             }
             KeyCode::End => {
@@ -255,8 +263,8 @@ impl App {
                 self.scroll = self.scroll.saturating_sub(3);
             }
             MouseEventKind::ScrollDown => {
-                self.follow = false;
-                self.scroll = self.scroll.saturating_add(3);
+                self.scroll = self.scroll.saturating_add(3).min(self.max_scroll);
+                self.follow = self.scroll == self.max_scroll;
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((_, entry)) = self.tool_rows.iter().find(|(row, _)| *row == event.row)
@@ -884,8 +892,10 @@ fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 mod tests {
     use std::path::PathBuf;
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use kcastle_agent::{Model, SessionInfo};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
     use ratatui::style::Modifier;
 
     use super::{App, Entry, Modal, UiAction, filtered_commands, session_label};
@@ -991,5 +1001,37 @@ mod tests {
             }),
             "saved · 1970-01-01 00:00 UTC"
         );
+    }
+
+    #[test]
+    fn transcript_scrolls_and_stays_within_content() {
+        let mut app = app();
+        for line in 0..30 {
+            app.notice(format!("line {line}"));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        assert!(app.max_scroll > 0);
+        assert_eq!(app.scroll, app.max_scroll);
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.scroll, app.max_scroll - 3);
+        assert!(!app.follow);
+
+        for _ in 0..20 {
+            app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            });
+        }
+        assert_eq!(app.scroll, app.max_scroll);
+        assert!(app.follow);
     }
 }
