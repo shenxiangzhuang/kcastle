@@ -1,33 +1,29 @@
 # K in Castle
 
-A minimal agent harness.
+A minimal native agent harness.
 
 ## Packages
 
-| Package | PyPI | Description |
-| --- | --- | --- |
-| **[`kcastle-agent`](packages/agent)** | [![PyPI](https://img.shields.io/pypi/v/kcastle-agent?color=%2334D058)](https://pypi.org/project/kcastle-agent/) | Agent core and harness infrastructure |
-| **[`kcastle`](packages/tui)** | [![PyPI](https://img.shields.io/pypi/v/kcastle?color=%2334D058)](https://pypi.org/project/kcastle/) | Textual interface and CLI |
+| Package | Responsibility |
+| --- | --- |
+| [`kcastle-agent`](crates/agent) | Responses agent core, state, sessions, compaction, and tools |
+| [`kcastle`](crates/tui) | Ratatui application, input, approvals, and dependency composition |
+
+The dependency direction is strictly `kcastle -> kcastle-agent`. The agent package uses
+`async-openai` directly and does not maintain a provider abstraction.
 
 ## Install
 
-K requires Python 3.12 or later. Run it directly with uv:
+Install the published binary with Cargo:
 
 ```bash
-uvx kcastle
+cargo install kcastle --locked
 ```
 
-Or install a persistent command:
+From a source checkout:
 
 ```bash
-uv tool install kcastle
-kcastle
-```
-
-Upgrade a persistent installation, including pre-releases:
-
-```bash
-kcastle self update
+cargo install --path crates/tui --locked
 ```
 
 ## Get started
@@ -35,48 +31,48 @@ kcastle self update
 Configure one provider:
 
 ```bash
-# DeepSeek (deepseek-v4-flash)
+# DeepSeek, selected first when both keys are present
 export DEEPSEEK_API_KEY=...
 
-# Or OpenAI (gpt-5.5)
+# Or OpenAI
 export OPENAI_API_KEY=...
 
-uvx kcastle
+kcastle
 ```
 
-K automatically selects the configured provider. DeepSeek takes precedence when both keys are
-present.
+For a non-interactive run:
 
-Each launch creates an append-only JSONL session under `~/.kcastle/sessions`; its title comes from
-the first user message and its metadata records the creation time. Use `/resume` to switch sessions.
+```bash
+kcastle --prompt "Explain this repository"
+```
 
-Type `/` in an empty composer to open the built-in command list:
+K writes append-only native JSONL sessions under `~/.kcastle/sessions`. Type `/` commands directly
+in the composer:
 
-- `/resume` — Switch to a saved session.
-- `/model` — Switch between detected model backends.
-- `/compact` — Compact the current context.
-- `/permissions` — Toggle between approval prompts and allowing all tools.
-- `/queue <message>` — Run a message after the current task settles. Available while K is running.
-- `/exit` — Exit K.
+- `/resume` — open a saved session
+- `/model` — switch between configured backends
+- `/compact [focus]` — summarize older context
+- `/permissions` — toggle tool approval prompts
+- `/queue <message>` — run after the active task settles
+- `/help` — show command help
+- `/exit` — exit
 
-During a run, submit text normally to steer the next model turn. Press `Escape` to cancel the
-active operation.
-
-From a development checkout, use `uv sync` followed by `uv run kcastle`.
+Submitting ordinary text during a run steers the next model turn. Press `Escape` to abort the
+active model or tool operation and `Ctrl-C` to exit.
 
 ## Develop
 
 ```bash
-just format
-just check
-just test
-just build
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo build --workspace --release --locked
 ```
 
 ## License
 
-[Apache-2.0](./LICENSE)
+[Apache-2.0](LICENSE)
 
 ## Acknowledgements
 
-Inspired by [pi](https://github.com/earendil-works/pi).
+Inspired by [pi](https://github.com/badlogic/pi-mono).

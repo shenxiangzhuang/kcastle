@@ -1,0 +1,22 @@
+[package]
+name = "kcastle"
+description = "Native terminal interface for kcastle-agent"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["agent", "openai", "tui", "terminal"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "kcastle"
+path = "src/main.rs"
+
+[dependencies]
+crossterm.workspace = true
+futures-util.workspace = true
+kcastle-agent.workspace = true
+ratatui.workspace = true
+ratatui-textarea.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal", "time"] }
