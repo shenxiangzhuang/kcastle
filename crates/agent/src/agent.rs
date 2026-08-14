@@ -786,9 +786,35 @@ mod tests {
         ));
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 16 * 1024];
-            let bytes = socket.read(&mut request).await.unwrap();
-            let request = String::from_utf8_lossy(&request[..bytes]);
+            let mut request = Vec::new();
+            let (body_start, content_length) = loop {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(bytes, 0, "request ended before its headers");
+                request.extend_from_slice(&chunk[..bytes]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                break (header_end + 4, content_length);
+            };
+            while request.len() < body_start + content_length {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(bytes, 0, "request ended before its body");
+                request.extend_from_slice(&chunk[..bytes]);
+            }
+            let request = String::from_utf8_lossy(&request);
             assert!(request.contains("\"reasoning\":{\"effort\":\"high\"}"));
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",

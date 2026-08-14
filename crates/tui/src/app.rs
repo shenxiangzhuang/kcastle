@@ -181,6 +181,7 @@ impl App {
             show_startup: false,
             should_exit: false,
         };
+        app.set_identity(model);
         app.set_usage(usage);
         app.load_transcript(transcript);
         app.show_startup = true;
@@ -813,16 +814,21 @@ impl App {
     fn status_line(&self, width: u16) -> Line<'static> {
         let context_used = precise_percentage(self.total_tokens as usize, self.context_window);
         let cache_hit = percentage(self.cached_tokens as usize, self.input_tokens as usize);
-        let mut text = format!(" {}", self.model);
-        if width >= 72 {
-            text.push_str(&format!(
-                " · in {} · out {} · ctx {context_used:.2}% · cache {cache_hit}%",
-                format_tokens(self.input_tokens),
-                format_tokens(self.output_tokens),
-            ));
-        } else if width >= 40 {
-            text.push_str(&format!(" · ctx {context_used:.2}% · cache {cache_hit}%"));
-        }
+        let base = format!(" {}", self.model);
+        let compact = format!("{base} · ctx {context_used:.2}% · cache {cache_hit}%");
+        let full = format!(
+            "{base} · in {} · out {} · ctx {context_used:.2}% · cache {cache_hit}%",
+            format_tokens(self.input_tokens),
+            format_tokens(self.output_tokens),
+        );
+        let width = usize::from(width);
+        let text = if Span::raw(&full).width() <= width {
+            full
+        } else if Span::raw(&compact).width() <= width {
+            compact
+        } else {
+            base
+        };
         Line::from(Span::styled(text, Style::default().fg(ACCENT)))
     }
 
@@ -2879,6 +2885,7 @@ mod tests {
             status,
             " test · test-model · in 40 · out 1 · ctx 0.41% · cache 95%"
         );
+        assert_eq!(app.status_line(40).to_string(), " test · test-model");
         let created_at = local_datetime(OffsetDateTime::UNIX_EPOCH)
             .format(format_description!(
                 "[year]-[month]-[day] [hour]:[minute] [offset_hour sign:mandatory]:[offset_minute]"
