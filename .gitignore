@@ -1,19 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
-.venv/
-build/
-dist/
-.pytest_cache/
-.ruff_cache/
+/target/
 
 # Local and sensitive files
 .DS_Store
 .env
 .envrc
-.pypirc
 .claude/
 .cursorignore
 .cursorindexingignore
