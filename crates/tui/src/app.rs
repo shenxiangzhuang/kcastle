@@ -72,6 +72,7 @@ enum Modal {
     },
     AllowAll {
         pending_call_id: Option<String>,
+        return_to: Option<Box<Modal>>,
     },
     Tools {
         selected: usize,
@@ -666,6 +667,7 @@ impl App {
         } else {
             self.modal = Some(Modal::AllowAll {
                 pending_call_id: None,
+                return_to: None,
             });
             None
         }
@@ -848,6 +850,9 @@ impl App {
         let action = match modal {
             Modal::Approval {
                 call_id,
+                name,
+                arguments,
+                cwd,
                 scroll,
                 max_scroll,
                 ..
@@ -873,8 +878,17 @@ impl App {
                     allow: true,
                 }),
                 KeyCode::Char('a') => {
+                    let return_to = Modal::Approval {
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                        cwd: cwd.clone(),
+                        scroll: *scroll,
+                        max_scroll: *max_scroll,
+                    };
                     self.modal = Some(Modal::AllowAll {
                         pending_call_id: Some(call_id.clone()),
+                        return_to: Some(Box::new(return_to)),
                     });
                     return Some(UiAction::None);
                 }
@@ -1032,11 +1046,18 @@ impl App {
                     _ => None,
                 }
             }
-            Modal::AllowAll { pending_call_id } => match key.code {
+            Modal::AllowAll {
+                pending_call_id,
+                return_to,
+            } => match key.code {
                 KeyCode::Char('y') | KeyCode::Enter => Some(UiAction::SetPermissions {
                     allow_all: true,
                     pending_call_id: pending_call_id.clone(),
                 }),
+                KeyCode::Char('n') | KeyCode::Esc if return_to.is_some() => {
+                    self.modal = return_to.take().map(|modal| *modal);
+                    return Some(UiAction::None);
+                }
                 KeyCode::Char('n') | KeyCode::Esc => Some(UiAction::None),
                 _ => None,
             },
@@ -2285,6 +2306,28 @@ mod tests {
             }
         ));
         assert!(!app.allow_all);
+    }
+
+    #[test]
+    fn cancelling_allow_all_returns_to_the_pending_approval() {
+        let mut app = app();
+        app.apply_event(AgentEvent::ApprovalRequired(
+            serde_json::from_value(serde_json::json!({
+                "arguments": r#"{"command":"true"}"#,
+                "call_id": "call-1",
+                "name": "shell"
+            }))
+            .unwrap(),
+        ));
+
+        app.handle_key(key(KeyCode::Char('a')), true);
+        assert!(matches!(app.modal, Some(Modal::AllowAll { .. })));
+
+        app.handle_key(key(KeyCode::Esc), true);
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Approval { ref call_id, .. }) if call_id == "call-1"
+        ));
     }
 
     #[test]
