@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use async_openai::types::responses::{
     EasyInputContent, EasyInputMessage, FunctionCallOutput, InputItem, InputParam, Item,
@@ -174,7 +174,7 @@ impl State {
     }
 
     pub fn unresolved_tool_call_ids(&self) -> Vec<String> {
-        let mut pending = HashMap::new();
+        let mut pending = HashSet::new();
         for entry in &self.entries[self.active_start..] {
             let StateEntry::Items { items, .. } = entry else {
                 continue;
@@ -182,7 +182,7 @@ impl State {
             for item in items {
                 match item {
                     InputItem::Item(Item::FunctionCall(call)) => {
-                        pending.insert(call.call_id.clone(), ());
+                        pending.insert(call.call_id.clone());
                     }
                     InputItem::Item(Item::FunctionCallOutput(output)) => {
                         pending.remove(&output.call_id);
@@ -191,7 +191,7 @@ impl State {
                 }
             }
         }
-        pending.into_keys().collect()
+        pending.into_iter().collect()
     }
 
     pub fn transcript(&self) -> Vec<TranscriptItem> {
