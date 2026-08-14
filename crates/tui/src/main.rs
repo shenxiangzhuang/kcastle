@@ -34,7 +34,7 @@ const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::Xhigh,
 ];
 
-const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /model           Select model and reasoning level\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
+const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /resume          Resume a saved session\n    /model           Select model and reasoning level\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
 
 enum Command {
     Tui,
@@ -487,7 +487,7 @@ async fn handle_action(
                     Err(error) => format!("Could not delete “{}”: {error}", session.title),
                 }
             };
-            open_session_manager(app, runtime, Some(selected), Some(notice));
+            open_session_manager(app, runtime, true, Some(selected), Some(notice));
         }
         UiAction::SelectModel(index) => {
             if runtime.active.is_some() {
@@ -539,10 +539,14 @@ async fn handle_submit(
     if let Some(command) = trimmed.strip_prefix('/') {
         let (name, argument) = command.split_once(' ').unwrap_or((command, ""));
         match name {
-            "session" | "resume" if runtime.active.is_none() => {
-                open_session_manager(app, runtime, None, None);
+            "session" if runtime.active.is_none() => {
+                open_session_manager(app, runtime, true, None, None);
             }
-            "session" | "resume" => app.notice("Cannot manage sessions while the agent is running"),
+            "resume" if runtime.active.is_none() => {
+                open_session_manager(app, runtime, false, None, None);
+            }
+            "session" => app.notice("Cannot manage sessions while the agent is running"),
+            "resume" => app.notice("Cannot resume while the agent is running"),
             "model" => app.show_models(&runtime.models, runtime.selected_model),
             "permissions" => {
                 if let Some(allow_all) = app.request_permission_toggle() {
@@ -625,12 +629,19 @@ async fn ensure_persistent_session(
 fn open_session_manager(
     app: &mut App,
     runtime: &Runtime,
+    allow_delete: bool,
     selected: Option<usize>,
     notice: Option<String>,
 ) {
     match Session::list(&runtime.sessions_dir) {
         Ok(sessions) => {
-            app.show_sessions(sessions, &runtime.session_path, selected, notice);
+            app.show_sessions(
+                sessions,
+                &runtime.session_path,
+                allow_delete,
+                selected,
+                notice,
+            );
         }
         Err(error) => app.notice(format!("Session list failed: {error}")),
     }
