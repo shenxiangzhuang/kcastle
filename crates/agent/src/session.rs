@@ -161,6 +161,11 @@ impl Session {
         Ok(sessions)
     }
 
+    pub fn delete(session: &SessionInfo) -> Result<(), SessionError> {
+        fs::remove_file(&session.path)?;
+        Ok(())
+    }
+
     pub fn info(&self) -> &SessionInfo {
         &self.info
     }
@@ -476,6 +481,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(Session::list(&directory).unwrap(), [expected]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_removes_a_saved_session() {
+        let directory = test_directory("delete");
+        let session = Session::create(&directory).await.unwrap();
+        let info = session.info().clone();
+        drop(session);
+
+        Session::delete(&info).unwrap();
+
+        assert!(!info.path.exists());
+        assert!(Session::list(&directory).unwrap().is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 

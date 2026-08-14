@@ -8,13 +8,21 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use app::{App, UiAction};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind,
+};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, Session, SessionInfo};
+use ratatui::text::Text;
+use ratatui::widgets::{Paragraph, Widget, Wrap};
+use ratatui::{TerminalOptions, Viewport};
 
 const INSTRUCTIONS: &str = "You are K, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
+const INLINE_VIEWPORT_HEIGHT: u16 = 12;
 
-const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /resume          Open a saved session\n    /model           Switch model backend\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
+const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /model           Switch model backend\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
 
 enum Command {
     Tui,
@@ -54,15 +62,25 @@ async fn run() -> Result<(), Box<dyn Error>> {
         command => {
             let models = models_from_env()?;
             let sessions_dir = home_dir()?.join(".kcastle/sessions");
-            let session = Session::create(&sessions_dir).await?;
             let cwd = env::current_dir()?;
-            let agent = Agent::new(models[0].clone(), INSTRUCTIONS, session, cwd.clone());
             match command {
                 Command::Prompt {
                     prompt,
                     allow_tools,
-                } => run_prompt(agent, prompt, allow_tools).await?,
-                Command::Tui => run_tui(agent, models, sessions_dir, cwd).await?,
+                } => {
+                    let session = Session::create(&sessions_dir).await?;
+                    let agent = Agent::new(models[0].clone(), INSTRUCTIONS, session, cwd.clone());
+                    run_prompt(agent, prompt, allow_tools).await?;
+                }
+                Command::Tui => {
+                    let agent = Agent::new(
+                        models[0].clone(),
+                        INSTRUCTIONS,
+                        Session::memory(),
+                        cwd.clone(),
+                    );
+                    run_tui(agent, models, sessions_dir, cwd).await?;
+                }
                 Command::Help | Command::Version => unreachable!(),
             }
         }
@@ -194,15 +212,18 @@ async fn run_tui(
         session_path,
         compacting: false,
     };
-    let mut terminal = ratatui::init();
-    if let Err(error) = crossterm::execute!(io::stdout(), EnableMouseCapture) {
+    let mut terminal = ratatui::try_init_with_options(TerminalOptions {
+        viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
+    })?;
+    if let Err(error) = crossterm::execute!(io::stdout(), EnableBracketedPaste) {
         ratatui::restore();
         return Err(error.into());
     }
     let result = tui_loop(&mut terminal, &mut app, &mut runtime).await;
-    let mouse_result = crossterm::execute!(io::stdout(), DisableMouseCapture);
+    let input_result =
+        crossterm::execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
     ratatui::restore();
-    mouse_result?;
+    input_result?;
     result
 }
 
@@ -212,12 +233,13 @@ async fn tui_loop(
     runtime: &mut Runtime,
 ) -> Result<(), Box<dyn Error>> {
     let mut terminal_events = EventStream::new();
-    let mut render_tick = tokio::time::interval(Duration::from_millis(33));
+    let mut render_tick = tokio::time::interval(Duration::from_millis(250));
     render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut fullscreen_overlay = None;
     let mut dirty = true;
     while !app.should_exit() {
         if dirty && runtime.active.is_none() {
-            terminal.draw(|frame| app.render(frame, false))?;
+            draw_ui(terminal, &mut fullscreen_overlay, app, false)?;
             dirty = false;
         }
         enum Next {
@@ -236,15 +258,27 @@ async fn tui_loop(
         };
 
         match next {
-            Next::Terminal(Some(Ok(event))) => match event {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let action = app.handle_key(key, runtime.active.is_some());
-                    handle_action(action, app, runtime).await?;
+            Next::Terminal(Some(Ok(event))) => {
+                match event {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        let action = app.handle_key(key, runtime.active.is_some());
+                        handle_action(action, app, runtime).await?;
+                    }
+                    Event::Mouse(mouse) => app.handle_mouse(mouse),
+                    Event::Paste(value) => app.paste(&value),
+                    _ => {}
                 }
-                Event::Mouse(mouse) => app.handle_mouse(mouse),
-                Event::Paste(value) => app.paste(&value),
-                _ => {}
-            },
+                if !app.should_exit() {
+                    draw_ui(
+                        terminal,
+                        &mut fullscreen_overlay,
+                        app,
+                        runtime.active.is_some(),
+                    )?;
+                }
+                dirty = false;
+                continue;
+            }
             Next::Terminal(Some(Err(error))) => return Err(error.into()),
             Next::Terminal(None) => app.request_exit(),
             Next::Agent(Some(event)) => {
@@ -256,8 +290,8 @@ async fn tui_loop(
             }
             Next::Agent(None) => finish_active(app, runtime).await?,
             Next::Render => {
-                if dirty {
-                    terminal.draw(|frame| app.render(frame, true))?;
+                if dirty || runtime.active.is_some() {
+                    draw_ui(terminal, &mut fullscreen_overlay, app, true)?;
                     dirty = false;
                 }
                 continue;
@@ -266,11 +300,62 @@ async fn tui_loop(
         dirty = true;
     }
 
+    close_fullscreen_overlay(terminal, &mut fullscreen_overlay)?;
+
     if let Some(active) = &runtime.active {
         active.control().abort();
     }
     if runtime.active.is_some() {
         finish_active(app, runtime).await?;
+    }
+    Ok(())
+}
+
+fn draw_ui(
+    terminal: &mut ratatui::DefaultTerminal,
+    fullscreen_overlay: &mut Option<ratatui::DefaultTerminal>,
+    app: &mut App,
+    running: bool,
+) -> Result<(), Box<dyn Error>> {
+    if app.fullscreen_modal_open() && fullscreen_overlay.is_none() {
+        let overlay =
+            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
+        crossterm::execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        *fullscreen_overlay = Some(overlay);
+    } else if !app.fullscreen_modal_open() {
+        close_fullscreen_overlay(terminal, fullscreen_overlay)?;
+    }
+
+    if let Some(overlay) = fullscreen_overlay {
+        overlay.draw(|frame| app.render(frame, running))?;
+    } else {
+        flush_history(terminal, app)?;
+        terminal.draw(|frame| app.render(frame, running))?;
+    }
+    Ok(())
+}
+
+fn close_fullscreen_overlay(
+    terminal: &mut ratatui::DefaultTerminal,
+    fullscreen_overlay: &mut Option<ratatui::DefaultTerminal>,
+) -> io::Result<()> {
+    if fullscreen_overlay.take().is_some() {
+        crossterm::execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
+        terminal.clear()?;
+    }
+    Ok(())
+}
+
+fn flush_history(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+) -> Result<(), Box<dyn Error>> {
+    let width = terminal.size()?.width.max(1);
+    let lines = app.take_committed_lines(width as usize);
+    for chunk in lines.chunks(256) {
+        let paragraph = Paragraph::new(Text::from(chunk.to_vec())).wrap(Wrap { trim: false });
+        let height = paragraph.line_count(width).max(1).min(u16::MAX as usize) as u16;
+        terminal.insert_before(height, move |buffer| paragraph.render(buffer.area, buffer))?;
     }
     Ok(())
 }
@@ -296,7 +381,7 @@ async fn handle_action(
         UiAction::SetPermissions {
             allow_all,
             pending_call_id,
-        } => match write_permission(&runtime.session_path, allow_all) {
+        } => match write_runtime_permission(runtime, allow_all) {
             Ok(()) => {
                 app.set_permission_mode(allow_all);
                 if let Some(call_id) = pending_call_id
@@ -336,6 +421,29 @@ async fn handle_action(
                 }
             }
         }
+        UiAction::DeleteSession { session, selected } => {
+            let notice = if session.path == runtime.session_path {
+                "Current session cannot be deleted".into()
+            } else {
+                match Session::delete(&session) {
+                    Ok(()) => {
+                        let permissions = permission_path(&session.path);
+                        if let Err(error) = fs::remove_file(permissions)
+                            && error.kind() != io::ErrorKind::NotFound
+                        {
+                            format!(
+                                "Deleted “{}”; permission cleanup failed: {error}",
+                                session.title
+                            )
+                        } else {
+                            format!("Deleted “{}” permanently", session.title)
+                        }
+                    }
+                    Err(error) => format!("Could not delete “{}”: {error}", session.title),
+                }
+            };
+            open_session_manager(app, runtime, Some(selected), Some(notice));
+        }
         UiAction::SelectModel(index) => {
             if runtime.active.is_some() {
                 app.notice("Cannot switch models while the agent is running");
@@ -361,18 +469,22 @@ async fn handle_submit(
     if let Some(command) = trimmed.strip_prefix('/') {
         let (name, argument) = command.split_once(' ').unwrap_or((command, ""));
         match name {
-            "resume" => match Session::list(&runtime.sessions_dir) {
-                Ok(sessions) => app.show_sessions(sessions),
-                Err(error) => app.notice(format!("Session list failed: {error}")),
-            },
+            "session" | "resume" if runtime.active.is_none() => {
+                open_session_manager(app, runtime, None, None);
+            }
+            "session" | "resume" => app.notice("Cannot manage sessions while the agent is running"),
             "model" => app.show_models(&runtime.models, runtime.selected_model),
             "permissions" => {
                 if let Some(allow_all) = app.request_permission_toggle() {
-                    match write_permission(&runtime.session_path, allow_all) {
+                    match write_runtime_permission(runtime, allow_all) {
                         Ok(()) => app.set_permission_mode(allow_all),
                         Err(error) => app.notice(format!("Permission save failed: {error}")),
                     }
                 }
+            }
+            "tool" => app.show_tools(),
+            "compact" if runtime.session_path.as_os_str().is_empty() => {
+                app.notice("Nothing to compact");
             }
             "compact" if runtime.active.is_none() => {
                 let agent = runtime.agent.take().expect("idle agent");
@@ -407,6 +519,7 @@ async fn handle_submit(
         app.notice("Cannot steer while compacting");
         return Ok(());
     }
+    ensure_persistent_session(app, runtime).await?;
     app.push_user(value.clone());
     if let Some(active) = &runtime.active {
         active.control().steer(value)?;
@@ -418,13 +531,59 @@ async fn handle_submit(
     Ok(())
 }
 
+async fn ensure_persistent_session(
+    app: &mut App,
+    runtime: &mut Runtime,
+) -> Result<(), Box<dyn Error>> {
+    if !runtime.session_path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let session = Session::create(&runtime.sessions_dir).await?;
+    runtime.session_path = session.info().path.clone();
+    let agent = runtime.agent.as_mut().expect("idle agent");
+    agent.set_session(session);
+    app.set_identity(agent.model(), agent.session_info());
+    if app.permission_mode()
+        && let Err(error) = write_permission(&runtime.session_path, true)
+    {
+        app.set_permission_mode(false);
+        app.notice(format!("Permission save failed; using ask mode: {error}"));
+    }
+    Ok(())
+}
+
+fn open_session_manager(
+    app: &mut App,
+    runtime: &Runtime,
+    selected: Option<usize>,
+    notice: Option<String>,
+) {
+    match Session::list(&runtime.sessions_dir) {
+        Ok(sessions) => {
+            app.show_sessions(sessions, &runtime.session_path, selected, notice);
+        }
+        Err(error) => app.notice(format!("Session list failed: {error}")),
+    }
+}
+
 fn permission_path(session_path: &Path) -> PathBuf {
     session_path.with_extension("permissions")
 }
 
 fn read_permission(session: &SessionInfo) -> bool {
+    if session.path.as_os_str().is_empty() {
+        return false;
+    }
     fs::read_to_string(permission_path(&session.path))
         .is_ok_and(|value| value.trim() == "allow all")
+}
+
+fn write_runtime_permission(runtime: &Runtime, allow_all: bool) -> io::Result<()> {
+    if runtime.session_path.as_os_str().is_empty() {
+        Ok(())
+    } else {
+        write_permission(&runtime.session_path, allow_all)
+    }
 }
 
 fn write_permission(session_path: &Path, allow_all: bool) -> io::Result<()> {
@@ -448,8 +607,8 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::{
-        App, Command, Runtime, SessionInfo, handle_submit, parse_args_from, read_permission,
-        write_permission,
+        App, Command, Runtime, SessionInfo, ensure_persistent_session, handle_submit,
+        parse_args_from, read_permission, write_permission,
     };
 
     #[test]
@@ -498,6 +657,53 @@ mod tests {
         write_permission(&path, false).unwrap();
         assert!(!read_permission(&info));
         std::fs::remove_file(path.with_extension("permissions")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tui_session_stays_ephemeral_until_persistence_is_needed() {
+        let directory = std::env::temp_dir().join(format!(
+            "kcastle-lazy-session-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model = Model::new("test", "key", "http://localhost", "model", 10_000);
+        let session = Session::memory();
+        let cwd = std::path::PathBuf::from(".");
+        let mut app = App::new(&model, session.info(), Vec::new(), &cwd, None, false);
+        let agent = Agent::new(model.clone(), "test", session, &cwd);
+        let mut runtime = Runtime {
+            agent: Some(agent),
+            active: None,
+            models: vec![model],
+            selected_model: 0,
+            sessions_dir: directory.clone(),
+            session_path: std::path::PathBuf::new(),
+            compacting: false,
+        };
+
+        handle_submit("/help".into(), &mut app, &mut runtime)
+            .await
+            .unwrap();
+        assert!(Session::list(&directory).unwrap().is_empty());
+
+        app.set_permission_mode(true);
+        ensure_persistent_session(&mut app, &mut runtime)
+            .await
+            .unwrap();
+        let sessions = Session::list(&directory).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(runtime.session_path, sessions[0].path);
+        assert!(read_permission(&sessions[0]));
+
+        ensure_persistent_session(&mut app, &mut runtime)
+            .await
+            .unwrap();
+        assert_eq!(Session::list(&directory).unwrap().len(), 1);
+        drop(runtime);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]

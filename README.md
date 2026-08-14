@@ -52,21 +52,31 @@ Tools are denied in non-interactive mode unless explicitly enabled:
 kcastle --prompt "Inspect the repository" --allow-tools
 ```
 
-K writes append-only native JSONL sessions under `~/.kcastle/sessions`. Press `/` in an empty
-composer to open the searchable command dashboard:
+K writes append-only native JSONL sessions under `~/.kcastle/sessions`. The TUI creates a session
+only when the first message is submitted, so opening and exiting K does not leave an empty session.
+Press `/` in an empty composer to open the searchable command dashboard:
 
-- `/resume` — open a saved session
+- `/session` — manage, switch, and delete saved sessions
 - `/model` — switch between configured backends
 - `/compact [focus]` — summarize older context
 - `/permissions` — toggle tool approval prompts
+- `/tool` — browse all tool calls newest first
 - `/queue <message>` — run after the active task settles
 - `/help` — show command help
 - `/exit` — exit
 
 Submitting ordinary text during a model or tool run steers the next model turn; input is rejected
-while manual compaction is running. Press `Escape` to abort the active operation and `Ctrl-C` to
-exit. Tool calls are collapsed by default; press `Tab` to select one and `Enter` to expand it, or
-click it. Approval details support `PageUp`, `PageDown`, `Home`, `End`, and mouse-wheel scrolling.
+while manual compaction is running. Use modified `Enter` for a newline, and `Up`/`Down` at the
+composer boundary to recall submitted input. Press `Escape` to abort the active operation and
+`Ctrl-C` to exit. Completed history uses the terminal's native scrollback, selection, and copying.
+Streaming assistant output advances that native scrollback while the TUI retains only a short live
+tail above the composer.
+Tool status lines appear inline where calls occur, with one colored icon per call and no tool output
+added to terminal history. Consecutive calls share a row until assistant text creates a new row
+below that text. `/tool` lists all calls newest first with start time and duration; use
+`Tab`/`Shift-Tab` to move and `Enter` to open details. Tool details support `Up`/`Down`, `j`/`k`,
+`PageUp`, `PageDown`, `Home`, and `End`; approval details support the page and boundary keys.
+Displayed timestamps use the system time zone and include its UTC offset.
 The allow-all permission mode is confirmed explicitly and stored per session.
 
 ## Develop

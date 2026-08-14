@@ -145,11 +145,16 @@ impl AgentTool for ShellTool {
                 }
             };
 
-            ToolResult::ok(format_output(
+            let result = format_output(
                 output.status.code().unwrap_or(-1),
                 &output.stdout,
                 &output.stderr,
-            ))
+            );
+            if output.status.success() {
+                ToolResult::ok(result)
+            } else {
+                ToolResult::error(result)
+            }
         })
     }
 }
@@ -206,6 +211,28 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.output.contains("exit_code=0"));
         assert!(result.output.contains("rust-native"));
+    }
+
+    #[tokio::test]
+    async fn shell_reports_nonzero_exit_as_error() {
+        let call = FunctionToolCall {
+            arguments: r#"{"command":"exit 7"}"#.into(),
+            call_id: "failed".into(),
+            namespace: None,
+            name: "shell".into(),
+            id: None,
+            status: None,
+        };
+        let result = ShellTool
+            .execute(
+                &call,
+                &Env {
+                    cwd: PathBuf::from("."),
+                },
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.starts_with("exit_code=7\n"));
     }
 
     #[tokio::test]

@@ -1000,6 +1000,8 @@ dependencies = [
  "futures-util",
  "kcastle-agent",
  "ratatui",
+ "ratatui-core",
+ "ratatui-crossterm",
  "ratatui-textarea",
  "serde_json",
  "time",
