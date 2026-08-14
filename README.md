@@ -63,10 +63,11 @@ composer to open the searchable command dashboard:
 - `/help` — show command help
 - `/exit` — exit
 
-Submitting ordinary text during a run steers the next model turn. Press `Escape` to abort the
-active model or tool operation and `Ctrl-C` to exit. Tool calls are collapsed by default; press
-`Tab` to select one and `Enter` to expand it, or click it. The allow-all permission mode is
-confirmed explicitly and stored per session.
+Submitting ordinary text during a model or tool run steers the next model turn; input is rejected
+while manual compaction is running. Press `Escape` to abort the active operation and `Ctrl-C` to
+exit. Tool calls are collapsed by default; press `Tab` to select one and `Enter` to expand it, or
+click it. Approval details support `PageUp`, `PageDown`, `Home`, `End`, and mouse-wheel scrolling.
+The allow-all permission mode is confirmed explicitly and stored per session.
 
 ## Develop
 

@@ -31,6 +31,7 @@ struct Runtime {
     selected_model: usize,
     sessions_dir: PathBuf,
     session_path: PathBuf,
+    compacting: bool,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -193,6 +194,7 @@ async fn run_tui(
         selected_model: 0,
         sessions_dir,
         session_path,
+        compacting: false,
     };
     let mut terminal = ratatui::init();
     if let Err(error) = crossterm::execute!(io::stdout(), EnableMouseCapture) {
@@ -381,8 +383,12 @@ async fn handle_submit(
                 );
                 runtime.control = Some(active.control());
                 runtime.active = Some(active);
+                runtime.compacting = true;
             }
             "compact" => app.notice("Cannot compact while the agent is running"),
+            "queue" if runtime.compacting => {
+                app.notice("Cannot queue while compacting");
+            }
             "queue" if runtime.active.is_some() && !argument.trim().is_empty() => {
                 runtime
                     .control
@@ -399,6 +405,10 @@ async fn handle_submit(
         return Ok(());
     }
 
+    if runtime.compacting {
+        app.notice("Cannot steer while compacting");
+        return Ok(());
+    }
     app.push_user(value.clone());
     if let Some(control) = &runtime.control {
         control.steer(value)?;
@@ -431,12 +441,20 @@ async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<d
     app.set_identity(agent.model(), agent.session_info());
     runtime.agent = Some(agent);
     runtime.control = None;
+    runtime.compacting = false;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, SessionInfo, parse_args_from, read_permission, write_permission};
+    use kcastle_agent::{Agent, Model, Session};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::{
+        App, Command, Runtime, SessionInfo, handle_submit, parse_args_from, read_permission,
+        write_permission,
+    };
 
     #[test]
     fn prompt_tools_require_explicit_flag() {
@@ -484,5 +502,40 @@ mod tests {
         write_permission(&path, false).unwrap();
         assert!(!read_permission(&info));
         std::fs::remove_file(path.with_extension("permissions")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn input_is_rejected_while_compacting() {
+        let model = Model::new("test", "key", "http://localhost", "model", 10_000);
+        let session = Session::memory();
+        let cwd = std::path::PathBuf::from(".");
+        let mut app = App::new(&model, session.info(), Vec::new(), &cwd, None, false);
+        let agent = Agent::new(model.clone(), "test", session, &cwd);
+        let mut runtime = Runtime {
+            agent: Some(agent),
+            active: None,
+            control: None,
+            models: vec![model],
+            selected_model: 0,
+            sessions_dir: std::path::PathBuf::new(),
+            session_path: std::path::PathBuf::new(),
+            compacting: true,
+        };
+
+        handle_submit("do not lose this".into(), &mut app, &mut runtime)
+            .await
+            .unwrap();
+        assert!(runtime.active.is_none());
+        assert!(runtime.agent.is_some());
+        let mut terminal = Terminal::new(TestBackend::new(50, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame, true)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Cannot steer while compacting"));
     }
 }

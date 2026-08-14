@@ -688,10 +688,19 @@ impl ActiveAgent {
         self.events.recv().await
     }
 
-    pub async fn finish(self) -> Result<Agent, AgentError> {
-        self.task
-            .await
-            .map_err(|error| AgentError::Task(error.to_string()))
+    pub async fn finish(mut self) -> Result<Agent, AgentError> {
+        loop {
+            tokio::select! {
+                result = &mut self.task => {
+                    return result.map_err(|error| AgentError::Task(error.to_string()));
+                }
+                event = self.events.recv() => {
+                    if event.is_none() {
+                        return self.task.await.map_err(|error| AgentError::Task(error.to_string()));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -719,7 +728,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{Agent, AgentEvent, Model};
+    use super::{ActiveAgent, Agent, AgentEvent, Model, RunControl};
     use crate::{
         AgentTool, Env, Session, SessionError, SessionInfo, State, StateCommit, StateEntry,
         ToolResult,
@@ -772,6 +781,44 @@ mod tests {
         assert_eq!(text, "hello");
         assert!(finished);
         assert_eq!(agent.state.entries().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn finish_drains_buffered_events() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+        let (steer, _) = tokio::sync::mpsc::unbounded_channel();
+        let (queue, _) = tokio::sync::mpsc::unbounded_channel();
+        let (approvals, _) = tokio::sync::mpsc::unbounded_channel();
+        let agent = Agent::new(
+            Model::new("test", "key", "http://localhost", "model", 10_000),
+            "test",
+            Session::memory(),
+            ".",
+        );
+        let task = tokio::spawn(async move {
+            for index in 0..3 {
+                events_tx
+                    .send(AgentEvent::TextDelta(index.to_string()))
+                    .await
+                    .unwrap();
+            }
+            agent
+        });
+        let active = ActiveAgent {
+            control: RunControl {
+                steer,
+                queue,
+                approvals,
+                cancel: tokio_util::sync::CancellationToken::new(),
+            },
+            events: events_rx,
+            task,
+        };
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), active.finish())
+            .await
+            .expect("finish should drain pending events")
+            .unwrap();
     }
 
     struct EchoTool;

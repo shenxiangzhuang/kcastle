@@ -35,6 +35,8 @@ enum Modal {
         call_id: String,
         name: String,
         arguments: String,
+        scroll: u16,
+        max_scroll: u16,
     },
     Sessions {
         sessions: Vec<SessionInfo>,
@@ -59,6 +61,13 @@ struct CommandItem {
     command: String,
     description: String,
     prefill: bool,
+}
+
+struct TranscriptCache {
+    width: usize,
+    entries: usize,
+    lines: Vec<Line<'static>>,
+    tool_rows: Vec<(usize, usize)>,
 }
 
 pub enum UiAction {
@@ -90,6 +99,8 @@ pub struct App {
     cached_tokens: u32,
     used_tokens: u32,
     modal: Option<Modal>,
+    transcript_cache: Option<TranscriptCache>,
+    streaming_entry: Option<usize>,
     tool_rows: Vec<(u16, usize)>,
     selected_tool: Option<usize>,
     follow: bool,
@@ -123,6 +134,8 @@ impl App {
             cached_tokens: 0,
             used_tokens: 0,
             modal: None,
+            transcript_cache: None,
+            streaming_entry: None,
             tool_rows: Vec::new(),
             selected_tool: None,
             follow: true,
@@ -281,7 +294,7 @@ impl App {
             frame.render_widget(Paragraph::new(self.status_line(running)), layout[3]);
         }
 
-        match &self.modal {
+        match &mut self.modal {
             Some(Modal::Commands {
                 items,
                 query,
@@ -354,6 +367,7 @@ impl App {
                         .and_then(|selected| tools.iter().position(|index| *index == selected))
                         .map_or(0, |position| (position + 1) % tools.len());
                     self.selected_tool = Some(tools[position]);
+                    self.invalidate_transcript();
                 }
                 UiAction::None
             }
@@ -364,6 +378,7 @@ impl App {
                         && let Some(Entry::Tool { expanded, .. }) = self.entries.get_mut(index)
                     {
                         *expanded = !*expanded;
+                        self.invalidate_transcript();
                     }
                     return UiAction::None;
                 }
@@ -381,6 +396,19 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, event: MouseEvent) {
+        if let Some(Modal::Approval {
+            scroll, max_scroll, ..
+        }) = &mut self.modal
+        {
+            match event.kind {
+                MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => {
+                    *scroll = scroll.saturating_add(3).min(*max_scroll);
+                }
+                _ => {}
+            }
+            return;
+        }
         match event.kind {
             MouseEventKind::ScrollUp => {
                 self.follow = false;
@@ -396,6 +424,7 @@ impl App {
                 {
                     self.selected_tool = Some(*entry);
                     *expanded = !*expanded;
+                    self.invalidate_transcript();
                 }
             }
             _ => {}
@@ -412,16 +441,22 @@ impl App {
             AgentEvent::ModelStarted(turn) => {
                 self.activity = format!("model turn {turn}");
                 self.entries.push(Entry::Assistant(String::new()));
+                self.streaming_entry = Some(self.entries.len() - 1);
                 self.follow = true;
             }
             AgentEvent::TextDelta(delta) => {
-                if let Some(Entry::Assistant(text)) = self.entries.last_mut() {
+                if let Some(Entry::Assistant(text)) = self
+                    .streaming_entry
+                    .and_then(|index| self.entries.get_mut(index))
+                {
                     text.push_str(&delta);
                 } else {
                     self.entries.push(Entry::Assistant(delta));
+                    self.streaming_entry = Some(self.entries.len() - 1);
                 }
             }
             AgentEvent::ApprovalRequired(call) => {
+                self.streaming_entry = None;
                 if self.allow_all {
                     return Some((call.call_id, true));
                 }
@@ -429,9 +464,12 @@ impl App {
                     call_id: call.call_id,
                     name: call.name,
                     arguments: call.arguments,
+                    scroll: 0,
+                    max_scroll: 0,
                 });
             }
             AgentEvent::ToolStarted(call) => {
+                self.streaming_entry = None;
                 self.entries.push(Entry::Tool {
                     call_id: call.call_id,
                     name: call.name,
@@ -447,6 +485,7 @@ impl App {
                 ) {
                     *output = Some(result.output);
                     *failed = result.is_error;
+                    self.invalidate_transcript();
                 }
             }
             AgentEvent::CompactionStarted { tokens_before } => {
@@ -456,6 +495,7 @@ impl App {
                 self.activity = "compaction finished".into();
             }
             AgentEvent::RunFinished(summary) => {
+                self.streaming_entry = None;
                 self.activity = "idle".into();
                 self.set_usage(
                     summary.usage.as_ref().map(|usage| {
@@ -463,10 +503,15 @@ impl App {
                     }),
                 );
             }
-            AgentEvent::RunAborted => self.activity = "aborted".into(),
+            AgentEvent::RunAborted => {
+                self.streaming_entry = None;
+                self.activity = "aborted".into();
+            }
             AgentEvent::RunFailed(error) => {
+                self.streaming_entry = None;
                 self.activity = "failed".into();
                 self.entries.push(Entry::Notice(format!("Error: {error}")));
+                self.invalidate_transcript();
             }
         }
         None
@@ -475,11 +520,13 @@ impl App {
     pub fn push_user(&mut self, value: String) {
         self.show_startup = false;
         self.entries.push(Entry::User(value));
+        self.invalidate_transcript();
         self.follow = true;
     }
 
     pub fn notice(&mut self, value: impl Into<String>) {
         self.entries.push(Entry::Notice(value.into()));
+        self.invalidate_transcript();
         self.follow = true;
     }
 
@@ -496,6 +543,7 @@ impl App {
     pub fn load_transcript(&mut self, transcript: Vec<TranscriptItem>) {
         self.show_startup = false;
         self.entries.clear();
+        self.streaming_entry = None;
         for item in transcript {
             match item {
                 TranscriptItem::User(text) => self.entries.push(Entry::User(text)),
@@ -528,6 +576,7 @@ impl App {
                 }
             }
         }
+        self.invalidate_transcript();
         self.follow = true;
     }
 
@@ -619,7 +668,28 @@ impl App {
     fn handle_modal_key(&mut self, key: KeyEvent) -> Option<UiAction> {
         let modal = self.modal.as_mut()?;
         let action = match modal {
-            Modal::Approval { call_id, .. } => match key.code {
+            Modal::Approval {
+                call_id,
+                scroll,
+                max_scroll,
+                ..
+            } => match key.code {
+                KeyCode::PageUp => {
+                    *scroll = scroll.saturating_sub(10);
+                    None
+                }
+                KeyCode::PageDown => {
+                    *scroll = scroll.saturating_add(10).min(*max_scroll);
+                    None
+                }
+                KeyCode::Home => {
+                    *scroll = 0;
+                    None
+                }
+                KeyCode::End => {
+                    *scroll = *max_scroll;
+                    None
+                }
                 KeyCode::Char('y') | KeyCode::Enter => Some(UiAction::Approve {
                     call_id: call_id.clone(),
                     allow: true,
@@ -714,91 +784,167 @@ impl App {
         action.or(Some(UiAction::None))
     }
 
-    fn transcript_lines(&self, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    fn transcript_lines(&mut self, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
         if self.entries.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        let mut lines = Vec::new();
-        let mut tool_lines = Vec::new();
-        for (entry_index, entry) in self.entries.iter().enumerate() {
-            match entry {
-                Entry::User(text) => push_user(&mut lines, text, width),
-                Entry::Assistant(text) if !text.is_empty() => {
-                    lines.extend(
-                        markdown_ratatui::render_with(
-                            &markdown_stream::parse(text),
-                            &markdown_ratatui::Theme::default(),
-                            width,
-                        )
-                        .lines,
-                    );
-                    lines.push(Line::from(""));
-                }
-                Entry::Tool {
+        let stable_entries = self.streaming_entry.unwrap_or(self.entries.len());
+        if self
+            .transcript_cache
+            .as_ref()
+            .is_none_or(|cache| cache.width != width || cache.entries != stable_entries)
+        {
+            let (lines, tool_lines) = render_entries(
+                &self.entries,
+                0..stable_entries,
+                self.selected_tool,
+                None,
+                width,
+            );
+            self.transcript_cache = Some(TranscriptCache {
+                width,
+                entries: stable_entries,
+                tool_rows: physical_tool_rows(&lines, &tool_lines, width),
+                lines,
+            });
+        }
+        let cache = self.transcript_cache.as_ref().expect("cache initialized");
+        let mut lines = cache.lines.clone();
+        let tool_rows = cache.tool_rows.clone();
+        if stable_entries < self.entries.len() {
+            let (tail, tail_tools) = render_entries(
+                &self.entries,
+                stable_entries..self.entries.len(),
+                self.selected_tool,
+                self.streaming_entry,
+                width,
+            );
+            debug_assert!(tail_tools.is_empty());
+            lines.extend(tail);
+        }
+        (lines, tool_rows)
+    }
+
+    fn invalidate_transcript(&mut self) {
+        self.transcript_cache = None;
+    }
+}
+
+fn render_entries(
+    entries: &[Entry],
+    range: std::ops::Range<usize>,
+    selected_tool: Option<usize>,
+    plain_assistant: Option<usize>,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let mut lines = Vec::new();
+    let mut tool_lines = Vec::new();
+    for entry_index in range {
+        let entry = &entries[entry_index];
+        match entry {
+            Entry::User(text) => push_user(&mut lines, text, width),
+            Entry::Assistant(text) if !text.is_empty() && plain_assistant == Some(entry_index) => {
+                lines.extend(text.split('\n').map(|line| Line::from(line.to_owned())));
+                lines.push(Line::from(""));
+            }
+            Entry::Assistant(text) if !text.is_empty() => {
+                lines.extend(
+                    markdown_ratatui::render_with(
+                        &markdown_stream::parse(text),
+                        &markdown_ratatui::Theme::default(),
+                        width,
+                    )
+                    .lines,
+                );
+                lines.push(Line::from(""));
+            }
+            Entry::Tool {
+                name,
+                arguments,
+                output,
+                failed,
+                expanded,
+                ..
+            } => {
+                let mark = if *failed {
+                    "!"
+                } else if output.is_some() {
+                    "✓"
+                } else {
+                    "·"
+                };
+                let color = if *failed { Color::Red } else { Color::Cyan };
+                tool_lines.push((lines.len(), entry_index));
+                let label = format!("{mark} {name}");
+                let summary = tool_summary(
                     name,
                     arguments,
-                    output,
-                    failed,
-                    expanded,
-                    ..
-                } => {
-                    let mark = if *failed {
-                        "!"
-                    } else if output.is_some() {
-                        "✓"
-                    } else {
-                        "·"
-                    };
-                    let color = if *failed { Color::Red } else { Color::Cyan };
-                    tool_lines.push((lines.len(), entry_index));
-                    let label = format!("{mark} {name}");
-                    let summary = tool_summary(
-                        name,
-                        arguments,
-                        width.saturating_sub(Span::raw(&label).width() + 2),
-                    );
-                    let mut spans = vec![Span::styled(label, Style::default().fg(color))];
-                    if !summary.is_empty() {
-                        spans.push(Span::styled(
-                            format!("  {summary}"),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    let mut line = Line::from(spans);
-                    if self.selected_tool == Some(entry_index) {
-                        line = line.style(Style::default().bg(Color::DarkGray));
-                    }
-                    lines.push(line);
-                    if *expanded {
-                        lines.push(Line::from(Span::styled(
-                            format!("  Arguments: {arguments}"),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                        if let Some(output) = output {
-                            for line in output.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    format!("  {line}"),
-                                    Style::default().fg(Color::DarkGray),
-                                )));
-                            }
+                    width.saturating_sub(Span::raw(&label).width() + 2),
+                );
+                let mut spans = vec![Span::styled(label, Style::default().fg(color))];
+                if !summary.is_empty() {
+                    spans.push(Span::styled(
+                        format!("  {summary}"),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                let mut line = Line::from(spans);
+                if selected_tool == Some(entry_index) {
+                    line = line.style(Style::default().bg(Color::DarkGray));
+                }
+                lines.push(line);
+                if *expanded {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Arguments: {arguments}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    if let Some(output) = output {
+                        for line in output.lines() {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {line}"),
+                                Style::default().fg(Color::DarkGray),
+                            )));
                         }
                     }
-                    if !matches!(self.entries.get(entry_index + 1), Some(Entry::Tool { .. })) {
-                        lines.push(Line::from(""));
-                    }
                 }
-                Entry::Notice(text) => {
-                    lines.push(Line::from(Span::styled(
-                        text.clone(),
-                        Style::default().fg(Color::Yellow),
-                    )));
+                if !matches!(entries.get(entry_index + 1), Some(Entry::Tool { .. })) {
                     lines.push(Line::from(""));
                 }
-                Entry::Assistant(_) => {}
             }
+            Entry::Notice(text) => {
+                lines.push(Line::from(Span::styled(
+                    text.clone(),
+                    Style::default().fg(Color::Yellow),
+                )));
+                lines.push(Line::from(""));
+            }
+            Entry::Assistant(_) => {}
         }
-        (lines, tool_lines)
     }
+    (lines, tool_lines)
+}
+
+fn physical_tool_rows(
+    lines: &[Line<'static>],
+    tool_lines: &[(usize, usize)],
+    width: usize,
+) -> Vec<(usize, usize)> {
+    let width = u16::try_from(width).unwrap_or(u16::MAX).max(1);
+    let mut rows = Vec::with_capacity(tool_lines.len());
+    let mut physical_row = 0;
+    let mut tools = tool_lines.iter().peekable();
+    for (line_index, line) in lines.iter().enumerate() {
+        while let Some((_tool_line, entry)) =
+            tools.next_if(|(tool_line, _)| *tool_line == line_index)
+        {
+            rows.push((physical_row, *entry));
+        }
+        physical_row += Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1);
+    }
+    rows
 }
 
 fn push_user(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
@@ -956,21 +1102,28 @@ fn session_label(session: &SessionInfo) -> String {
     format!("{} · {timestamp}", session.title)
 }
 
-fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
+fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
     frame.render_widget(Clear, area);
     match modal {
         Modal::Approval {
-            name, arguments, ..
+            name,
+            arguments,
+            scroll,
+            max_scroll,
+            ..
         } => {
             let content = format!(
                 "Tool: {name}\n\n{arguments}\n\n[y/Enter] allow   [n/Esc] deny   [a] allow all"
             );
-            frame.render_widget(
-                Paragraph::new(content)
-                    .block(Block::default().borders(Borders::ALL).title(" Permission "))
-                    .wrap(Wrap { trim: false }),
-                area,
-            );
+            let paragraph = Paragraph::new(content)
+                .block(Block::default().borders(Borders::ALL).title(" Permission "))
+                .wrap(Wrap { trim: false });
+            *max_scroll = paragraph
+                .line_count(area.width)
+                .saturating_sub(area.height as usize)
+                .min(u16::MAX as usize) as u16;
+            *scroll = (*scroll).min(*max_scroll);
+            frame.render_widget(paragraph.scroll((*scroll, 0)), area);
         }
         Modal::Sessions { sessions, selected } => {
             let items = sessions
@@ -1065,7 +1218,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use kcastle_agent::{AgentEvent, Model, SessionInfo};
+    use kcastle_agent::{AgentEvent, Model, RunSummary, SessionInfo};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Position;
@@ -1239,6 +1392,31 @@ mod tests {
     }
 
     #[test]
+    fn long_approval_details_can_scroll_to_the_end() {
+        let mut app = app();
+        app.modal = Some(Modal::Approval {
+            arguments: format!("{}VISIBLE_TAIL", "hidden line\n".repeat(30)),
+            call_id: "call".into(),
+            name: "shell".into(),
+            scroll: 0,
+            max_scroll: 0,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame, true)).unwrap();
+        app.handle_key(key(KeyCode::End), true);
+        terminal.draw(|frame| app.render(frame, true)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("VISIBLE_TAIL"));
+    }
+
+    #[test]
     fn tool_rows_are_semantic_compact_and_grouped() {
         let mut app = app();
         app.entries.push(Entry::Tool {
@@ -1273,6 +1451,46 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_content_keeps_tool_click_rows_aligned() {
+        let mut app = app();
+        app.notice("wrapped words ".repeat(8));
+        app.entries.push(Entry::Tool {
+            call_id: "call".into(),
+            name: "shell".into(),
+            arguments: r#"{"command":"pwd"}"#.into(),
+            output: Some("exit_code=0".into()),
+            failed: false,
+            expanded: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(20, 16)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let tool_row = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(20)
+            .position(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("shell")
+            })
+            .unwrap() as u16;
+
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 0,
+            row: tool_row,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(matches!(
+            app.entries.last(),
+            Some(Entry::Tool { expanded: true, .. })
+        ));
+    }
+
+    #[test]
     fn assistant_message_has_no_role_marker() {
         let mut app = app();
         app.entries.push(Entry::Assistant("answer".into()));
@@ -1283,6 +1501,30 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert_eq!(rendered, "answer");
+    }
+
+    #[test]
+    fn steering_does_not_split_the_streaming_assistant() {
+        let mut app = app();
+        app.apply_event(AgentEvent::ModelStarted(1));
+        app.apply_event(AgentEvent::TextDelta("**hel".into()));
+        app.push_user("steer".into());
+        app.apply_event(AgentEvent::TextDelta("lo**".into()));
+
+        assert!(matches!(
+            app.entries.as_slice(),
+            [Entry::Assistant(answer), Entry::User(message)]
+                if answer == "**hello**" && message == "steer"
+        ));
+        app.apply_event(AgentEvent::RunFinished(RunSummary {
+            output: "hello".into(),
+            response_id: "response".into(),
+            usage: None,
+        }));
+        let (lines, _) = app.transcript_lines(40);
+        assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
+            span.content == "hello" && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
     }
 
     #[test]
