@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use kcastle_agent::{AgentEvent, Model, SessionInfo, TranscriptItem};
+use kcastle_agent::{AgentEvent, Model, ReasoningEffort, SessionInfo, TranscriptItem};
 use markdown_stream::{Alignment, BlockKind, Event, InlineStyle};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -65,6 +65,12 @@ enum Modal {
         names: Vec<String>,
         selected: usize,
     },
+    Reasoning {
+        model: usize,
+        name: String,
+        choices: Vec<String>,
+        selected: usize,
+    },
     Commands {
         items: Vec<CommandItem>,
         query: String,
@@ -109,6 +115,10 @@ pub enum UiAction {
         selected: usize,
     },
     SelectModel(usize),
+    SelectReasoning {
+        model: usize,
+        effort: usize,
+    },
     SetPermissions {
         allow_all: bool,
         pending_call_id: Option<String>,
@@ -121,13 +131,13 @@ pub enum UiAction {
 pub struct App {
     entries: Vec<Entry>,
     input: TextArea<'static>,
-    activity: String,
     model: String,
-    session: String,
     cwd: PathBuf,
     context_window: usize,
+    input_tokens: u32,
+    output_tokens: u32,
+    total_tokens: u32,
     cached_tokens: u32,
-    used_tokens: u32,
     modal: Option<Modal>,
     transcript_cache: Option<TranscriptCache>,
     streaming_entry: Option<usize>,
@@ -136,7 +146,6 @@ pub struct App {
     input_history: Vec<String>,
     history_index: Option<usize>,
     history_draft: Option<String>,
-    run_started_at: Option<Instant>,
     allow_all: bool,
     show_startup: bool,
     should_exit: bool,
@@ -145,22 +154,21 @@ pub struct App {
 impl App {
     pub fn new(
         model: &Model,
-        session: &SessionInfo,
         transcript: Vec<TranscriptItem>,
         cwd: &Path,
-        usage: Option<(u32, u32)>,
+        usage: Option<(u32, u32, u32, u32)>,
         allow_all: bool,
     ) -> Self {
         let mut app = Self {
             entries: Vec::new(),
             input: new_textarea(),
-            activity: "idle".into(),
             model: format!("{} · {}", model.name(), model.model()),
-            session: session.title.clone(),
             cwd: cwd.to_path_buf(),
             context_window: model.context_window(),
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
             cached_tokens: 0,
-            used_tokens: 0,
             modal: None,
             transcript_cache: None,
             streaming_entry: None,
@@ -169,7 +177,6 @@ impl App {
             input_history: Vec::new(),
             history_index: None,
             history_draft: None,
-            run_started_at: None,
             allow_all,
             show_startup: false,
             should_exit: false,
@@ -305,10 +312,7 @@ impl App {
         }
 
         if !compact {
-            frame.render_widget(
-                Paragraph::new(self.status_line(running, area.width)),
-                layout[3],
-            );
+            frame.render_widget(Paragraph::new(self.status_line(area.width)), layout[3]);
         }
 
         match &mut self.modal {
@@ -406,13 +410,8 @@ impl App {
 
     pub fn apply_event(&mut self, event: AgentEvent) -> Option<(String, bool)> {
         match event {
-            AgentEvent::RunStarted(_) => {
-                self.activity = "thinking".into();
-                self.run_started_at = Some(Instant::now());
-            }
-            AgentEvent::ModelStarted(turn) => {
-                self.activity = format!("model turn {turn}");
-            }
+            AgentEvent::RunStarted(_) => {}
+            AgentEvent::ModelStarted(_) => {}
             AgentEvent::TextDelta(delta) => {
                 if let Some(Entry::Assistant { text, .. }) = self
                     .streaming_entry
@@ -489,34 +488,26 @@ impl App {
                     self.invalidate_transcript();
                 }
             }
-            AgentEvent::CompactionStarted { tokens_before } => {
-                self.activity = format!("compacting {tokens_before} estimated tokens");
-            }
-            AgentEvent::CompactionFinished { .. } => {
-                self.activity = "compaction finished".into();
-            }
+            AgentEvent::CompactionStarted { .. } | AgentEvent::CompactionFinished { .. } => {}
             AgentEvent::RunFinished(summary) => {
                 self.streaming_entry = None;
                 self.active_tool_row = None;
-                self.run_started_at = None;
-                self.activity = "idle".into();
-                self.set_usage(
-                    summary.usage.as_ref().map(|usage| {
-                        (usage.input_tokens_details.cached_tokens, usage.total_tokens)
-                    }),
-                );
+                self.set_usage(summary.usage.as_ref().map(|usage| {
+                    (
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.total_tokens,
+                        usage.input_tokens_details.cached_tokens,
+                    )
+                }));
             }
             AgentEvent::RunAborted => {
                 self.streaming_entry = None;
                 self.active_tool_row = None;
-                self.run_started_at = None;
-                self.activity = "aborted".into();
             }
             AgentEvent::RunFailed(error) => {
                 self.streaming_entry = None;
                 self.active_tool_row = None;
-                self.run_started_at = None;
-                self.activity = "failed".into();
                 self.entries.push(Entry::Notice(format!("Error: {error}")));
                 self.invalidate_transcript();
             }
@@ -536,13 +527,16 @@ impl App {
         self.invalidate_transcript();
     }
 
-    pub fn set_identity(&mut self, model: &Model, session: &SessionInfo) {
+    pub fn set_identity(&mut self, model: &Model) {
         self.model = format!("{} · {}", model.name(), model.model());
+        if let Some(effort) = model.reasoning_effort() {
+            self.model
+                .push_str(&format!(" · {}", reasoning_effort_value(effort)));
+        }
         self.context_window = model.context_window();
-        self.session = session.title.clone();
     }
 
-    pub fn set_usage_values(&mut self, usage: Option<(u32, u32)>) {
+    pub fn set_usage_values(&mut self, usage: Option<(u32, u32, u32, u32)>) {
         self.set_usage(usage);
     }
 
@@ -646,7 +640,36 @@ impl App {
         self.modal = Some(Modal::Models {
             names: models
                 .iter()
-                .map(|model| format!("{} · {}", model.name(), model.model()))
+                .map(|model| {
+                    let effort = model
+                        .reasoning_effort()
+                        .map(reasoning_effort_value)
+                        .unwrap_or("—");
+                    format!("{} · {} · {effort}", model.name(), model.model())
+                })
+                .collect(),
+            selected,
+        });
+    }
+
+    pub fn show_reasoning(&mut self, model: &Model, model_index: usize) {
+        let efforts = model.reasoning_efforts();
+        let selected = model
+            .reasoning_effort()
+            .and_then(|current| efforts.iter().position(|effort| effort == current))
+            .unwrap_or(0);
+        self.modal = Some(Modal::Reasoning {
+            model: model_index,
+            name: model.model().into(),
+            choices: efforts
+                .iter()
+                .map(|effort| {
+                    format!(
+                        "{:<10} {}",
+                        reasoning_effort_label(effort),
+                        reasoning_effort_description(effort)
+                    )
+                })
                 .collect(),
             selected,
         });
@@ -778,31 +801,27 @@ impl App {
         }
     }
 
-    fn set_usage(&mut self, usage: Option<(u32, u32)>) {
-        (self.cached_tokens, self.used_tokens) = usage.unwrap_or((0, 0));
+    fn set_usage(&mut self, usage: Option<(u32, u32, u32, u32)>) {
+        (
+            self.input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+            self.cached_tokens,
+        ) = usage.unwrap_or((0, 0, 0, 0));
     }
 
-    fn status_line(&self, running: bool, width: u16) -> Line<'static> {
-        let activity = if running { &self.activity } else { "idle" };
-        let elapsed = self
-            .run_started_at
-            .filter(|_| running)
-            .map(|started| format!(" · {}s", started.elapsed().as_secs()))
-            .unwrap_or_default();
-        let mut text = format!(" {activity}{elapsed}");
+    fn status_line(&self, width: u16) -> Line<'static> {
+        let context_used = precise_percentage(self.total_tokens as usize, self.context_window);
+        let cache_hit = percentage(self.cached_tokens as usize, self.input_tokens as usize);
+        let mut text = format!(" {}", self.model);
         if width >= 72 {
             text.push_str(&format!(
-                " · {} · context {}/{}/{}",
-                self.model, self.cached_tokens, self.used_tokens, self.context_window,
+                " · in {} · out {} · ctx {context_used:.2}% · cache {cache_hit}%",
+                format_tokens(self.input_tokens),
+                format_tokens(self.output_tokens),
             ));
         } else if width >= 40 {
-            text.push_str(&format!(
-                " · context {}/{}",
-                self.used_tokens, self.context_window
-            ));
-        }
-        if width >= 110 {
-            text.push_str(&format!(" · {}", self.session));
+            text.push_str(&format!(" · ctx {context_used:.2}% · cache {cache_hit}%"));
         }
         Line::from(Span::styled(text, Style::default().fg(ACCENT)))
     }
@@ -1006,6 +1025,27 @@ impl App {
                     None
                 }
                 KeyCode::Enter => Some(UiAction::SelectModel(*selected)),
+                KeyCode::Esc => Some(UiAction::None),
+                _ => None,
+            },
+            Modal::Reasoning {
+                model,
+                choices,
+                selected,
+                ..
+            } => match key.code {
+                KeyCode::Up => {
+                    *selected = selected.saturating_sub(1);
+                    None
+                }
+                KeyCode::Down => {
+                    *selected = (*selected + 1).min(choices.len() - 1);
+                    None
+                }
+                KeyCode::Enter => Some(UiAction::SelectReasoning {
+                    model: *model,
+                    effort: *selected,
+                }),
                 KeyCode::Esc => Some(UiAction::None),
                 _ => None,
             },
@@ -1562,6 +1602,31 @@ fn compact(value: &str, limit: usize) -> String {
     result
 }
 
+fn format_tokens(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn percentage(part: usize, total: usize) -> usize {
+    part.saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(100)
+}
+
+fn precise_percentage(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64 * 100.0).clamp(0.0, 100.0)
+    }
+}
+
 fn new_textarea() -> TextArea<'static> {
     let mut input = TextArea::default();
     input.set_cursor_line_style(Style::default());
@@ -1665,7 +1730,7 @@ fn command_items(running: bool) -> Vec<CommandItem> {
         },
         CommandItem {
             command: "/model".into(),
-            description: "Switch model backend".into(),
+            description: "Select model and reasoning level".into(),
             prefill: false,
         },
         CommandItem {
@@ -1737,6 +1802,39 @@ fn session_label(session: &SessionInfo) -> String {
         })
         .unwrap_or_else(|| session.created_at.to_string());
     format!("{} · {timestamp}", session.title)
+}
+
+fn reasoning_effort_label(effort: &ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::None => "None",
+        ReasoningEffort::Minimal => "Minimal",
+        ReasoningEffort::Low => "Low",
+        ReasoningEffort::Medium => "Medium",
+        ReasoningEffort::High => "High",
+        ReasoningEffort::Xhigh => "Extra high",
+    }
+}
+
+fn reasoning_effort_value(effort: &ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::None => "none",
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Xhigh => "xhigh",
+    }
+}
+
+fn reasoning_effort_description(effort: &ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::None => "Fastest responses without reasoning",
+        ReasoningEffort::Minimal => "Minimal reasoning for simple tasks",
+        ReasoningEffort::Low => "Fast responses with lighter reasoning",
+        ReasoningEffort::Medium => "Balances speed and reasoning depth",
+        ReasoningEffort::High => "Greater reasoning depth for complex tasks",
+        ReasoningEffort::Xhigh => "Extra reasoning depth for difficult tasks",
+    }
 }
 
 fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, tools: &[ToolRecord], area: Rect) {
@@ -1840,6 +1938,30 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, tools: &[ToolRecord], 
             frame.render_stateful_widget(
                 List::new(items)
                     .block(Block::default().borders(Borders::ALL).title(" Models "))
+                    .highlight_style(Style::default().bg(Color::DarkGray).fg(ACCENT)),
+                area,
+                &mut state,
+            );
+        }
+        Modal::Reasoning {
+            name,
+            choices,
+            selected,
+            ..
+        } => {
+            let items = choices
+                .iter()
+                .map(|choice| ListItem::new(choice.clone()))
+                .collect::<Vec<_>>();
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" Reasoning level for {name} "))
+                            .title_bottom(" Enter confirm · Esc cancel "),
+                    )
                     .highlight_style(Style::default().bg(Color::DarkGray).fg(ACCENT)),
                 area,
                 &mut state,
@@ -2060,7 +2182,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use kcastle_agent::{AgentEvent, Model, RunSummary, SessionInfo, TranscriptItem};
+    use kcastle_agent::{
+        AgentEvent, Model, ReasoningEffort, RunSummary, SessionInfo, TranscriptItem,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::{Position, Rect};
@@ -2078,14 +2202,9 @@ mod tests {
     fn app() -> App {
         App::new(
             &Model::new("test", "key", "http://localhost", "test-model", 10_000),
-            &SessionInfo {
-                path: PathBuf::from("session.jsonl"),
-                title: "session".into(),
-                created_at: 0,
-            },
             Vec::new(),
             std::path::Path::new("/work"),
-            Some((12, 34)),
+            Some((40, 1, 41, 38)),
             false,
         )
     }
@@ -2138,6 +2257,48 @@ mod tests {
         app.handle_key(key(KeyCode::Char('/')), false);
         app.handle_key(key(KeyCode::Backspace), false);
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn model_selection_continues_to_reasoning_selection() {
+        const EFFORTS: &[ReasoningEffort] = &[
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ];
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000)
+            .with_reasoning(EFFORTS, ReasoningEffort::Medium);
+        let mut app = App::new(
+            &model,
+            Vec::new(),
+            std::path::Path::new("/work"),
+            None,
+            false,
+        );
+
+        app.show_models(std::slice::from_ref(&model), 0);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter), false),
+            UiAction::SelectModel(0)
+        ));
+
+        app.show_reasoning(&model, 0);
+        let Modal::Reasoning {
+            choices, selected, ..
+        } = app.modal.as_ref().unwrap()
+        else {
+            panic!("reasoning picker not opened")
+        };
+        assert_eq!(*selected, 1);
+        assert!(choices[1].starts_with("Medium"));
+        app.handle_key(key(KeyCode::Down), false);
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter), false),
+            UiAction::SelectReasoning {
+                model: 0,
+                effort: 2
+            }
+        ));
     }
 
     #[test]
@@ -2706,7 +2867,7 @@ mod tests {
         let mut app = app();
         app.set_permission_mode(true);
         let status = app
-            .status_line(false, 80)
+            .status_line(80)
             .spans
             .iter()
             .map(|span| span.content.as_ref())
@@ -2714,7 +2875,10 @@ mod tests {
         assert!(!status.contains("permissions"));
         assert!(!status.contains("allow all"));
         assert!(app.entries.is_empty());
-        assert!(status.contains("context 12/34/10000"));
+        assert_eq!(
+            status,
+            " test · test-model · in 40 · out 1 · ctx 0.41% · cache 95%"
+        );
         let created_at = local_datetime(OffsetDateTime::UNIX_EPOCH)
             .format(format_description!(
                 "[year]-[month]-[day] [hour]:[minute] [offset_hour sign:mandatory]:[offset_minute]"

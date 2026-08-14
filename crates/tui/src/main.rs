@@ -14,15 +14,27 @@ use crossterm::event::{
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
-use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, Session, SessionInfo};
+use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, ReasoningEffort, Session, SessionInfo};
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
 
 const INSTRUCTIONS: &str = "You are K, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 const INLINE_VIEWPORT_HEIGHT: u16 = 12;
+const DEEPSEEK_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+];
+const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+];
 
-const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /model           Switch model backend\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
+const HELP: &str = "K in Castle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /model           Select model and reasoning level\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
 
 enum Command {
     Tui,
@@ -126,24 +138,54 @@ fn models_from_env() -> Result<Vec<Model>, Box<dyn Error>> {
     if let Ok(key) = env::var("DEEPSEEK_API_KEY")
         && !key.trim().is_empty()
     {
-        models.push(Model::new(
-            "DeepSeek",
-            key,
-            "https://api.deepseek.com",
-            "deepseek-v4-flash",
-            1_000_000,
-        ));
+        models.extend([
+            Model::new(
+                "DeepSeek",
+                key.clone(),
+                "https://api.deepseek.com",
+                "deepseek-v4-flash",
+                1_000_000,
+            )
+            .with_reasoning(DEEPSEEK_REASONING_EFFORTS, ReasoningEffort::High),
+            Model::new(
+                "DeepSeek",
+                key,
+                "https://api.deepseek.com",
+                "deepseek-v4-pro",
+                1_000_000,
+            )
+            .with_reasoning(DEEPSEEK_REASONING_EFFORTS, ReasoningEffort::High),
+        ]);
     }
     if let Ok(key) = env::var("OPENAI_API_KEY")
         && !key.trim().is_empty()
     {
-        models.push(Model::new(
-            "OpenAI",
-            key,
-            "https://api.openai.com/v1",
-            "gpt-5.5",
-            1_050_000,
-        ));
+        models.extend([
+            Model::new(
+                "OpenAI",
+                key.clone(),
+                "https://api.openai.com/v1",
+                "gpt-5.6-sol",
+                1_050_000,
+            )
+            .with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium),
+            Model::new(
+                "OpenAI",
+                key.clone(),
+                "https://api.openai.com/v1",
+                "gpt-5.6-terra",
+                1_050_000,
+            )
+            .with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium),
+            Model::new(
+                "OpenAI",
+                key,
+                "https://api.openai.com/v1",
+                "gpt-5.6-luna",
+                1_050_000,
+            )
+            .with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium),
+        ]);
     }
     if models.is_empty() {
         return Err("set DEEPSEEK_API_KEY or OPENAI_API_KEY".into());
@@ -190,18 +232,16 @@ async fn run_tui(
     sessions_dir: PathBuf,
     cwd: PathBuf,
 ) -> Result<(), Box<dyn Error>> {
-    let usage = agent
-        .latest_usage()
-        .map(|usage| (usage.input_tokens_details.cached_tokens, usage.total_tokens));
+    let usage = agent.latest_usage().map(|usage| {
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.total_tokens,
+            usage.input_tokens_details.cached_tokens,
+        )
+    });
     let allow_all = read_permission(agent.session_info());
-    let mut app = App::new(
-        agent.model(),
-        agent.session_info(),
-        agent.transcript(),
-        &cwd,
-        usage,
-        allow_all,
-    );
+    let mut app = App::new(agent.model(), agent.transcript(), &cwd, usage, allow_all);
     let session_path = agent.session_info().path.clone();
     let mut runtime = Runtime {
         agent: Some(agent),
@@ -411,9 +451,14 @@ async fn handle_action(
                         let agent = runtime.agent.as_mut().expect("idle agent");
                         agent.set_session(session);
                         app.load_transcript(agent.transcript());
-                        app.set_identity(agent.model(), agent.session_info());
+                        app.set_identity(agent.model());
                         app.set_usage_values(agent.latest_usage().map(|usage| {
-                            (usage.input_tokens_details.cached_tokens, usage.total_tokens)
+                            (
+                                usage.input_tokens,
+                                usage.output_tokens,
+                                usage.total_tokens,
+                                usage.input_tokens_details.cached_tokens,
+                            )
                         }));
                         app.set_permission_mode(allow_all);
                     }
@@ -447,12 +492,37 @@ async fn handle_action(
         UiAction::SelectModel(index) => {
             if runtime.active.is_some() {
                 app.notice("Cannot switch models while the agent is running");
-            } else if let Some(model) = runtime.models.get(index).cloned() {
-                runtime.selected_model = index;
+            } else if let Some(model) = runtime.models.get(index) {
+                if model.reasoning_efforts().is_empty() {
+                    runtime.selected_model = index;
+                    let agent = runtime.agent.as_mut().expect("idle agent");
+                    agent.set_model(model.clone());
+                    app.set_identity(agent.model());
+                    app.set_usage_values(None);
+                } else {
+                    app.show_reasoning(model, index);
+                }
+            }
+        }
+        UiAction::SelectReasoning { model, effort } => {
+            if runtime.active.is_some() {
+                app.notice("Cannot change reasoning while the agent is running");
+            } else if let Some(reasoning_effort) = runtime
+                .models
+                .get(model)
+                .and_then(|model| model.reasoning_efforts().get(effort))
+                .cloned()
+            {
+                runtime.models[model].set_reasoning_effort(reasoning_effort.clone());
                 let agent = runtime.agent.as_mut().expect("idle agent");
-                agent.set_model(model);
-                app.set_identity(agent.model(), agent.session_info());
-                app.set_usage_values(None);
+                if model == runtime.selected_model {
+                    agent.set_reasoning_effort(reasoning_effort);
+                } else {
+                    runtime.selected_model = model;
+                    agent.set_model(runtime.models[model].clone());
+                    app.set_usage_values(None);
+                }
+                app.set_identity(agent.model());
             }
         }
         UiAction::Submit(value) => handle_submit(value, app, runtime).await?,
@@ -542,7 +612,7 @@ async fn ensure_persistent_session(
     runtime.session_path = session.info().path.clone();
     let agent = runtime.agent.as_mut().expect("idle agent");
     agent.set_session(session);
-    app.set_identity(agent.model(), agent.session_info());
+    app.set_identity(agent.model());
     if app.permission_mode()
         && let Err(error) = write_permission(&runtime.session_path, true)
     {
@@ -594,7 +664,7 @@ fn write_permission(session_path: &Path, allow_all: bool) -> io::Result<()> {
 async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<dyn Error>> {
     let active = runtime.active.take().expect("active agent");
     let agent = active.finish().await?;
-    app.set_identity(agent.model(), agent.session_info());
+    app.set_identity(agent.model());
     runtime.agent = Some(agent);
     runtime.compacting = false;
     Ok(())
@@ -672,7 +742,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "model", 10_000);
         let session = Session::memory();
         let cwd = std::path::PathBuf::from(".");
-        let mut app = App::new(&model, session.info(), Vec::new(), &cwd, None, false);
+        let mut app = App::new(&model, Vec::new(), &cwd, None, false);
         let agent = Agent::new(model.clone(), "test", session, &cwd);
         let mut runtime = Runtime {
             agent: Some(agent),
@@ -711,7 +781,7 @@ mod tests {
         let model = Model::new("test", "key", "http://localhost", "model", 10_000);
         let session = Session::memory();
         let cwd = std::path::PathBuf::from(".");
-        let mut app = App::new(&model, session.info(), Vec::new(), &cwd, None, false);
+        let mut app = App::new(&model, Vec::new(), &cwd, None, false);
         let agent = Agent::new(model.clone(), "test", session, &cwd);
         let mut runtime = Runtime {
             agent: Some(agent),
