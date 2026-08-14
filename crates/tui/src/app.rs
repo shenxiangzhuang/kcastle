@@ -58,6 +58,7 @@ enum Modal {
         sessions: Vec<SessionInfo>,
         selected: usize,
         current_path: PathBuf,
+        allow_delete: bool,
         confirm_delete: bool,
         notice: Option<String>,
     },
@@ -613,6 +614,7 @@ impl App {
         &mut self,
         sessions: Vec<SessionInfo>,
         current_path: &Path,
+        allow_delete: bool,
         selected: Option<usize>,
         notice: Option<String>,
     ) {
@@ -631,6 +633,7 @@ impl App {
                 sessions,
                 selected,
                 current_path: current_path.to_path_buf(),
+                allow_delete,
                 confirm_delete: false,
                 notice,
             });
@@ -975,6 +978,7 @@ impl App {
                 sessions,
                 selected,
                 current_path,
+                allow_delete,
                 confirm_delete,
                 notice,
             } => {
@@ -1006,7 +1010,7 @@ impl App {
                             *notice = None;
                             None
                         }
-                        KeyCode::Char('d' | 'D') => {
+                        KeyCode::Char('d' | 'D') if *allow_delete => {
                             if sessions[*selected].path == *current_path {
                                 *notice = Some("Current session cannot be deleted".into());
                             } else {
@@ -1735,6 +1739,11 @@ fn command_items(running: bool) -> Vec<CommandItem> {
             prefill: false,
         },
         CommandItem {
+            command: "/resume".into(),
+            description: "Resume a saved session".into(),
+            prefill: false,
+        },
+        CommandItem {
             command: "/model".into(),
             description: "Select model and reasoning level".into(),
             prefill: false,
@@ -1870,6 +1879,7 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, tools: &[ToolRecord], 
             sessions,
             selected,
             current_path,
+            allow_delete,
             confirm_delete,
             notice,
         } => {
@@ -1912,9 +1922,14 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, tools: &[ToolRecord], 
                     " Current session · Tab/↑↓ move · Esc close ",
                     Style::default().fg(Color::DarkGray),
                 ))
-            } else {
+            } else if *allow_delete {
                 Line::from(Span::styled(
                     " Enter open · D delete · Tab/↑↓ move · Esc close ",
+                    Style::default().fg(Color::DarkGray),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    " Enter open · Tab/↑↓ move · Esc close ",
                     Style::default().fg(Color::DarkGray),
                 ))
             };
@@ -2248,7 +2263,8 @@ mod tests {
         let Modal::Commands { items, query, .. } = app.modal.as_ref().unwrap() else {
             panic!("command palette not opened")
         };
-        assert_eq!(filtered_commands(items, query).len(), 7);
+        assert_eq!(filtered_commands(items, query).len(), 8);
+        assert!(items.iter().any(|item| item.command == "/resume"));
 
         app.handle_key(key(KeyCode::Char('m')), false);
         let Modal::Commands { items, query, .. } = app.modal.as_ref().unwrap() else {
@@ -2356,6 +2372,7 @@ mod tests {
         app.show_sessions(
             vec![saved.clone(), current.clone()],
             &current.path,
+            true,
             None,
             None,
         );
@@ -2411,6 +2428,36 @@ mod tests {
                 if session == saved
         ));
         assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn resume_session_list_does_not_delete() {
+        let mut app = app();
+        let saved = SessionInfo {
+            path: PathBuf::from("saved.jsonl"),
+            title: "Saved".into(),
+            created_at: 1,
+        };
+        app.show_sessions(
+            vec![saved],
+            &PathBuf::from("current.jsonl"),
+            false,
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('d')), false),
+            UiAction::None
+        ));
+        assert!(matches!(
+            app.modal,
+            Some(Modal::Sessions {
+                allow_delete: false,
+                confirm_delete: false,
+                ..
+            })
+        ));
     }
 
     #[test]
