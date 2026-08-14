@@ -96,6 +96,7 @@ pub struct App {
     scroll: u16,
     max_scroll: u16,
     allow_all: bool,
+    show_startup: bool,
     should_exit: bool,
 }
 
@@ -128,10 +129,12 @@ impl App {
             scroll: 0,
             max_scroll: 0,
             allow_all,
+            show_startup: false,
             should_exit: false,
         };
         app.set_usage(usage);
         app.load_transcript(transcript);
+        app.show_startup = true;
         app
     }
 
@@ -139,30 +142,46 @@ impl App {
         let area = frame.area();
         let compact = area.height < 8;
         let input_height = if area.height >= 4 { 3 } else { 1 };
+        let status_height = u16::from(!compact);
+        let command_height = match &self.modal {
+            Some(Modal::Commands { items, query, .. }) => {
+                filtered_commands(items, query).len().min(u16::MAX as usize) as u16
+            }
+            _ => 0,
+        }
+        .min(
+            area.height
+                .saturating_sub(input_height)
+                .saturating_sub(status_height),
+        );
+        let content_width = area.width;
+        let (lines, tool_lines) = self.transcript_lines(content_width as usize);
+        let transcript = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let content_height = transcript.line_count(content_width).min(u16::MAX as usize) as u16;
+        let transcript_height = if self.show_startup && self.entries.is_empty() {
+            9
+        } else {
+            content_height
+        }
+        .min(
+            area.height
+                .saturating_sub(input_height)
+                .saturating_sub(command_height)
+                .saturating_sub(status_height),
+        );
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(1),
-                Constraint::Length(if compact { 0 } else { 1 }),
+                Constraint::Length(transcript_height),
                 Constraint::Length(input_height),
+                Constraint::Length(command_height),
+                Constraint::Length(status_height),
+                Constraint::Min(0),
             ])
             .split(area);
 
-        let border = u16::from(!compact);
-        let content_width = layout[0].width.saturating_sub(border * 2);
-        let viewport_height = layout[0].height.saturating_sub(border * 2);
-        let (lines, tool_lines) = self.transcript_lines(content_width as usize);
-        let transcript = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
-        let transcript = if compact {
-            transcript
-        } else {
-            transcript.block(Block::default().borders(Borders::ALL).title(Span::styled(
-                format!(" K CASTLE v{} ", env!("CARGO_PKG_VERSION")),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            )))
-        };
-        self.max_scroll = transcript
-            .line_count(content_width)
+        let viewport_height = layout[0].height;
+        self.max_scroll = usize::from(content_height)
             .saturating_sub(layout[0].height as usize)
             .min(u16::MAX as usize) as u16;
         self.scroll = if self.follow {
@@ -173,30 +192,123 @@ impl App {
         let transcript = transcript.scroll((self.scroll, 0));
         frame.render_widget(transcript, layout[0]);
 
+        if self.show_startup && self.entries.is_empty() {
+            let margin = u16::from(layout[0].width > 4);
+            let top = u16::from(layout[0].height > 7);
+            let banner_area = Rect::new(
+                layout[0].x + margin,
+                layout[0].y + top,
+                layout[0].width.saturating_sub(margin * 2),
+                7.min(layout[0].height.saturating_sub(top)),
+            );
+            let permissions = if self.allow_all { "allow all" } else { "ask" };
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(vec![
+                        Span::styled(">_  ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "K CASTLE ",
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("(v{})", env!("CARGO_PKG_VERSION")),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("model:       ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(self.model.clone()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("directory:   ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(self.cwd.display().to_string()),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("permissions: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(permissions, Style::default().fg(ACCENT)),
+                    ]),
+                ])
+                .block(Block::default().borders(Borders::ALL))
+                .wrap(Wrap { trim: false }),
+                banner_area,
+            );
+        }
+
         self.tool_rows = tool_lines
             .into_iter()
             .filter_map(|(line, entry)| {
                 let row = line as u16;
                 (row >= self.scroll && row < self.scroll.saturating_add(viewport_height))
-                    .then(|| (layout[0].y + border + row - self.scroll, entry))
+                    .then(|| (layout[0].y + row - self.scroll, entry))
             })
             .collect();
 
-        if !compact {
-            frame.render_widget(Paragraph::new(self.status_line(running)), layout[1]);
+        let input_surface = layout[1];
+        frame.render_widget(
+            Block::default().style(Style::default().bg(USER_BACKGROUND)),
+            input_surface,
+        );
+        let input_line = Rect::new(
+            input_surface.x.saturating_add(2),
+            input_surface
+                .y
+                .saturating_add(u16::from(input_surface.height >= 3)),
+            input_surface.width.saturating_sub(2),
+            1.min(input_surface.height),
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "›",
+                Style::default().fg(if running { Color::DarkGray } else { ACCENT }),
+            )),
+            Rect::new(input_surface.x, input_line.y, 1, input_line.height),
+        );
+        self.input.set_block(Block::default());
+        let command_query = match &self.modal {
+            Some(Modal::Commands { query, .. }) => Some(format!("/{query}")),
+            _ => None,
+        };
+        if let Some(query) = &command_query {
+            frame.render_widget(Paragraph::new(query.as_str()), input_line);
+        } else {
+            frame.render_widget(&self.input, input_line);
         }
 
-        self.input.set_block(if input_height >= 3 {
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if running { Color::DarkGray } else { ACCENT }))
-        } else {
-            Block::default()
-        });
-        frame.render_widget(&self.input, layout[2]);
+        if !compact {
+            frame.render_widget(Paragraph::new(self.status_line(running)), layout[3]);
+        }
 
-        if let Some(modal) = &self.modal {
-            render_modal(frame, modal, centered(area, 72, 60));
+        match &self.modal {
+            Some(Modal::Commands {
+                items,
+                query,
+                selected,
+            }) => {
+                render_commands(frame, items, query, *selected, layout[2]);
+                let query_width = Span::raw(command_query.as_deref().unwrap_or("/")).width();
+                frame.set_cursor_position((
+                    input_line.x
+                        + query_width.min(input_line.width.saturating_sub(1) as usize) as u16,
+                    input_line.y,
+                ));
+            }
+            Some(modal) => render_modal(frame, modal, centered(area, 72, 60)),
+            None => {
+                let cursor = {
+                    let buffer = frame.buffer_mut();
+                    input_line.rows().find_map(|row| {
+                        row.columns().find(|position| {
+                            buffer[*position].modifier.contains(Modifier::REVERSED)
+                        })
+                    })
+                };
+                if let Some(position) = cursor {
+                    frame.set_cursor_position(position);
+                }
+            }
         }
     }
 
@@ -361,6 +473,7 @@ impl App {
     }
 
     pub fn push_user(&mut self, value: String) {
+        self.show_startup = false;
         self.entries.push(Entry::User(value));
         self.follow = true;
     }
@@ -381,6 +494,7 @@ impl App {
     }
 
     pub fn load_transcript(&mut self, transcript: Vec<TranscriptItem>) {
+        self.show_startup = false;
         self.entries.clear();
         for item in transcript {
             match item {
@@ -563,6 +677,7 @@ impl App {
                         *selected = (*selected + 1).min(visible.len().saturating_sub(1));
                         None
                     }
+                    KeyCode::Backspace if query.is_empty() => Some(UiAction::None),
                     KeyCode::Backspace => {
                         query.pop();
                         *selected = 0;
@@ -601,20 +716,7 @@ impl App {
 
     fn transcript_lines(&self, width: usize) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
         if self.entries.is_empty() {
-            return (
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        format!("  {}", self.cwd.display()),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                    Line::from(Span::styled(
-                        "  Type / for commands.",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ],
-                Vec::new(),
-            );
+            return (Vec::new(), Vec::new());
         }
         let mut lines = Vec::new();
         let mut tool_lines = Vec::new();
@@ -649,13 +751,20 @@ impl App {
                     };
                     let color = if *failed { Color::Red } else { Color::Cyan };
                     tool_lines.push((lines.len(), entry_index));
-                    let mut line = Line::from(vec![
-                        Span::styled(format!("{mark} {name}"), Style::default().fg(color)),
-                        Span::styled(
-                            format!("  {}", compact(arguments, 100)),
+                    let label = format!("{mark} {name}");
+                    let summary = tool_summary(
+                        name,
+                        arguments,
+                        width.saturating_sub(Span::raw(&label).width() + 2),
+                    );
+                    let mut spans = vec![Span::styled(label, Style::default().fg(color))];
+                    if !summary.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  {summary}"),
                             Style::default().fg(Color::DarkGray),
-                        ),
-                    ]);
+                        ));
+                    }
+                    let mut line = Line::from(spans);
                     if self.selected_tool == Some(entry_index) {
                         line = line.style(Style::default().bg(Color::DarkGray));
                     }
@@ -674,7 +783,9 @@ impl App {
                             }
                         }
                     }
-                    lines.push(Line::from(""));
+                    if !matches!(self.entries.get(entry_index + 1), Some(Entry::Tool { .. })) {
+                        lines.push(Line::from(""));
+                    }
                 }
                 Entry::Notice(text) => {
                     lines.push(Line::from(Span::styled(
@@ -714,6 +825,7 @@ fn push_user(lines: &mut Vec<Line<'static>>, text: &str, width: usize) {
         push_user_row(lines, &row, row_width, width, style);
     }
     lines.push(Line::from(" ".repeat(width)).style(style));
+    lines.push(Line::from(""));
 }
 
 fn push_user_row(
@@ -734,11 +846,37 @@ fn push_user_row(
 
 fn compact(value: &str, limit: usize) -> String {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if value.chars().count() <= limit {
-        value
-    } else {
-        format!("{}…", value.chars().take(limit).collect::<String>())
+    if Span::raw(&value).width() <= limit {
+        return value;
     }
+    if limit == 0 {
+        return String::new();
+    }
+
+    let mut result = String::new();
+    let mut width = 0;
+    for character in value.chars() {
+        let character_width = Span::raw(character.to_string()).width();
+        if width + character_width + 1 > limit {
+            break;
+        }
+        result.push(character);
+        width += character_width;
+    }
+    result.push('…');
+    result
+}
+
+fn tool_summary(name: &str, arguments: &str, limit: usize) -> String {
+    let summary = if name == "shell" {
+        serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|value| value.get("command")?.as_str().map(str::to_owned))
+            .unwrap_or_else(|| arguments.to_owned())
+    } else {
+        arguments.to_owned()
+    };
+    compact(&summary, limit)
 }
 
 fn command_items(running: bool) -> Vec<CommandItem> {
@@ -866,31 +1004,7 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
             items,
             query,
             selected,
-        } => {
-            let visible = filtered_commands(items, query);
-            let rows = visible
-                .iter()
-                .map(|item| {
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{:<14}", item.command), Style::default().fg(ACCENT)),
-                        Span::raw(&item.description),
-                    ]))
-                })
-                .collect::<Vec<_>>();
-            let mut state =
-                ListState::default().with_selected((!rows.is_empty()).then_some(*selected));
-            frame.render_stateful_widget(
-                List::new(rows)
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(format!(" Commands /{query} ")),
-                    )
-                    .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White)),
-                area,
-                &mut state,
-            );
-        }
+        } => render_commands(frame, items, query, *selected, area),
         Modal::AllowAll { .. } => {
             frame.render_widget(
                 Paragraph::new(
@@ -902,6 +1016,33 @@ fn render_modal(frame: &mut Frame<'_>, modal: &Modal, area: Rect) {
             );
         }
     }
+}
+
+fn render_commands(
+    frame: &mut Frame<'_>,
+    items: &[CommandItem],
+    query: &str,
+    selected: usize,
+    area: Rect,
+) {
+    let rows = filtered_commands(items, query)
+        .into_iter()
+        .map(|item| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{:<14}", item.command),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(&item.description, Style::default().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default().with_selected((!rows.is_empty()).then_some(selected));
+    frame.render_stateful_widget(
+        List::new(rows).highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        area,
+        &mut state,
+    );
 }
 
 fn centered(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -927,6 +1068,7 @@ mod tests {
     use kcastle_agent::{AgentEvent, Model, SessionInfo};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Position;
     use ratatui::style::Modifier;
 
     use super::{App, Entry, Modal, USER_BACKGROUND, UiAction, filtered_commands, session_label};
@@ -971,6 +1113,89 @@ mod tests {
             app.handle_key(key(KeyCode::Enter), false),
             UiAction::Submit(value) if value == "/model"
         ));
+
+        app.handle_key(key(KeyCode::Char('/')), false);
+        app.handle_key(key(KeyCode::Backspace), false);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn command_palette_opens_below_input_and_moves_it_up() {
+        let mut app = app();
+        app.entries
+            .extend((0..10).map(|line| Entry::Assistant(format!("line {line}"))));
+        let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let prompt_row = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .position(|cell| cell.symbol() == "›")
+            .unwrap()
+            / 40;
+
+        app.handle_key(key(KeyCode::Char('/')), false);
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content
+            .chunks(40)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let moved_prompt_row = rows.iter().position(|row| row.contains('›')).unwrap();
+        let command_row = rows.iter().position(|row| row.contains("/model")).unwrap();
+
+        assert!(moved_prompt_row < prompt_row);
+        assert!(rows[moved_prompt_row].contains("› /"));
+        assert!(command_row > moved_prompt_row);
+    }
+
+    #[test]
+    fn startup_banner_is_ephemeral_and_transcript_has_no_border() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains(&format!("(v{})", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].symbol(), " ");
+
+        app.push_user("hello".into());
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains(env!("CARGO_PKG_VERSION")));
+        assert!(matches!(app.entries.as_slice(), [Entry::User(value)] if value == "hello"));
+    }
+
+    #[test]
+    fn borderless_input_follows_short_transcript_and_keeps_real_cursor() {
+        let mut app = app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+
+        assert!(terminal.backend().cursor_visible());
+        assert_eq!(terminal.backend().cursor_position(), Position::new(2, 10));
+        assert_eq!(terminal.backend().buffer()[(0, 10)].symbol(), "›");
+        assert_eq!(terminal.backend().buffer()[(0, 9)].bg, USER_BACKGROUND);
+        assert_eq!(terminal.backend().buffer()[(0, 9)].symbol(), " ");
+        assert_eq!(terminal.backend().buffer()[(0, 11)].symbol(), " ");
+
+        app.input.insert_str("中文");
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        assert_eq!(terminal.backend().cursor_position(), Position::new(6, 10));
     }
 
     #[test]
@@ -1014,6 +1239,40 @@ mod tests {
     }
 
     #[test]
+    fn tool_rows_are_semantic_compact_and_grouped() {
+        let mut app = app();
+        app.entries.push(Entry::Tool {
+            call_id: "one".into(),
+            name: "shell".into(),
+            arguments: r#"{"command":"printf a-very-long-command"}"#.into(),
+            output: Some("exit_code=0".into()),
+            failed: false,
+            expanded: false,
+        });
+        app.entries.push(Entry::Tool {
+            call_id: "two".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"README.md"}"#.into(),
+            output: Some("contents".into()),
+            failed: false,
+            expanded: false,
+        });
+
+        let (lines, tools) = app.transcript_lines(24);
+        let first = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(first.contains("printf"));
+        assert!(!first.contains("command"));
+        assert!(lines[..2].iter().all(|line| line.width() <= 24));
+        assert_eq!(tools, vec![(0, 0), (1, 1)]);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
     fn assistant_message_has_no_role_marker() {
         let mut app = app();
         app.entries.push(Entry::Assistant("answer".into()));
@@ -1037,6 +1296,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(highlighted.len(), 3);
         assert!(highlighted.iter().all(|line| line.width() == 20));
+        assert_eq!(lines.last().and_then(|line| line.style.bg), None);
         let rendered = lines
             .iter()
             .flat_map(|line| &line.spans)
@@ -1045,6 +1305,12 @@ mod tests {
         assert!(rendered.contains("hi"));
         assert!(!rendered.contains("YOU"));
         assert!(!rendered.contains('›'));
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 12)).unwrap();
+        terminal.draw(|frame| app.render(frame, false)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 3)].bg, USER_BACKGROUND);
+        assert_ne!(terminal.backend().buffer()[(0, 4)].bg, USER_BACKGROUND);
+        assert_eq!(terminal.backend().buffer()[(0, 5)].bg, USER_BACKGROUND);
     }
 
     #[test]
@@ -1142,6 +1408,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("TAIL"));
-        assert_eq!(terminal.backend().buffer()[(0, 5)].symbol(), "└");
+        assert_eq!(terminal.backend().buffer()[(0, 4)].symbol(), "›");
+        assert_eq!(terminal.backend().buffer()[(0, 5)].bg, USER_BACKGROUND);
     }
 }

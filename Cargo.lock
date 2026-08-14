@@ -1164,6 +1164,7 @@ dependencies = [
  "kcastle-agent",
  "ratatui",
  "ratatui-textarea",
+ "serde_json",
  "time",
  "tokio",
 ]
