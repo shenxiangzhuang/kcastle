@@ -5,9 +5,10 @@ use std::sync::Arc;
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::error::OpenAIError;
+pub use async_openai::types::responses::ReasoningEffort;
 use async_openai::types::responses::{
     CreateResponseArgs, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item, OutputItem,
-    ResponseStreamEvent, ResponseUsage, Tool,
+    Reasoning, ResponseStreamEvent, ResponseUsage, Tool,
 };
 use futures_util::StreamExt;
 use futures_util::future::join_all;
@@ -31,6 +32,8 @@ pub struct Model {
     client: Client<OpenAIConfig>,
     model: String,
     context_window: usize,
+    reasoning_efforts: &'static [ReasoningEffort],
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Model {
@@ -49,7 +52,20 @@ impl Model {
             client: Client::with_config(config),
             model: model.into(),
             context_window,
+            reasoning_efforts: &[],
+            reasoning_effort: None,
         }
+    }
+
+    pub fn with_reasoning(
+        mut self,
+        reasoning_efforts: &'static [ReasoningEffort],
+        reasoning_effort: ReasoningEffort,
+    ) -> Self {
+        assert!(reasoning_efforts.contains(&reasoning_effort));
+        self.reasoning_efforts = reasoning_efforts;
+        self.reasoning_effort = Some(reasoning_effort);
+        self
     }
 
     pub fn name(&self) -> &str {
@@ -62,6 +78,19 @@ impl Model {
 
     pub fn context_window(&self) -> usize {
         self.context_window
+    }
+
+    pub fn reasoning_efforts(&self) -> &'static [ReasoningEffort] {
+        self.reasoning_efforts
+    }
+
+    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
+    }
+
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        assert!(self.reasoning_efforts.contains(&reasoning_effort));
+        self.reasoning_effort = Some(reasoning_effort);
     }
 }
 
@@ -201,6 +230,17 @@ impl Agent {
         self.model = model;
     }
 
+    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
+        self.model.set_reasoning_effort(reasoning_effort);
+    }
+
+    fn reasoning(&self) -> Option<Reasoning> {
+        self.model.reasoning_effort.clone().map(|effort| Reasoning {
+            effort: Some(effort),
+            summary: None,
+        })
+    }
+
     pub fn set_session(&mut self, session: Session) {
         (self.state, self.commit) = session.into_parts();
     }
@@ -329,13 +369,14 @@ impl Agent {
                     .map_err(|error| AgentError::Task(error.to_string()))?;
 
                 let tool_schemas = self.tool_schemas();
-                let request = CreateResponseArgs::default()
+                let mut request = CreateResponseArgs::default()
                     .model(self.model.model.clone())
                     .instructions(self.instructions.clone())
                     .input(self.state.context())
                     .tools(tool_schemas)
                     .store(false)
                     .build()?;
+                request.reasoning = self.reasoning();
                 let responses = self.model.client.responses();
                 let mut stream = tokio::select! {
                     _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
@@ -575,12 +616,13 @@ impl Agent {
             .send(AgentEvent::CompactionStarted { tokens_before })
             .await
             .map_err(|error| AgentError::Task(error.to_string()))?;
-        let request = CreateResponseArgs::default()
+        let mut request = CreateResponseArgs::default()
             .model(self.model.model.clone())
             .instructions(SUMMARY_INSTRUCTIONS)
             .input(prepared.prompt)
             .store(false)
             .build()?;
+        request.reasoning = self.reasoning();
         let responses = self.model.client.responses();
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(AgentError::Aborted),
@@ -728,7 +770,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{ActiveAgent, Agent, AgentEvent, Model, RunControl};
+    use super::{ActiveAgent, Agent, AgentEvent, Model, ReasoningEffort, RunControl};
     use crate::{
         AgentTool, Env, Session, SessionError, SessionInfo, State, StateCommit, StateEntry,
         ToolResult,
@@ -744,8 +786,36 @@ mod tests {
         ));
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = vec![0; 16 * 1024];
-            let _ = socket.read(&mut request).await.unwrap();
+            let mut request = Vec::new();
+            let (body_start, content_length) = loop {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(bytes, 0, "request ended before its headers");
+                request.extend_from_slice(&chunk[..bytes]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                break (header_end + 4, content_length);
+            };
+            while request.len() < body_start + content_length {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                assert_ne!(bytes, 0, "request ended before its body");
+                request.extend_from_slice(&chunk[..bytes]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.contains("\"reasoning\":{\"effort\":\"high\"}"));
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
@@ -760,6 +830,10 @@ mod tests {
             format!("http://{address}"),
             "test-model",
             128_000,
+        )
+        .with_reasoning(
+            &[ReasoningEffort::Low, ReasoningEffort::High],
+            ReasoningEffort::High,
         );
         let agent = Agent::new(model, "test", Session::memory(), ".");
         let mut active = agent.start("hello");
