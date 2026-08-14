@@ -61,8 +61,12 @@ fn default_timeout() -> f64 {
     120.0
 }
 
-impl ShellTool {
-    pub fn schema(self) -> ToolSchema {
+impl AgentTool for ShellTool {
+    fn name(&self) -> &str {
+        "shell"
+    }
+
+    fn schema(&self) -> ToolSchema {
         ToolSchema::Function(FunctionTool {
             name: "shell".into(),
             description: Some(
@@ -90,65 +94,6 @@ impl ShellTool {
         })
     }
 
-    pub fn handles(self, call: &FunctionToolCall) -> bool {
-        call.name == "shell"
-    }
-
-    pub async fn execute(self, call: &FunctionToolCall, env: &Env) -> ToolResult {
-        let args = match serde_json::from_str::<ShellArgs>(&call.arguments) {
-            Ok(args)
-                if !args.command.trim().is_empty()
-                    && args.timeout.is_finite()
-                    && (0.1..=600.0).contains(&args.timeout) =>
-            {
-                args
-            }
-            Ok(_) => return ToolResult::error("Invalid arguments: command or timeout is invalid"),
-            Err(error) => return ToolResult::error(format!("Invalid arguments: {error}")),
-        };
-
-        let mut command = platform_shell(&args.command);
-        command
-            .current_dir(&env.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let child = match command.spawn() {
-            Ok(child) => child,
-            Err(error) => return ToolResult::error(format!("Failed to start command: {error}")),
-        };
-        let duration = Duration::from_secs_f64(args.timeout);
-        let output = match timeout(duration, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(error)) => {
-                return ToolResult::error(format!("Failed to wait for command: {error}"));
-            }
-            Err(_) => {
-                return ToolResult::error(format!(
-                    "Command timed out after {} seconds",
-                    args.timeout
-                ));
-            }
-        };
-
-        ToolResult::ok(format_output(
-            output.status.code().unwrap_or(-1),
-            &output.stdout,
-            &output.stderr,
-        ))
-    }
-}
-
-impl AgentTool for ShellTool {
-    fn name(&self) -> &str {
-        "shell"
-    }
-
-    fn schema(&self) -> ToolSchema {
-        (*self).schema()
-    }
-
     fn requires_approval(&self) -> bool {
         true
     }
@@ -158,7 +103,54 @@ impl AgentTool for ShellTool {
         call: &'a FunctionToolCall,
         env: &'a Env,
     ) -> BoxFuture<'a, ToolResult> {
-        Box::pin((*self).execute(call, env))
+        Box::pin(async move {
+            let args = match serde_json::from_str::<ShellArgs>(&call.arguments) {
+                Ok(args)
+                    if !args.command.trim().is_empty()
+                        && args.timeout.is_finite()
+                        && (0.1..=600.0).contains(&args.timeout) =>
+                {
+                    args
+                }
+                Ok(_) => {
+                    return ToolResult::error("Invalid arguments: command or timeout is invalid");
+                }
+                Err(error) => return ToolResult::error(format!("Invalid arguments: {error}")),
+            };
+
+            let mut command = platform_shell(&args.command);
+            command
+                .current_dir(&env.cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let child = match command.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    return ToolResult::error(format!("Failed to start command: {error}"));
+                }
+            };
+            let duration = Duration::from_secs_f64(args.timeout);
+            let output = match timeout(duration, child.wait_with_output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => {
+                    return ToolResult::error(format!("Failed to wait for command: {error}"));
+                }
+                Err(_) => {
+                    return ToolResult::error(format!(
+                        "Command timed out after {} seconds",
+                        args.timeout
+                    ));
+                }
+            };
+
+            ToolResult::ok(format_output(
+                output.status.code().unwrap_or(-1),
+                &output.stdout,
+                &output.stderr,
+            ))
+        })
     }
 }
 
@@ -191,7 +183,7 @@ mod tests {
 
     use async_openai::types::responses::FunctionToolCall;
 
-    use super::{Env, OUTPUT_LIMIT, ShellTool, format_output};
+    use super::{AgentTool, Env, OUTPUT_LIMIT, ShellTool, format_output};
 
     #[tokio::test]
     async fn shell_returns_process_output() {

@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use async_openai::types::responses::{FunctionCallOutputItemParam, InputItem, Item, ResponseUsage};
+use async_openai::types::responses::{FunctionCallOutputItemParam, InputItem, Item};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -202,42 +202,6 @@ impl Session {
         let entry = self
             .state
             .append_items(items, response)
-            .map_err(SessionError::Invalid)?;
-        if let Err(error) = self
-            .write(&Record::Entry {
-                entry: entry.clone(),
-            })
-            .await
-        {
-            self.state
-                .rollback(entry.id())
-                .map_err(SessionError::Invalid)?;
-            return Err(error);
-        }
-        Ok(entry)
-    }
-
-    pub async fn append_compaction(
-        &mut self,
-        summary: String,
-        first_kept_id: u64,
-        tokens_before: usize,
-        response_id: String,
-        model: String,
-        usage: Option<ResponseUsage>,
-    ) -> Result<StateEntry, SessionError> {
-        let entry = self
-            .state
-            .append_compaction(
-                summary,
-                first_kept_id,
-                tokens_before,
-                Some(ResponseMetadata {
-                    id: response_id,
-                    model,
-                    usage,
-                }),
-            )
             .map_err(SessionError::Invalid)?;
         if let Err(error) = self
             .write(&Record::Entry {

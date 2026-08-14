@@ -10,7 +10,7 @@ use std::time::Duration;
 use app::{App, UiAction};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind};
 use futures_util::StreamExt;
-use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, RunControl, Session, SessionInfo};
+use kcastle_agent::{ActiveAgent, Agent, AgentEvent, Model, Session, SessionInfo};
 
 const INSTRUCTIONS: &str = "You are K, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 
@@ -26,7 +26,6 @@ enum Command {
 struct Runtime {
     agent: Option<Agent>,
     active: Option<ActiveAgent>,
-    control: Option<RunControl>,
     models: Vec<Model>,
     selected_model: usize,
     sessions_dir: PathBuf,
@@ -189,7 +188,6 @@ async fn run_tui(
     let mut runtime = Runtime {
         agent: Some(agent),
         active: None,
-        control: None,
         models,
         selected_model: 0,
         sessions_dir,
@@ -251,9 +249,9 @@ async fn tui_loop(
             Next::Terminal(None) => app.request_exit(),
             Next::Agent(Some(event)) => {
                 if let Some((call_id, allow)) = app.apply_event(event)
-                    && let Some(control) = &runtime.control
+                    && let Some(active) = &runtime.active
                 {
-                    control.approve(call_id, allow)?;
+                    active.control().approve(call_id, allow)?;
                 }
             }
             Next::Agent(None) => finish_active(app, runtime).await?,
@@ -268,8 +266,8 @@ async fn tui_loop(
         dirty = true;
     }
 
-    if let Some(control) = &runtime.control {
-        control.abort();
+    if let Some(active) = &runtime.active {
+        active.control().abort();
     }
     if runtime.active.is_some() {
         finish_active(app, runtime).await?;
@@ -285,14 +283,14 @@ async fn handle_action(
     match action {
         UiAction::None => {}
         UiAction::Abort => {
-            if let Some(control) = &runtime.control {
-                control.abort();
+            if let Some(active) = &runtime.active {
+                active.control().abort();
             }
         }
         UiAction::Exit => app.request_exit(),
         UiAction::Approve { call_id, allow } => {
-            if let Some(control) = &runtime.control {
-                control.approve(call_id, allow)?;
+            if let Some(active) = &runtime.active {
+                active.control().approve(call_id, allow)?;
             }
         }
         UiAction::SetPermissions {
@@ -302,17 +300,17 @@ async fn handle_action(
             Ok(()) => {
                 app.set_permission_mode(allow_all);
                 if let Some(call_id) = pending_call_id
-                    && let Some(control) = &runtime.control
+                    && let Some(active) = &runtime.active
                 {
-                    control.approve(call_id, true)?;
+                    active.control().approve(call_id, true)?;
                 }
             }
             Err(error) => {
                 app.notice(format!("Permission save failed: {error}"));
                 if let Some(call_id) = pending_call_id
-                    && let Some(control) = &runtime.control
+                    && let Some(active) = &runtime.active
                 {
-                    control.approve(call_id, false)?;
+                    active.control().approve(call_id, false)?;
                 }
             }
         },
@@ -381,7 +379,6 @@ async fn handle_submit(
                 let active = agent.start_compaction(
                     (!argument.trim().is_empty()).then(|| argument.trim().to_owned()),
                 );
-                runtime.control = Some(active.control());
                 runtime.active = Some(active);
                 runtime.compacting = true;
             }
@@ -391,9 +388,10 @@ async fn handle_submit(
             }
             "queue" if runtime.active.is_some() && !argument.trim().is_empty() => {
                 runtime
-                    .control
+                    .active
                     .as_ref()
-                    .expect("active control")
+                    .expect("active agent")
+                    .control()
                     .queue(argument.trim().to_owned())?;
                 app.push_user(argument.trim().to_owned());
             }
@@ -410,12 +408,11 @@ async fn handle_submit(
         return Ok(());
     }
     app.push_user(value.clone());
-    if let Some(control) = &runtime.control {
-        control.steer(value)?;
+    if let Some(active) = &runtime.active {
+        active.control().steer(value)?;
     } else {
         let agent = runtime.agent.take().expect("idle agent");
         let active = agent.start(value);
-        runtime.control = Some(active.control());
         runtime.active = Some(active);
     }
     Ok(())
@@ -440,7 +437,6 @@ async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<d
     let agent = active.finish().await?;
     app.set_identity(agent.model(), agent.session_info());
     runtime.agent = Some(agent);
-    runtime.control = None;
     runtime.compacting = false;
     Ok(())
 }
@@ -514,7 +510,6 @@ mod tests {
         let mut runtime = Runtime {
             agent: Some(agent),
             active: None,
-            control: None,
             models: vec![model],
             selected_model: 0,
             sessions_dir: std::path::PathBuf::new(),
