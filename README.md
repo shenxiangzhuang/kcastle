@@ -18,6 +18,20 @@ From a source checkout:
 cargo install --path crates/tui --locked
 ```
 
+Run the GPUI desktop app from a source checkout:
+
+```bash
+cargo run -p kcastle-desktop
+```
+
+The desktop app treats folders as projects. Each project keeps an isolated session history under
+`~/.kcastle/projects`, while removing a project from the sidebar never deletes its folder or saved
+history. Sessions can be created, reopened, renamed, and deleted from the sidebar. Provider
+credentials stay in environment variables; desktop preferences such as reasoning effort are saved
+in `~/.kcastle/settings.json`. The desktop shell includes workspace-grouped session browsing,
+session search and ordering, a searchable trajectory view, expandable tool output, message copy
+actions, and native session-log export.
+
 ## Get started
 
 Set one provider key and start K:

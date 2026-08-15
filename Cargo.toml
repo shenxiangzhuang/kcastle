@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent", "crates/tui"]
+members = ["crates/agent", "crates/desktop", "crates/tui"]
 resolver = "3"
 
 [workspace.package]
@@ -12,6 +12,10 @@ repository = "https://github.com/shenxiangzhuang/kcastle"
 async-openai = { version = "=0.41.3", default-features = false, features = ["responses", "rustls"] }
 crossterm = { version = "=0.29.0", features = ["event-stream"] }
 futures-util = "=0.3.34"
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+gpui-component = "=0.5.1"
+gpui-component-assets = "=0.5.1"
+markdown = "=1.0.0"
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "layout-cache", "unstable-rendered-line-info"] }
 ratatui-core = { version = "=0.1.2", features = ["scrolling-regions"] }
 ratatui-crossterm = { version = "=0.1.2", features = ["scrolling-regions"] }

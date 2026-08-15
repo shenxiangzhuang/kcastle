@@ -52,6 +52,8 @@ pub trait StateCommit: Send + Sync {
         message: &'a str,
     ) -> BoxFuture<'a, Result<(), SessionError>>;
 
+    fn rename<'a>(&'a mut self, title: &'a str) -> BoxFuture<'a, Result<(), SessionError>>;
+
     fn commit<'a>(&'a mut self, entry: &'a StateEntry) -> BoxFuture<'a, Result<(), SessionError>>;
 }
 
@@ -199,6 +201,16 @@ impl Session {
         Ok(())
     }
 
+    pub async fn rename(&mut self, title: &str) -> Result<(), SessionError> {
+        let title = normalized_title(title)?;
+        self.write(&Record::Title {
+            title: title.clone(),
+        })
+        .await?;
+        self.info.title = title;
+        Ok(())
+    }
+
     pub async fn append_items(
         &mut self,
         items: Vec<InputItem>,
@@ -246,6 +258,23 @@ impl StateCommit for SessionCommit {
             let Some(title) = initial_title(message) else {
                 return Ok(());
             };
+            if let Some(file) = &mut self.file {
+                write_record(
+                    file,
+                    &Record::Title {
+                        title: title.clone(),
+                    },
+                )
+                .await?;
+            }
+            self.info.title = title;
+            Ok(())
+        })
+    }
+
+    fn rename<'a>(&'a mut self, title: &'a str) -> BoxFuture<'a, Result<(), SessionError>> {
+        Box::pin(async move {
+            let title = normalized_title(title)?;
             if let Some(file) = &mut self.file {
                 write_record(
                     file,
@@ -374,7 +403,7 @@ fn read_session_info(path: &Path) -> Result<SessionInfo, SessionError> {
                     title = Some(value);
                 }
             }
-            "entry" => break,
+            "entry" => {}
             _ => {}
         }
     }
@@ -390,6 +419,18 @@ fn initial_title(message: &str) -> Option<String> {
     let title = message.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = title.chars().take(80).collect::<String>();
     (!title.is_empty()).then_some(title)
+}
+
+fn normalized_title(title: &str) -> Result<String, SessionError> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = title.chars().take(80).collect::<String>();
+    if title.is_empty() {
+        Err(SessionError::Invalid(
+            "session title cannot be empty".into(),
+        ))
+    } else {
+        Ok(title)
+    }
 }
 
 fn now_secs() -> u64 {
@@ -431,6 +472,30 @@ mod tests {
         let session = Session::open(&path).await.unwrap();
         assert_eq!(session.info().title, "hello native session");
         assert_eq!(session.state().entries().len(), 1);
+        drop(session);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rename_is_persisted_and_rejects_empty_titles() {
+        let directory = test_directory("rename");
+        let mut session = Session::create(&directory).await.unwrap();
+        session
+            .append_items(vec![InputItem::from(EasyInputMessage::from("hello"))], None)
+            .await
+            .unwrap();
+        session.rename("  A   clearer title  ").await.unwrap();
+        assert_eq!(session.info().title, "A clearer title");
+        assert!(session.rename("   ").await.is_err());
+        assert_eq!(
+            Session::list(&directory).unwrap()[0].title,
+            "A clearer title"
+        );
+        let path = session.info().path.clone();
+        drop(session);
+
+        let session = Session::open(path).await.unwrap();
+        assert_eq!(session.info().title, "A clearer title");
         drop(session);
         std::fs::remove_dir_all(directory).unwrap();
     }

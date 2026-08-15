@@ -129,6 +129,7 @@ pub struct RunSummary {
 pub enum AgentEvent {
     RunStarted(String),
     ModelStarted(usize),
+    ReasoningDelta(String),
     TextDelta(String),
     ApprovalRequired(FunctionToolCall),
     ToolStarted(FunctionToolCall),
@@ -245,7 +246,16 @@ impl Agent {
         (self.state, self.commit) = session.into_parts();
     }
 
-    fn tool_schemas(&self) -> Vec<Tool> {
+    pub fn set_cwd(&mut self, cwd: impl Into<PathBuf>) {
+        self.env.cwd = cwd.into();
+    }
+
+    pub async fn rename_session(&mut self, title: &str) -> Result<(), AgentError> {
+        self.commit.rename(title).await?;
+        Ok(())
+    }
+
+    pub fn tool_schemas(&self) -> Vec<Tool> {
         self.tools.iter().map(|tool| tool.schema()).collect()
     }
 
@@ -395,6 +405,12 @@ impl Agent {
                         ResponseStreamEvent::ResponseOutputTextDelta(delta) => {
                             events
                                 .send(AgentEvent::TextDelta(delta.delta))
+                                .await
+                                .map_err(|error| AgentError::Task(error.to_string()))?;
+                        }
+                        ResponseStreamEvent::ResponseReasoningTextDelta(delta) => {
+                            events
+                                .send(AgentEvent::ReasoningDelta(delta.delta))
                                 .await
                                 .map_err(|error| AgentError::Task(error.to_string()))?;
                         }
@@ -963,6 +979,10 @@ mod tests {
             &'a mut self,
             _message: &'a str,
         ) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn rename<'a>(&'a mut self, _title: &'a str) -> BoxFuture<'a, Result<(), SessionError>> {
             Box::pin(async { Ok(()) })
         }
 
