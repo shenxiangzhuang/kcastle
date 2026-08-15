@@ -1390,12 +1390,12 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) {
         let delta_y = event.delta.pixel_delta(window.line_height()).y;
-        if delta_y > px(0.0) {
-            self.follow_chat_tail = false;
-            cx.notify();
-        } else if delta_y < px(0.0) && self.chat_at_bottom() {
-            self.follow_chat_tail = true;
-            self.unread_stream_updates = 0;
+        if update_chat_follow_on_scroll(
+            delta_y,
+            self.chat_at_bottom(),
+            &mut self.follow_chat_tail,
+            &mut self.unread_stream_updates,
+        ) {
             cx.notify();
         }
     }
@@ -1774,6 +1774,25 @@ fn within_bottom_threshold(max_offset: gpui::Pixels, offset_y: gpui::Pixels) -> 
     max_offset + offset_y <= px(24.0)
 }
 
+fn update_chat_follow_on_scroll(
+    delta_y: gpui::Pixels,
+    at_bottom: bool,
+    follow_chat_tail: &mut bool,
+    unread_stream_updates: &mut usize,
+) -> bool {
+    if delta_y > px(0.0) && *follow_chat_tail {
+        *follow_chat_tail = false;
+        true
+    } else if delta_y < px(0.0) && at_bottom {
+        let changed = !*follow_chat_tail || *unread_stream_updates > 0;
+        *follow_chat_tail = true;
+        *unread_stream_updates = 0;
+        changed
+    } else {
+        false
+    }
+}
+
 pub(crate) fn session_age(created_at: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1975,6 +1994,46 @@ mod tests {
         assert!(within_bottom_threshold(px(500.0), px(-480.0)));
         assert!(within_bottom_threshold(px(500.0), px(-500.0)));
         assert!(!within_bottom_threshold(px(500.0), px(-450.0)));
+    }
+
+    #[test]
+    fn repeated_scroll_events_do_not_request_redundant_chat_renders() {
+        let mut follow = true;
+        let mut unread = 0;
+
+        assert!(update_chat_follow_on_scroll(
+            px(1.0),
+            false,
+            &mut follow,
+            &mut unread,
+        ));
+        assert!(!follow);
+
+        assert!(!update_chat_follow_on_scroll(
+            px(1.0),
+            false,
+            &mut follow,
+            &mut unread,
+        ));
+        assert!(!follow);
+        assert_eq!(unread, 0);
+
+        unread = 3;
+        assert!(update_chat_follow_on_scroll(
+            px(-1.0),
+            true,
+            &mut follow,
+            &mut unread,
+        ));
+        assert!(follow);
+        assert_eq!(unread, 0);
+
+        assert!(!update_chat_follow_on_scroll(
+            px(-1.0),
+            true,
+            &mut follow,
+            &mut unread,
+        ));
     }
 
     #[test]
