@@ -106,6 +106,10 @@ impl DesktopApp {
     }
 
     fn chat_timeline(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // TODO(responsive-chat): GPUI can retain a stale scroll extent after window/fullscreen
+        // reflow, leaving the final Markdown blocks unreachable behind the composer. Narrow
+        // layouts can also produce inconsistent table columns because each row flexes
+        // independently. Revisit this with a layout-aware tail anchor and shared table tracks.
         div()
             .relative()
             .flex()
