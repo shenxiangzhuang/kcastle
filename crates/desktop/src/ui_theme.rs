@@ -18,6 +18,7 @@ pub(crate) struct UiPalette {
     pub(crate) warning: Hsla,
     pub(crate) assistant: Hsla,
     pub(crate) user_bubble: Hsla,
+    pub(crate) markdown_text: Hsla,
     pub(crate) markdown_inline_code: Hsla,
     pub(crate) markdown_code_block: Hsla,
     pub(crate) markdown_code_banner: Hsla,
@@ -76,6 +77,18 @@ pub(crate) mod metrics {
     pub(crate) const MARKDOWN_SECTION_GAP: f32 = 32.0;
 }
 
+const MARKDOWN_TEXT_LIGHT: u32 = 0x0f1115;
+const MARKDOWN_TEXT_DARK: u32 = 0xf9fafb;
+
+fn markdown_text_color(dark: bool) -> Hsla {
+    rgb(if dark {
+        MARKDOWN_TEXT_DARK
+    } else {
+        MARKDOWN_TEXT_LIGHT
+    })
+    .into()
+}
+
 pub(crate) fn palette(cx: &App) -> UiPalette {
     let theme = cx.theme();
     let mut palette = UiPalette {
@@ -94,6 +107,7 @@ pub(crate) fn palette(cx: &App) -> UiPalette {
         warning: theme.warning,
         assistant: theme.chart_4,
         user_bubble: rgb(0xedf3fe).into(),
+        markdown_text: markdown_text_color(theme.is_dark()),
         markdown_inline_code: rgb(0xebeef2).into(),
         markdown_code_block: rgb(0xf9fafb).into(),
         markdown_code_banner: rgb(0xf9fafb).into(),
@@ -166,5 +180,18 @@ pub(crate) fn trajectory_palette(cx: &App) -> TrajectoryPalette {
             json_punctuation: rgb(0x202124).into(),
             error: rgb(0xec1313).into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::rgb;
+
+    use super::markdown_text_color;
+
+    #[test]
+    fn markdown_text_uses_deepseek_label_primary_colors() {
+        assert_eq!(markdown_text_color(false), rgb(0x0f1115).into());
+        assert_eq!(markdown_text_color(true), rgb(0xf9fafb).into());
     }
 }

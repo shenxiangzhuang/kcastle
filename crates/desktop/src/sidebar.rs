@@ -136,7 +136,7 @@ impl DesktopApp {
                     .h(px(40.0))
                     .px_2()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("K Castle")
+                    .child("kcastle")
                     .child(
                         Button::new("search-sessions")
                             .icon(if self.core.sidebar.search_sessions {
@@ -337,11 +337,14 @@ impl DesktopApp {
                 let mut sessions = if active {
                     self.core.session.sessions.clone()
                 } else if expanded {
-                    kcastle_agent::Session::list(&project.sessions_dir).unwrap_or_default()
+                    self.project_sessions
+                        .get(&project.sessions_dir)
+                        .cloned()
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
-                sessions.sort_by_key(session_modified_at);
+                sessions.sort_by_key(|session| self.session_modified_at(session));
                 if self.core.sidebar.sort_by_recent {
                     sessions.reverse();
                 }
@@ -521,7 +524,7 @@ impl DesktopApp {
                                     }))
                                     .into_any_element();
                                 Some(
-                                    session_row(group.clone(), group.clone(), display_title, session_age(session_modified_at(&session)), selected, colors, Some(action))
+                                    session_row(group.clone(), group.clone(), display_title, session_age(self.session_modified_at(&session)), selected, colors, Some(action))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.dispatch(
                                                 Action::SetSessionActionTarget(None),
@@ -561,7 +564,9 @@ impl DesktopApp {
             .iter()
             .enumerate()
             .flat_map(|(project_index, project)| {
-                kcastle_agent::Session::list(&project.sessions_dir)
+                self.project_sessions
+                    .get(&project.sessions_dir)
+                    .cloned()
                     .unwrap_or_default()
                     .into_iter()
                     .map(move |session| (project_index, project.name.clone(), session))
@@ -585,7 +590,7 @@ impl DesktopApp {
                 Some((
                     project_index,
                     project_name,
-                    session_modified_at(&session),
+                    self.session_modified_at(&session),
                     session.path,
                     title,
                     selected,
@@ -822,15 +827,6 @@ fn session_actions_popover(
                 })),
         )
         .into_any_element()
-}
-
-fn session_modified_at(session: &kcastle_agent::SessionInfo) -> u64 {
-    std::fs::metadata(&session.path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs())
-        .unwrap_or(session.created_at)
 }
 
 fn sidebar_label(value: &str, max_units: usize) -> String {

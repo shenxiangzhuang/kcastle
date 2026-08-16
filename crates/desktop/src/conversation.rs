@@ -117,6 +117,7 @@ impl DesktopApp {
     }
 
     fn chat_timeline(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         // TODO(responsive-chat): GPUI can retain a stale scroll extent after window/fullscreen
         // reflow, leaving the final Markdown blocks unreachable behind the composer. Narrow
         // layouts can also produce inconsistent table columns because each row flexes
@@ -162,21 +163,29 @@ impl DesktopApp {
                     ),
             )
             .children((!self.chat_at_bottom()).then(|| {
-                div().absolute().right(px(18.0)).bottom(px(12.0)).child(
-                    Button::new("back-to-bottom")
-                        .icon(IconName::ArrowDown)
-                        .label(if self.core.unread_stream_updates > 0 {
-                            format!("Back to bottom · {} new", self.core.unread_stream_updates)
-                        } else {
-                            "Back to bottom".into()
-                        })
-                        .outline()
-                        .compact()
-                        .tooltip("Follow the latest response")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.scroll_chat_to_bottom(window, cx)
-                        })),
-                )
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(12.0))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        Button::new("back-to-bottom")
+                            .icon(IconName::ArrowDown)
+                            .when(self.core.unread_stream_updates > 0, |button| {
+                                button.label(format!("{} new", self.core.unread_stream_updates))
+                            })
+                            .outline()
+                            .compact()
+                            .rounded(px(999.0))
+                            .bg(colors.surface)
+                            .shadow_lg()
+                            .tooltip("Back to bottom")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.scroll_chat_to_bottom(window, cx)
+                            })),
+                    )
             }))
     }
 

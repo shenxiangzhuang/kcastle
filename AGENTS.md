@@ -1,4 +1,4 @@
-# K Agent Harness
+# kcastle agent harness
 
 ## Commands
 
@@ -22,7 +22,7 @@
 
 ## Architecture
 
-K is a minimal Rust workspace with two packages:
+kcastle is a minimal Rust workspace with two packages:
 
 | Package | Crate | Responsibility |
 | --- | --- | --- |

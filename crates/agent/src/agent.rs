@@ -26,12 +26,69 @@ use crate::tool::{AgentTool, Env, ShellTool, ToolResult};
 
 const DEFAULT_MAX_TURNS: usize = 100;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelPreset {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub context_window: usize,
+}
+
+pub const DEEPSEEK_PROVIDER_ID: &str = "deepseek-official";
+pub const OPENAI_PROVIDER_ID: &str = "openai";
+
+pub const DEEPSEEK_MODEL_PRESETS: &[ModelPreset] = &[
+    ModelPreset {
+        id: "deepseek-v4-flash",
+        display_name: "DeepSeek-V4-Flash",
+        context_window: 1_000_000,
+    },
+    ModelPreset {
+        id: "deepseek-v4-pro",
+        display_name: "DeepSeek-V4-Pro",
+        context_window: 1_000_000,
+    },
+];
+
+pub const OPENAI_MODEL_PRESETS: &[ModelPreset] = &[
+    ModelPreset {
+        id: "gpt-5.6-sol",
+        display_name: "GPT-5.6 Sol",
+        context_window: 1_050_000,
+    },
+    ModelPreset {
+        id: "gpt-5.6-terra",
+        display_name: "GPT-5.6 Terra",
+        context_window: 1_050_000,
+    },
+    ModelPreset {
+        id: "gpt-5.6-luna",
+        display_name: "GPT-5.6 Luna",
+        context_window: 1_050_000,
+    },
+];
+
+const DEEPSEEK_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+];
+const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::None,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Xhigh,
+];
+
 #[derive(Clone)]
 pub struct Model {
     name: String,
+    api_key: String,
+    api_base: String,
     client: Client<OpenAIConfig>,
     model: String,
     context_window: usize,
+    max_output_tokens: Option<u32>,
     reasoning_efforts: &'static [ReasoningEffort],
     reasoning_effort: Option<ReasoningEffort>,
 }
@@ -44,14 +101,19 @@ impl Model {
         model: impl Into<String>,
         context_window: usize,
     ) -> Self {
+        let api_key = api_key.into();
+        let api_base = api_base.into();
         let config = OpenAIConfig::new()
-            .with_api_key(api_key)
-            .with_api_base(api_base);
+            .with_api_key(api_key.clone())
+            .with_api_base(api_base.clone());
         Self {
             name: name.into(),
+            api_key,
+            api_base,
             client: Client::with_config(config),
             model: model.into(),
             context_window,
+            max_output_tokens: None,
             reasoning_efforts: &[],
             reasoning_effort: None,
         }
@@ -76,8 +138,37 @@ impl Model {
         &self.model
     }
 
+    pub fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        !self.api_key.trim().is_empty()
+    }
+
     pub fn context_window(&self) -> usize {
         self.context_window
+    }
+
+    pub fn max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens
+    }
+
+    pub fn with_max_output_tokens(mut self, max_output_tokens: Option<u32>) -> Self {
+        self.max_output_tokens = max_output_tokens;
+        self
+    }
+
+    pub fn with_provider_reasoning(self, provider_id: &str) -> Self {
+        match provider_id {
+            DEEPSEEK_PROVIDER_ID | "deepseek" => {
+                self.with_reasoning(DEEPSEEK_REASONING_EFFORTS, ReasoningEffort::High)
+            }
+            OPENAI_PROVIDER_ID => {
+                self.with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium)
+            }
+            _ => self,
+        }
     }
 
     pub fn reasoning_efforts(&self) -> &'static [ReasoningEffort] {
@@ -91,6 +182,27 @@ impl Model {
     pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
         assert!(self.reasoning_efforts.contains(&reasoning_effort));
         self.reasoning_effort = Some(reasoning_effort);
+    }
+
+    pub fn reconfigured(
+        &self,
+        name: impl Into<String>,
+        api_key: Option<String>,
+        api_base: impl Into<String>,
+        model: impl Into<String>,
+        context_window: usize,
+    ) -> Self {
+        let mut configured = Self::new(
+            name,
+            api_key.unwrap_or_else(|| self.api_key.clone()),
+            api_base,
+            model,
+            context_window,
+        );
+        configured.reasoning_efforts = self.reasoning_efforts;
+        configured.reasoning_effort = self.reasoning_effort.clone();
+        configured.max_output_tokens = self.max_output_tokens;
+        configured
     }
 }
 
@@ -387,6 +499,7 @@ impl Agent {
                     .store(false)
                     .build()?;
                 request.reasoning = self.reasoning();
+                request.max_output_tokens = self.model.max_output_tokens;
                 let responses = self.model.client.responses();
                 let mut stream = tokio::select! {
                     _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
@@ -639,6 +752,7 @@ impl Agent {
             .store(false)
             .build()?;
         request.reasoning = self.reasoning();
+        request.max_output_tokens = self.model.max_output_tokens;
         let responses = self.model.client.responses();
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(AgentError::Aborted),
@@ -832,6 +946,7 @@ mod tests {
             }
             let request = String::from_utf8_lossy(&request);
             assert!(request.contains("\"reasoning\":{\"effort\":\"high\"}"));
+            assert!(request.contains("\"max_output_tokens\":256000"));
             let response = format!(
                 "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                 body.len(),
@@ -850,7 +965,8 @@ mod tests {
         .with_reasoning(
             &[ReasoningEffort::Low, ReasoningEffort::High],
             ReasoningEffort::High,
-        );
+        )
+        .with_max_output_tokens(Some(256_000));
         let agent = Agent::new(model, "test", Session::memory(), ".");
         let mut active = agent.start("hello");
         let mut text = String::new();

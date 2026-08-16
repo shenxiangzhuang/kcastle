@@ -1,9 +1,10 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, ParentElement,
-    SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText, Window, div,
-    prelude::FluentBuilder, px, rems,
+    AnyElement, App, Bounds, Context, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
+    HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels,
+    SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText, Window, div, fill,
+    point, prelude::FluentBuilder, px, rems, size,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::clipboard::Clipboard;
@@ -41,6 +42,7 @@ pub(crate) fn render_markdown(
     if blocks.is_empty() {
         return div()
             .w_full()
+            .text_color(colors.markdown_text)
             .text_size(px(16.0))
             .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
             .child(fallback.clone())
@@ -52,6 +54,7 @@ pub(crate) fn render_markdown(
         .flex_col()
         .w_full()
         .min_w(px(0.0))
+        .text_color(colors.markdown_text)
         .text_size(px(16.0))
         .line_height(px(metrics::MESSAGE_LINE_HEIGHT));
     for (index, (block, revision)) in blocks.iter().enumerate() {
@@ -450,9 +453,12 @@ fn root_block_gap(previous: Option<&Node>, node: &Node, first: bool) -> f32 {
 
 fn heading_style(depth: u8) -> (f32, f32, FontWeight) {
     match depth {
-        1 => (24.0, 34.0, FontWeight::BOLD),
-        2 => (22.0, 32.0, FontWeight::BOLD),
-        3 => (20.0, 30.0, FontWeight::BOLD),
+        // CoreText renders the system font's 700 face more heavily than the
+        // browser stack used by DeepSeek Harness. Use 600 for the equivalent
+        // native visual weight while retaining the reference type scale.
+        1 => (24.0, 34.0, FontWeight::SEMIBOLD),
+        2 => (22.0, 32.0, FontWeight::SEMIBOLD),
+        3 => (20.0, 30.0, FontWeight::SEMIBOLD),
         _ => (16.0, 28.0, FontWeight::SEMIBOLD),
     }
 }
@@ -475,10 +481,10 @@ fn inline_block(
         .into_any_element()
 }
 
-fn inline_text(nodes: &[Node], colors: UiPalette) -> StyledText {
+fn inline_text(nodes: &[Node], colors: UiPalette) -> InlineText {
     let mut output = InlineOutput::default();
     append_inlines(nodes, InlineStyle::default(), colors, &mut output);
-    StyledText::new(output.text).with_highlights(output.highlights)
+    InlineText::new(output)
 }
 
 #[derive(Clone, Copy, Default)]
@@ -494,6 +500,179 @@ struct InlineStyle {
 struct InlineOutput {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    backgrounds: Vec<(Range<usize>, Hsla)>,
+}
+
+// GPUI highlight backgrounds occupy the entire line height, which makes code on
+// adjacent lines merge visually. Paint code backgrounds separately so they can
+// be inset without changing the text shaping or wrapping behavior.
+struct InlineText {
+    text: SharedString,
+    styled: StyledText,
+    backgrounds: Vec<(Range<usize>, Hsla)>,
+}
+
+impl InlineText {
+    const CODE_BACKGROUND_INSET: Pixels = px(2.0);
+    const CODE_BACKGROUND_RADIUS: Pixels = px(4.0);
+
+    fn new(output: InlineOutput) -> Self {
+        let text = SharedString::from(output.text);
+        Self {
+            styled: StyledText::new(text.clone()).with_highlights(output.highlights),
+            text,
+            backgrounds: output.backgrounds,
+        }
+    }
+
+    fn paint_backgrounds(&self, window: &mut Window) {
+        let text_layout = self.styled.layout();
+        let line_height = text_layout.line_height();
+        let background_height = line_height - Self::CODE_BACKGROUND_INSET * 2.0;
+        if background_height <= px(0.0) {
+            return;
+        }
+
+        for (range, color) in &self.backgrounds {
+            let mut segment_start = range.start;
+            while segment_start < range.end {
+                let line_start = self.text[..segment_start]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+                let line_end = self.text[segment_start..]
+                    .find('\n')
+                    .map_or(self.text.len(), |index| segment_start + index);
+                let segment_end = range.end.min(line_end);
+
+                if segment_start < segment_end {
+                    self.paint_line_background(
+                        line_start,
+                        segment_start..segment_end,
+                        *color,
+                        window,
+                    );
+                }
+
+                if line_end == self.text.len() {
+                    break;
+                }
+                segment_start = line_end + 1;
+            }
+        }
+    }
+
+    fn paint_line_background(
+        &self,
+        line_start: usize,
+        range: Range<usize>,
+        color: Hsla,
+        window: &mut Window,
+    ) {
+        let text_layout = self.styled.layout();
+        let Some(layout) = text_layout.line_layout_for_index(range.start) else {
+            return;
+        };
+        let Some(line_origin) = text_layout.position_for_index(line_start) else {
+            return;
+        };
+        let line_height = text_layout.line_height();
+        let unwrapped = &layout.unwrapped_layout;
+        let local_range = (range.start - line_start)..(range.end - line_start);
+        let mut visual_line_start = 0;
+
+        for (visual_line, visual_line_end) in layout
+            .wrap_boundaries()
+            .iter()
+            .map(|boundary| unwrapped.runs[boundary.run_ix].glyphs[boundary.glyph_ix].index)
+            .chain([layout.len()])
+            .enumerate()
+        {
+            let start = local_range.start.max(visual_line_start);
+            let end = local_range.end.min(visual_line_end);
+            if start < end {
+                let visual_line_x = unwrapped.x_for_index(visual_line_start);
+                let left = unwrapped.x_for_index(start) - visual_line_x;
+                let right = unwrapped.x_for_index(end) - visual_line_x;
+                if right > left {
+                    let bounds = Bounds::new(
+                        point(
+                            line_origin.x + left,
+                            line_origin.y + line_height * visual_line + Self::CODE_BACKGROUND_INSET,
+                        ),
+                        size(
+                            right - left,
+                            line_height - Self::CODE_BACKGROUND_INSET * 2.0,
+                        ),
+                    );
+                    window
+                        .paint_quad(fill(bounds, color).corner_radii(Self::CODE_BACKGROUND_RADIUS));
+                }
+            }
+            if visual_line_end >= local_range.end {
+                break;
+            }
+            visual_line_start = visual_line_end;
+        }
+    }
+}
+
+impl Element for InlineText {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        self.styled.request_layout(id, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.styled
+            .prepaint(id, inspector_id, bounds, state, window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        state: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.paint_backgrounds(window);
+        self.styled
+            .paint(id, inspector_id, bounds, state, prepaint, window, cx);
+    }
+}
+
+impl IntoElement for InlineText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 fn append_inlines(
@@ -609,7 +788,9 @@ fn append_inline_text(
         });
     }
     if style.code {
-        highlight.background_color = Some(colors.markdown_inline_code);
+        output
+            .backgrounds
+            .push((start..end, colors.markdown_inline_code));
     }
     if style.link {
         highlight.color = Some(colors.markdown_link);
@@ -621,10 +802,11 @@ fn append_inline_text(
 
 #[cfg(test)]
 mod tests {
+    use gpui::{FontWeight, Hsla, px, rgb};
     use markdown::{ParseOptions, mdast::Node};
 
-    use super::{heading_style, root_block_gap};
-    use crate::ui_theme::metrics;
+    use super::{InlineText, heading_style, inline_text, root_block_gap};
+    use crate::ui_theme::{UiPalette, metrics};
 
     fn blocks(source: &str) -> Vec<Node> {
         match markdown::to_mdast(source, &ParseOptions::gfm()).unwrap() {
@@ -633,12 +815,42 @@ mod tests {
         }
     }
 
+    fn test_palette() -> UiPalette {
+        let color: Hsla = rgb(0x123456).into();
+        UiPalette {
+            canvas: color,
+            surface: color,
+            sidebar: color,
+            border: color,
+            text: color,
+            muted_text: color,
+            subtle: color,
+            hover: color,
+            selected: color,
+            primary: color,
+            overlay: color,
+            danger: color,
+            warning: color,
+            assistant: color,
+            user_bubble: color,
+            markdown_text: color,
+            markdown_inline_code: color,
+            markdown_code_block: color,
+            markdown_code_banner: color,
+            markdown_link: color,
+            markdown_quote: color,
+        }
+    }
+
     #[test]
     fn dsh_headings_use_explicit_size_and_line_height_pairs() {
         assert_eq!(heading_style(1).0, 24.0);
         assert_eq!(heading_style(1).1, 34.0);
+        assert_eq!(heading_style(1).2, FontWeight::SEMIBOLD);
         assert_eq!(heading_style(2).0, 22.0);
+        assert_eq!(heading_style(2).2, FontWeight::SEMIBOLD);
         assert_eq!(heading_style(3).1, 30.0);
+        assert_eq!(heading_style(3).2, FontWeight::SEMIBOLD);
         assert_eq!(heading_style(4).0, 16.0);
     }
 
@@ -657,5 +869,25 @@ mod tests {
 
         let nodes = blocks("#### details\n\n- one\n- two");
         assert_eq!(root_block_gap(Some(&nodes[0]), &nodes[1], false), 8.0);
+    }
+
+    #[test]
+    fn inline_code_backgrounds_are_separate_inset_shapes() {
+        let nodes = blocks("`agent::Model`\n`Agent::set_model`");
+        let Node::Paragraph(paragraph) = &nodes[0] else {
+            unreachable!();
+        };
+        let inline = inline_text(&paragraph.children, test_palette());
+
+        assert_eq!(inline.backgrounds.len(), 2);
+        assert!(InlineText::CODE_BACKGROUND_INSET > px(0.0));
+        assert_eq!(
+            &inline.text[inline.backgrounds[0].0.clone()],
+            "\u{a0}agent::Model\u{a0}"
+        );
+        assert_eq!(
+            &inline.text[inline.backgrounds[1].0.clone()],
+            "\u{a0}Agent::set_model\u{a0}"
+        );
     }
 }

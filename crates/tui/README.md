@@ -1,6 +1,6 @@
 # kcastle
 
-Native Ratatui application for [K in Castle](https://github.com/shenxiangzhuang/kcastle).
+Native Ratatui application for [kcastle](https://github.com/shenxiangzhuang/kcastle).
 
 ```bash
 cargo install kcastle --locked

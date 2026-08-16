@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">kcastle app icon</title>
+  <desc id="description">A precisely aligned geometric K becomes a top-down castle labyrinth.</desc>
+
+  <!-- Flat, print-like colors keep the mark direct at small sizes. -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="#F3F0E8"/>
+
+  <defs>
+    <!-- Crop every wall and corridor against the same horizontal cap lines. -->
+    <clipPath id="k-bounds">
+      <rect x="0" y="254" width="1024" height="516"/>
+    </clipPath>
+  </defs>
+
+  <!-- The outer stroke is a fortress wall; the inner stroke is its impossible corridor. -->
+  <g fill="none" stroke-linecap="butt" stroke-linejoin="miter"
+     clip-path="url(#k-bounds)"
+     transform="translate(512 512) scale(1.22) translate(-512 -512)">
+    <path d="M360 770V254M360 512L701 200M360 512L701 824"
+          stroke="#292724" stroke-width="90"/>
+    <path d="M360 770V254M360 512L701 200M360 512L701 824"
+          stroke="#F3F0E8" stroke-width="34"/>
+  </g>
+</svg>

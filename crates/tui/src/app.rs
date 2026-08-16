@@ -258,7 +258,7 @@ impl App {
                     Line::from(vec![
                         Span::styled(">_  ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
-                            "K CASTLE ",
+                            "kcastle ",
                             Style::default()
                                 .fg(Color::White)
                                 .add_modifier(Modifier::BOLD),
@@ -1668,7 +1668,7 @@ fn precise_percentage(part: usize, total: usize) -> f64 {
 fn new_textarea() -> TextArea<'static> {
     let mut input = TextArea::default();
     input.set_cursor_line_style(Style::default());
-    input.set_placeholder_text("Message K…  / for commands");
+    input.set_placeholder_text("Message kcastle…  / for commands");
     input.set_wrap_mode(WrapMode::WordOrGlyph);
     input
 }
@@ -1798,7 +1798,7 @@ fn command_items(running: bool) -> Vec<CommandItem> {
         },
         CommandItem {
             command: "/exit".into(),
-            description: "Exit K".into(),
+            description: "Exit kcastle".into(),
             prefill: false,
         },
     ];

@@ -116,7 +116,8 @@ impl DesktopApp {
     fn composer_card(&self, hero: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let running = self.control.is_some();
-        let preparing = matches!(self.core.run, RunState::CreatingSession { .. });
+        let preparing = matches!(self.core.run, RunState::CreatingSession { .. })
+            || self.core.pending_session_operation.is_some();
         let empty = self.input.read(cx).value().trim().is_empty();
         let elapsed = self
             .started_at

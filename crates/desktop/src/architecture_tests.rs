@@ -63,3 +63,17 @@ fn desktop_app_has_no_state_deref_escape_hatch() {
     assert!(!app.contains("impl Deref for DesktopApp"));
     assert!(!app.contains("impl DerefMut for DesktopApp"));
 }
+
+#[test]
+fn sidebar_rendering_does_not_list_sessions_from_disk() {
+    let sidebar = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("sidebar.rs"),
+    )
+    .expect("sidebar source should be readable");
+    assert!(
+        !sidebar.contains("Session::list") && !sidebar.contains("std::fs::"),
+        "sidebar rendering must consume cached session metadata"
+    );
+}

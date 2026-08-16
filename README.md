@@ -1,4 +1,4 @@
-# K in Castle
+# kcastle
 
 [![Crates.io](https://img.shields.io/crates/v/kcastle.svg)](https://crates.io/crates/kcastle)
 
@@ -24,7 +24,7 @@ Run the GPUI desktop app from a source checkout:
 just macos-run
 ```
 
-This recipe builds the release binary, places it in `target/K Castle.app`, applies the tracked
+This recipe builds the release binary, places it in `target/kcastle.app`, applies the tracked
 `Info.plist`, signs the bundle, and launches a fresh instance. Use `just macos-run-debug` for a
 debug build. A direct `cargo run -p kcastle-desktop` launches an unbundled executable and does not
 reproduce macOS AppKit behavior such as fullscreen titlebar reveal.
@@ -32,17 +32,20 @@ reproduce macOS AppKit behavior such as fullscreen titlebar reveal.
 The desktop app treats folders as projects. Each project keeps an isolated session history under
 `~/.kcastle/projects`, while removing a project from the sidebar never deletes its folder or saved
 history. Sessions can be created, reopened, renamed, and deleted from the sidebar. Provider
-credentials stay in environment variables; desktop preferences such as reasoning effort are saved
-in `~/.kcastle/settings.json`. The desktop shell includes workspace-grouped session browsing,
+credentials can come from environment variables or the desktop Models settings page; desktop
+preferences such as reasoning effort are saved in `~/.kcastle/settings.json`. The desktop shell includes workspace-grouped session browsing,
 session search and ordering, a searchable trajectory view, expandable tool output, message copy
-actions, and native session-log export.
+actions, and native session-log export. The desktop Models settings page supports the OpenAI and
+DeepSeek providers. Each provider owns an editable model catalog shared with the TUI defaults;
+saved credentials, endpoint overrides, and model metadata are written to the user-only
+`~/.kcastle/settings.json` file.
 
-Desktop state, responsive layout, streaming, scrolling, and test invariants are documented in
-[the Desktop UX architecture](crates/desktop/ARCHITECTURE.md).
+Desktop architecture, native launch behavior, and manual verification are documented in
+[the desktop README](crates/desktop/README.md).
 
 ## Get started
 
-Set one provider key and start K:
+Set one provider key and start kcastle:
 
 ```bash
 export OPENAI_API_KEY=...
@@ -70,4 +73,5 @@ The pure Desktop core also has scheduled mutation coverage. Run a focused local 
 
 ## Acknowledgements
 
-Inspired by [pi](https://github.com/badlogic/pi-mono).
+Inspired by [pi](https://github.com/badlogic/pi-mono) and
+[DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness).

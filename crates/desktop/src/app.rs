@@ -9,7 +9,9 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{Theme, ThemeMode};
-use kcastle_agent::{Agent, AgentEvent, Model, RunControl, Session, ToolResult, TranscriptItem};
+use kcastle_agent::{
+    Agent, AgentEvent, Model, RunControl, Session, SessionInfo, ToolResult, TranscriptItem,
+};
 
 use crate::application::{
     MAX_EVENTS_PER_FRAME, StreamBatch, StreamTelemetry, is_frame_stream_event,
@@ -26,24 +28,38 @@ use crate::platform::gpui::{
     GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore, arm_next_frame, run_effects,
 };
 use crate::project::ProjectStore;
-use crate::settings::{Appearance, EnterBehavior, SettingsStore};
+use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
 
 #[derive(Clone)]
 pub(crate) struct ConfiguredModel {
     pub(crate) id: String,
     pub(crate) model: Model,
+    pub(crate) provider_id: String,
+    pub(crate) profile: ProviderModel,
 }
 
 impl ConfiguredModel {
-    pub(crate) fn new(model: Model) -> Self {
+    pub(crate) fn new(
+        provider_id: impl Into<String>,
+        profile: ProviderModel,
+        model: Model,
+    ) -> Self {
+        let provider_id = provider_id.into();
         Self {
-            id: format!("{}/{}", model.name(), model.model()),
+            id: format!("{provider_id}/{}", profile.model_id),
             model,
+            provider_id,
+            profile,
         }
     }
 
     pub(crate) fn label(&self) -> String {
-        format!("{} · {}", self.model.name(), self.model.model())
+        let model = if self.profile.display_name.trim().is_empty() {
+            &self.profile.model_id
+        } else {
+            &self.profile.display_name
+        };
+        format!("{} · {model}", self.model.name())
     }
 }
 
@@ -113,6 +129,8 @@ pub(crate) struct DesktopApp {
     pub(crate) started_at: Option<Instant>,
     pub(crate) stream_telemetry: StreamTelemetry,
     pub(crate) tool_schemas: HashMap<String, String>,
+    pub(crate) project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
+    pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     native_titlebar: NativeTitlebarController,
     view_states: HashMap<String, SessionViewState>,
@@ -137,10 +155,15 @@ impl DesktopApp {
             .project(active_project)
             .expect("active project should exist")
             .clone();
-        let model = format!("{} · {}", agent.model().name(), agent.model().model());
+        let model = models[selected_model].label();
         let tool_schemas = tool_schema_map(&agent);
         let current_session = agent.session_info().path.clone();
-        let sessions = Session::list(&project.sessions_dir).unwrap_or_default();
+        let project_sessions = load_project_sessions(&project_store);
+        let session_activity = load_session_activity(&project_sessions);
+        let sessions = project_sessions
+            .get(&project.sessions_dir)
+            .cloned()
+            .unwrap_or_default();
         let viewport = window.viewport_size();
         let mut core = AppState::new(LayoutInput {
             viewport_width: f32::from(viewport.width),
@@ -154,7 +177,8 @@ impl DesktopApp {
         core.workspace.sessions_dir = project.sessions_dir.clone();
         core.session.current = current_session.clone();
         core.session.sessions = sessions;
-        let session_search_documents = build_session_search_documents(&project_store);
+        let session_search_documents =
+            build_session_search_documents(&project_store, &project_sessions);
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 14)
@@ -235,6 +259,8 @@ impl DesktopApp {
             started_at: None,
             stream_telemetry: StreamTelemetry::default(),
             tool_schemas,
+            project_sessions,
+            session_activity,
             session_search_documents,
             native_titlebar,
             view_states: HashMap::new(),
@@ -421,7 +447,9 @@ impl DesktopApp {
     }
 
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.core.run, RunState::CreatingSession { .. }) {
+        if matches!(self.core.run, RunState::CreatingSession { .. })
+            || self.core.pending_session_operation.is_some()
+        {
             return;
         }
         let value = self.input.read(cx).value().trim().to_owned();
@@ -473,15 +501,14 @@ impl DesktopApp {
     ) {
         let sessions_dir = self.core.workspace.sessions_dir.clone();
         cx.spawn_in(window, async move |this, cx| {
-            let session = Session::create(sessions_dir).await;
+            let session = Session::create(&sessions_dir).await;
             let _ = cx.update(|window, app| {
                 if let Some(this) = this.upgrade() {
                     this.update(app, |this, cx| match session {
                         Ok(session) => {
                             let previous_key = this.view_state_key();
                             let current_session = session.info().path.clone();
-                            let sessions = Session::list(&this.core.workspace.sessions_dir)
-                                .unwrap_or_default();
+                            let sessions = this.reload_sessions(&sessions_dir);
                             let effects = this.transition(Action::SessionCreated {
                                 operation,
                                 current_session,
@@ -636,16 +663,14 @@ impl DesktopApp {
                         this.started_at = None;
                         match agent {
                             Ok(agent) => {
+                                let sessions = this.reload_active_sessions();
                                 this.dispatch(
                                     Action::SetCurrentSession(agent.session_info().path.clone()),
                                     window,
                                     cx,
                                 );
                                 this.dispatch(
-                                    Action::RefreshSessions(
-                                        Session::list(&this.core.workspace.sessions_dir)
-                                            .unwrap_or_default(),
-                                    ),
+                                    Action::RefreshSessions(sessions),
                                     window,
                                     cx,
                                 );
@@ -788,7 +813,7 @@ impl DesktopApp {
         }));
     }
 
-    fn notice(&mut self, text: impl Into<String>) {
+    pub(crate) fn notice(&mut self, text: impl Into<String>) {
         let _ = self.transition(Action::Conversation(ConversationAction::AppendNotice(
             message(Role::Notice, text.into()),
         )));
@@ -1232,6 +1257,7 @@ impl DesktopApp {
                                     if let Some(path) = paths.into_iter().next() {
                                         match this.project_store.add(path) {
                                             Ok(index) => {
+                                                this.refresh_project_session_cache();
                                                 this.refresh_session_search_documents();
                                                 this.switch_project(index, window, cx)
                                             }
@@ -1277,7 +1303,11 @@ impl DesktopApp {
             agent.set_cwd(project.path.clone());
             agent.set_session(Session::memory());
         }
-        let sessions = Session::list(&project.sessions_dir).unwrap_or_default();
+        let sessions = self
+            .project_sessions
+            .get(&project.sessions_dir)
+            .cloned()
+            .unwrap_or_default();
         self.dispatch(
             Action::ActivateWorkspace {
                 index,
@@ -1319,6 +1349,7 @@ impl DesktopApp {
             cx.notify();
             return;
         }
+        self.refresh_project_session_cache();
         let next = if index < self.core.workspace.active_project {
             self.core.workspace.active_project - 1
         } else if index == self.core.workspace.active_project {
@@ -1375,8 +1406,7 @@ impl DesktopApp {
                                 );
                                 let conversation =
                                     conversation_from_session(&session, &this.tool_schemas);
-                                let sessions = Session::list(&this.core.workspace.sessions_dir)
-                                    .unwrap_or_default();
+                                let sessions = this.reload_active_sessions();
                                 let effects = this.transition(Action::SessionOpened {
                                     operation,
                                     conversation,
@@ -1480,12 +1510,12 @@ impl DesktopApp {
                                     .pending_session_operation
                                     .as_ref()
                                     .is_some_and(|pending| pending.operation == operation);
+                                let sessions = this.reload_active_sessions();
                                 this.dispatch(
                                     Action::SessionRenamed {
                                         operation,
                                         title: agent.session_info().title.clone(),
-                                        sessions: Session::list(&this.core.workspace.sessions_dir)
-                                            .unwrap_or_default(),
+                                        sessions,
                                     },
                                     window,
                                     cx,
@@ -1538,13 +1568,8 @@ impl DesktopApp {
         }
         match Session::delete(&session) {
             Ok(()) => {
-                self.dispatch(
-                    Action::RefreshSessions(
-                        Session::list(&self.core.workspace.sessions_dir).unwrap_or_default(),
-                    ),
-                    window,
-                    cx,
-                );
+                let sessions = self.reload_active_sessions();
+                self.dispatch(Action::RefreshSessions(sessions), window, cx);
                 self.refresh_session_search_documents();
                 self.reset_conversation();
                 self.input.update(cx, |input, cx| {
@@ -1562,7 +1587,7 @@ impl DesktopApp {
         effort: kcastle_agent::ReasoningEffort,
         cx: &mut Context<Self>,
     ) {
-        if self.control.is_some() {
+        if self.control.is_some() || self.core.pending_session_operation.is_some() {
             return;
         }
         let model_id = self.models[self.selected_model].id.clone();
@@ -1579,7 +1604,11 @@ impl DesktopApp {
     }
 
     pub(crate) fn select_model(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.control.is_some() || index >= self.models.len() || index == self.selected_model {
+        if self.control.is_some()
+            || self.core.pending_session_operation.is_some()
+            || index >= self.models.len()
+            || index == self.selected_model
+        {
             return;
         }
         let configured = self.models[index].clone();
@@ -1638,8 +1667,43 @@ impl DesktopApp {
             .or_else(|| (!document.summary.is_empty()).then(|| document.summary.clone()))
     }
 
+    pub(crate) fn session_modified_at(&self, session: &SessionInfo) -> u64 {
+        self.session_activity
+            .get(&session.path)
+            .copied()
+            .unwrap_or(session.created_at)
+    }
+
     fn refresh_session_search_documents(&mut self) {
-        self.session_search_documents = build_session_search_documents(&self.project_store);
+        self.session_search_documents =
+            build_session_search_documents(&self.project_store, &self.project_sessions);
+    }
+
+    fn reload_sessions(&mut self, sessions_dir: &Path) -> Vec<SessionInfo> {
+        let sessions = Session::list(sessions_dir).unwrap_or_default();
+        if let Some(previous) = self.project_sessions.get(sessions_dir) {
+            for session in previous {
+                self.session_activity.remove(&session.path);
+            }
+        }
+        for session in &sessions {
+            self.session_activity
+                .insert(session.path.clone(), session_modified_at_from_disk(session));
+        }
+        self.project_sessions
+            .insert(sessions_dir.to_owned(), sessions.clone());
+        sessions
+    }
+
+    fn reload_active_sessions(&mut self) -> Vec<SessionInfo> {
+        let sessions_dir = self.core.workspace.sessions_dir.clone();
+        self.reload_sessions(&sessions_dir)
+    }
+
+    fn refresh_project_session_cache(&mut self) {
+        let sessions = load_project_sessions(&self.project_store);
+        self.session_activity = load_session_activity(&sessions);
+        self.project_sessions = sessions;
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
@@ -1677,7 +1741,7 @@ impl DesktopApp {
         if let Some(agent) = &mut self.agent {
             agent.set_session(session);
         }
-        let sessions = Session::list(&self.core.workspace.sessions_dir).unwrap_or_default();
+        let sessions = self.reload_active_sessions();
         let _ = self.transition(Action::ReplaceConversation {
             conversation,
             current_session: path,
@@ -1940,10 +2004,14 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
 
 fn build_session_search_documents(
     project_store: &ProjectStore,
+    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
 ) -> HashMap<PathBuf, SessionSearchDocument> {
     let mut documents = HashMap::new();
     for project in project_store.projects() {
-        for session in Session::list(&project.sessions_dir).unwrap_or_default() {
+        let Some(sessions) = project_sessions.get(&project.sessions_dir) else {
+            continue;
+        };
+        for session in sessions {
             let Ok(contents) = std::fs::read_to_string(&session.path) else {
                 continue;
             };
@@ -1959,7 +2027,7 @@ fn build_session_search_documents(
                 .map(|value| truncate_chars(value, 88))
                 .unwrap_or_default();
             documents.insert(
-                session.path,
+                session.path.clone(),
                 SessionSearchDocument {
                     searchable: values.join("\n").to_lowercase(),
                     summary,
@@ -1969,6 +2037,38 @@ fn build_session_search_documents(
         }
     }
     documents
+}
+
+fn load_project_sessions(project_store: &ProjectStore) -> HashMap<PathBuf, Vec<SessionInfo>> {
+    project_store
+        .projects()
+        .iter()
+        .map(|project| {
+            (
+                project.sessions_dir.clone(),
+                Session::list(&project.sessions_dir).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+fn load_session_activity(
+    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
+) -> HashMap<PathBuf, u64> {
+    project_sessions
+        .values()
+        .flatten()
+        .map(|session| (session.path.clone(), session_modified_at_from_disk(session)))
+        .collect()
+}
+
+fn session_modified_at_from_disk(session: &SessionInfo) -> u64 {
+    std::fs::metadata(&session.path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(session.created_at)
 }
 
 fn collect_search_strings(value: &serde_json::Value, output: &mut Vec<String>) {

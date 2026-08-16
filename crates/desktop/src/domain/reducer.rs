@@ -317,7 +317,9 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             }
         }
         Action::BeginRun(input) => {
-            if matches!(state.run, RunState::Idle | RunState::Failed { .. }) {
+            if state.pending_session_operation.is_none()
+                && matches!(state.run, RunState::Idle | RunState::Failed { .. })
+            {
                 let run = state.next_run.next();
                 state.next_run = run;
                 state.run = RunState::Running { run };
@@ -483,6 +485,22 @@ mod tests {
             },
         );
         assert_eq!(state.conversation.title, "New chat");
+        assert!(state.pending_session_operation.is_some());
+    }
+
+    #[test]
+    fn pending_session_open_blocks_a_new_run() {
+        let mut state = AppState::new(LayoutInput::default());
+        let open_effects = reduce(&mut state, Action::BeginOpenSession("wanted.jsonl".into()));
+        assert!(matches!(
+            open_effects.as_slice(),
+            [Effect::OpenSession { .. }]
+        ));
+
+        let run_effects = reduce(&mut state, Action::BeginRun("too early".into()));
+
+        assert!(run_effects.is_empty());
+        assert_eq!(state.run, RunState::Idle);
         assert!(state.pending_session_operation.is_some());
     }
 
