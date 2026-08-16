@@ -9,8 +9,12 @@ use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
 use gpui_component::{Icon, IconName, Sizable};
 
-use crate::app::{DesktopApp, Message, Role};
+use crate::app::DesktopApp;
+use crate::application::conversation_view_model;
+use crate::domain::{Message, Role, Surface};
 use crate::dsh_markdown;
+use crate::platform::gpui::MessagePresentation;
+use crate::platform::gpui::measured_container;
 use crate::ui_theme::{UiPalette, metrics, palette, trajectory_palette};
 
 impl DesktopApp {
@@ -43,7 +47,7 @@ impl DesktopApp {
                                     .max_w(px(460.0))
                                     .truncate()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(self.title.clone()),
+                                    .child(conversation_view_model(&self.core).title.to_owned()),
                             )
                             .children(self.control.is_some().then(|| {
                                 div()
@@ -77,18 +81,18 @@ impl DesktopApp {
                     .child(tab(
                         "chat-tab",
                         "Chat",
-                        !self.show_trajectory,
+                        self.core.surface == Surface::Chat,
                         trajectory_colors.primary,
                         trajectory_colors.label_tertiary,
-                        cx.listener(|this, _, _, cx| this.set_trajectory(false, cx)),
+                        cx.listener(|this, _, window, cx| this.set_trajectory(false, window, cx)),
                     ))
                     .child(tab(
                         "trajectory-tab",
                         "Trajectory",
-                        self.show_trajectory,
+                        self.core.surface == Surface::Trajectory,
                         trajectory_colors.primary,
                         trajectory_colors.label_tertiary,
-                        cx.listener(|this, _, _, cx| this.set_trajectory(true, cx)),
+                        cx.listener(|this, _, window, cx| this.set_trajectory(true, window, cx)),
                     )),
             )
     }
@@ -98,7 +102,7 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        if self.show_trajectory {
+        if self.core.surface == Surface::Trajectory {
             self.trajectory_panel(window, cx).into_any_element()
         } else {
             self.chat_timeline(window, cx).into_any_element()
@@ -110,6 +114,7 @@ impl DesktopApp {
         // reflow, leaving the final Markdown blocks unreachable behind the composer. Narrow
         // layouts can also produce inconsistent table columns because each row flexes
         // independently. Revisit this with a layout-aware tail anchor and shared table tracks.
+        let transcript_owner = cx.entity().downgrade();
         div()
             .relative()
             .flex()
@@ -119,6 +124,7 @@ impl DesktopApp {
             .child(
                 div()
                     .id("transcript")
+                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
@@ -130,23 +136,30 @@ impl DesktopApp {
                             this.handle_chat_scroll(event, window, cx)
                         },
                     ))
-                    .px(px(metrics::CHAT_SIDE_PADDING))
+                    .px(px(self.core.layout.chat_side_padding))
                     .pt_4()
-                    .pb(px(metrics::CHAT_BOTTOM_CLEARANCE))
+                    .pb(px(self.core.layout.tail_inset))
+                    .child(measured_container(
+                        transcript_owner,
+                        |bounds, this: &mut DesktopApp, cx| {
+                            this.observe_transcript_bounds(bounds, cx)
+                        },
+                        |this: &mut DesktopApp, cx| this.apply_pending_chat_anchor(cx),
+                    ))
                     .child(
-                        transcript_content_column().gap_4().children(
-                            self.messages.iter().enumerate().map(|(index, message)| {
-                                self.message_view(index, message, window, cx)
-                            }),
-                        ),
+                        transcript_content_column(self.core.layout.content_max_width)
+                            .gap_4()
+                            .children(self.core.conversation.messages.iter().enumerate().map(
+                                |(index, message)| self.message_view(index, message, window, cx),
+                            )),
                     ),
             )
             .children((!self.chat_at_bottom()).then(|| {
                 div().absolute().right(px(18.0)).bottom(px(12.0)).child(
                     Button::new("back-to-bottom")
                         .icon(IconName::ArrowDown)
-                        .label(if self.unread_stream_updates > 0 {
-                            format!("Back to bottom · {} new", self.unread_stream_updates)
+                        .label(if self.core.unread_stream_updates > 0 {
+                            format!("Back to bottom · {} new", self.core.unread_stream_updates)
                         } else {
                             "Back to bottom".into()
                         })
@@ -168,7 +181,8 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = palette(cx);
-        match message.role {
+        let presentation = self.message_presentations.get(message.key);
+        let content = match message.role {
             Role::User => div()
                 .id(("user-message-row", index))
                 .group(SharedString::from(format!("user-message-{index}")))
@@ -185,7 +199,7 @@ impl DesktopApp {
                         .rounded(px(22.0))
                         .bg(colors.user_bubble)
                         .line_height(px(metrics::BODY_LINE_HEIGHT))
-                        .child(message.render_text.clone()),
+                        .child(presentation.render_text.clone()),
                 )
                 .child(
                     div()
@@ -205,7 +219,8 @@ impl DesktopApp {
                                 .child(message_time_label(message)),
                         )
                         .child(
-                            Clipboard::new(("copy-user", index)).value(message.render_text.clone()),
+                            Clipboard::new(("copy-user", index))
+                                .value(presentation.render_text.clone()),
                         ),
                 )
                 .into_any_element(),
@@ -218,7 +233,13 @@ impl DesktopApp {
                 .gap_4()
                 .text_color(colors.text)
                 .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
-                .child(assistant_body(message, window, cx))
+                .child(assistant_body(
+                    message,
+                    presentation,
+                    self.core.layout.content_max_width,
+                    window,
+                    cx,
+                ))
                 .children((!message.pending).then(|| {
                     div()
                         .flex()
@@ -227,7 +248,7 @@ impl DesktopApp {
                         .gap(px(10.0))
                         .child(
                             Clipboard::new(("copy-assistant", index))
-                                .value(message.render_text.clone()),
+                                .value(presentation.render_text.clone()),
                         )
                         .child(
                             Button::new(("good-response", index))
@@ -345,7 +366,7 @@ impl DesktopApp {
                                 .text_sm()
                                 .line_height(px(24.0))
                                 .text_color(colors.muted_text)
-                                .child(message.render_text.clone()),
+                                .child(presentation.render_text.clone()),
                         )
                     })
                     .into_any_element()
@@ -358,9 +379,23 @@ impl DesktopApp {
                 .text_sm()
                 .text_color(colors.muted_text)
                 .child(Icon::new(IconName::Info).size_4())
-                .child(message.render_text.clone())
+                .child(presentation.render_text.clone())
                 .into_any_element(),
-        }
+        };
+        let owner = cx.entity().downgrade();
+        let message_id = message.key;
+        div()
+            .relative()
+            .w_full()
+            .child(measured_container(
+                owner,
+                move |bounds, this: &mut DesktopApp, cx| {
+                    this.observe_message_bounds(message_id, bounds, cx)
+                },
+                |this: &mut DesktopApp, cx| this.apply_pending_chat_anchor(cx),
+            ))
+            .child(content)
+            .into_any_element()
     }
 
     fn tool_row(
@@ -474,15 +509,15 @@ impl DesktopApp {
                                         .label("Inspect")
                                         .ghost()
                                         .compact()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
-                                            this.inspect_tool(index, cx)
+                                            this.inspect_tool(index, window, cx)
                                         })),
                                 ),
                         )
                         .children(message.payload.clone().map(|payload| {
                             detail_code_block(
-                                SharedString::from(format!("tool-payload-{}", message.render_key)),
+                                SharedString::from(format!("tool-payload-{}", message.key)),
                                 "Payload",
                                 pretty_json(&payload),
                                 "json",
@@ -494,7 +529,7 @@ impl DesktopApp {
                         .child(detail_code_block(
                             SharedString::from(format!(
                                 "tool-result-{}-{}",
-                                message.render_key,
+                                message.key,
                                 if message.pending {
                                     "pending"
                                 } else {
@@ -520,26 +555,28 @@ impl DesktopApp {
     }
 }
 
-fn transcript_content_column() -> gpui::Div {
+fn transcript_content_column(content_max_width: f32) -> gpui::Div {
     div()
         .flex()
         .flex_col()
         .flex_none()
-        .w_full()
-        .max_w(px(metrics::CONTENT_WIDTH))
+        .w(px(content_max_width))
         .mx_auto()
 }
 
 fn assistant_body(
     message: &Message,
+    presentation: &MessagePresentation,
+    available_width: f32,
     window: &mut Window,
     cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
     dsh_markdown::render_markdown(
-        message.render_key,
-        &message.streaming_markdown,
+        message.key.0,
+        &presentation.markdown,
         message.pending,
-        &message.render_text,
+        &presentation.render_text,
+        available_width,
         window,
         cx,
     )
@@ -646,11 +683,13 @@ fn tool_icon(title: &str) -> IconName {
 #[cfg(test)]
 mod tests {
     use gpui::{
-        Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
+        AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
         StatefulInteractiveElement, Styled, TestAppContext, Window, div, px, size,
     };
 
     use super::transcript_content_column;
+    use crate::layout::{LayoutInput, resolve_layout};
+    use crate::platform::gpui::measured_container;
     use crate::ui_theme::metrics;
 
     #[gpui::test]
@@ -661,6 +700,12 @@ mod tests {
 
         impl Render for TranscriptHarness {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let layout = resolve_layout(LayoutInput {
+                    viewport_width: 320.0,
+                    viewport_height: 400.0,
+                    composer_height: 100.0,
+                    ..LayoutInput::default()
+                });
                 div()
                     .flex()
                     .flex_col()
@@ -682,9 +727,9 @@ mod tests {
                                     .min_h(px(0.0))
                                     .overflow_y_scroll()
                                     .track_scroll(&self.0)
-                                    .pb(px(metrics::CHAT_BOTTOM_CLEARANCE))
+                                    .pb(px(layout.tail_inset))
                                     .child(
-                                        transcript_content_column()
+                                        transcript_content_column(layout.content_max_width)
                                             .child(div().w_full().h(px(400.0))),
                                     ),
                             ),
@@ -698,7 +743,59 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
 
-        assert!(scroll.max_offset().height >= px(400.0));
+        let scrollport_height = 400.0 - 74.0 - 100.0;
+        let layout = resolve_layout(LayoutInput {
+            viewport_width: 320.0,
+            viewport_height: 400.0,
+            composer_height: 100.0,
+            ..LayoutInput::default()
+        });
+        let expected = 400.0 + layout.tail_inset - scrollport_height;
+        assert!(scroll.max_offset().height >= px(expected - 1.0));
+    }
+
+    #[gpui::test]
+    fn resolved_reading_width_is_definite_before_markdown_height_measurement(
+        cx: &mut TestAppContext,
+    ) {
+        struct ReadingColumnHarness {
+            measured_width: f32,
+        }
+
+        impl Render for ReadingColumnHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let owner = cx.entity().downgrade();
+                div()
+                    .size_full()
+                    .child(
+                        transcript_content_column(748.0)
+                            .relative()
+                            .child(measured_container(
+                                owner,
+                                |bounds, harness: &mut ReadingColumnHarness, _| {
+                                    let changed =
+                                        (harness.measured_width - bounds.width).abs() >= 0.5;
+                                    harness.measured_width = bounds.width;
+                                    changed
+                                },
+                                |_: &mut ReadingColumnHarness, _| {},
+                            )),
+                    )
+            }
+        }
+
+        let (view, cx) = cx.add_window_view(|_, _| ReadingColumnHarness {
+            measured_width: 0.0,
+        });
+        // The pure layout resolver owns responsive width. A temporarily stale, narrower
+        // platform parent must not turn the reading column back into an indefinite percentage,
+        // because Markdown would then measure height at the wrong width.
+        cx.simulate_resize(size(px(600.0), px(400.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let measured_width = cx.read_entity(&view, |harness, _| harness.measured_width);
+        assert!((measured_width - 748.0).abs() < 1.0);
     }
 
     #[test]
@@ -708,9 +805,10 @@ mod tests {
 
     #[test]
     fn assistant_text_column_matches_the_composer_inset() {
+        let layout = resolve_layout(LayoutInput::default());
         assert_eq!(
-            metrics::CONTENT_WIDTH + metrics::CHAT_SIDE_PADDING * 2.0,
-            metrics::COMPOSER_WIDTH
+            layout.content_max_width + layout.chat_side_padding * 2.0,
+            layout.composer_max_width
         );
     }
 }

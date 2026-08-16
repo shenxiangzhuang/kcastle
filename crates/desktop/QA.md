@@ -1,6 +1,6 @@
 # Desktop interaction QA
 
-Last exercised on macOS with the bundled release application and Computer Use.
+Last exercised on macOS on 2026-08-16 with the bundled release application and Computer Use.
 
 ## Verified flows
 
@@ -84,6 +84,14 @@ Last exercised on macOS with the bundled release application and Computer Use.
 - The Trajectory virtual list could escape its flex allocation and push the composer below the
   window even though the source tree placed it after the content pane. The trajectory root now
   owns overflow clipping and the composer remains visible in the release app.
+- Compact height mode accidentally gated the complete empty-state Hero and Composer on
+  `show_status_bar`, leaving the main pane blank after a resize to roughly 900×620. Empty-state
+  visibility is now projected explicitly: intro chrome may compact, while workspace and Composer
+  remain visible. A compact ViewModel regression test protects the behavior.
+- Ordered Markdown lists reserved a fixed 28px marker column, so three-digit markers wrapped and
+  appeared detached from their text during long streams. Marker width now grows with the largest
+  ordinal, stays on one line, and is right-aligned; a 400-item regression and release screenshot
+  verify `392.` through `400.` remain aligned.
 - Workspace folder/chevron states previously occupied two horizontal slots, and session titles
   competed with a variable-width age/action suffix. Both rows now use fixed optical slots; long
   titles show an explicit width-aware ellipsis and time swaps in place with the action button.

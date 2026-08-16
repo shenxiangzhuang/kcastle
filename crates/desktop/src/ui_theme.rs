@@ -58,11 +58,6 @@ pub(crate) struct TrajectoryPalette {
 pub(crate) mod metrics {
     pub(crate) const SIDEBAR_WIDTH: f32 = 280.0;
     pub(crate) const SIDEBAR_RAIL_WIDTH: f32 = 56.0;
-    pub(crate) const CONTENT_WIDTH: f32 = 748.0;
-    pub(crate) const COMPOSER_WIDTH: f32 = 780.0;
-    pub(crate) const CHAT_SIDE_PADDING: f32 = 16.0;
-    // Keep the terminal Markdown frontier and its action row scrollable above the docked composer.
-    pub(crate) const CHAT_BOTTOM_CLEARANCE: f32 = 256.0;
     pub(crate) const COMPOSER_RADIUS: f32 = 22.0;
     pub(crate) const WORKSPACE_ROW_HEIGHT: f32 = 34.0;
     pub(crate) const SESSION_ROW_HEIGHT: f32 = 32.0;
@@ -77,7 +72,6 @@ pub(crate) mod metrics {
     pub(crate) const MESSAGE_LINE_HEIGHT: f32 = 28.0;
     pub(crate) const MARKDOWN_BLOCK_GAP: f32 = 16.0;
     pub(crate) const MARKDOWN_SECTION_GAP: f32 = 32.0;
-    pub(crate) const RESPONSIVE_SIDEBAR_BREAKPOINT: f32 = 1024.0;
 }
 
 pub(crate) mod motion {

@@ -9,6 +9,7 @@ use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 use kcastle_agent::ReasoningEffort;
 
 use crate::app::DesktopApp;
+use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior};
 use crate::ui_theme::{UiPalette, palette};
 
@@ -31,10 +32,12 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.current_session.as_os_str().is_empty() || self.control.is_some() {
+        if self.core.session.current.as_os_str().is_empty() || self.control.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(self.title.clone()));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(self.core.conversation.title.clone())
+        });
         self.modal = Some(Modal::RenameSession(input.clone()));
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -45,7 +48,7 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.current_session.as_os_str().is_empty() || self.control.is_some() {
+        if self.core.session.current.as_os_str().is_empty() || self.control.is_some() {
             return;
         }
         self.modal = Some(Modal::DeleteSession);
@@ -67,16 +70,14 @@ impl DesktopApp {
     }
 
     pub(crate) fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_sidebar_options = false;
-        self.composer_menu = None;
+        self.dispatch(Action::CloseTransientOverlays, window, cx);
         self.modal = Some(Modal::Settings(SettingsTab::General));
         self.modal_focus.focus(window);
         cx.notify();
     }
 
     pub(crate) fn set_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
-        self.show_sidebar_options = false;
-        self.composer_menu = None;
+        self.dispatch_local(Action::CloseTransientOverlays, cx);
         self.modal = Some(Modal::Settings(tab));
         cx.notify();
     }
@@ -130,7 +131,10 @@ impl DesktopApp {
                 )
                 .into_any_element(),
             Some(Modal::DeleteSession) => modal_card("Delete session?", colors)
-                .child(format!("“{}” will be permanently deleted.", self.title))
+                .child(format!(
+                    "“{}” will be permanently deleted.",
+                    self.core.conversation.title
+                ))
                 .child(
                     div()
                         .text_sm()
@@ -243,7 +247,7 @@ impl DesktopApp {
                         .child(settings_row(
                             "Project",
                             "The working directory for new sessions.",
-                            display_path(&self.cwd),
+                            display_path(&self.core.workspace.cwd),
                             colors,
                         ))
                         .child(appearance_settings_row(self.settings.appearance(), cx))

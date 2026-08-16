@@ -32,6 +32,9 @@ in `~/.kcastle/settings.json`. The desktop shell includes workspace-grouped sess
 session search and ordering, a searchable trajectory view, expandable tool output, message copy
 actions, and native session-log export.
 
+Desktop state, responsive layout, streaming, scrolling, and test invariants are documented in
+[the Desktop UX architecture](crates/desktop/ARCHITECTURE.md).
+
 ## Get started
 
 Set one provider key and start K:
@@ -51,6 +54,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --workspace --release --locked
 ```
+
+The pure Desktop core also has scheduled mutation coverage. Run a focused local pass with
+`cargo mutants --package kcastle-desktop --re '<pattern>'` after installing `cargo-mutants`.
 
 ## License
 

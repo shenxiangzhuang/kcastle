@@ -9,15 +9,19 @@ use gpui_component::input::Input;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
-use crate::app::{ComposerMenu, DesktopApp, step_count};
+use crate::app::DesktopApp;
+use crate::application::{composer_status, empty_conversation_view_model};
+use crate::domain::{Action, ComposerMenu, RunState};
+use crate::platform::gpui::measured_container;
 use crate::ui_theme::{UiPalette, metrics, palette};
 
 impl DesktopApp {
     pub(crate) fn empty_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
+        let view = empty_conversation_view_model(&self.core);
         let workspace = self
             .project_store
-            .project(self.active_project)
+            .project(self.core.workspace.active_project)
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "Choose workspace".into());
         div()
@@ -35,48 +39,54 @@ impl DesktopApp {
                     .flex()
                     .flex_col()
                     .w_full()
-                    .max_w(px(metrics::COMPOSER_WIDTH))
+                    .max_w(px(self.core.layout.composer_max_width))
                     .gap_3()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap_2()
-                            .child(Icon::new(IconName::Bot).size_6())
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Into the Unknown"),
-                            )
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py(px(2.0))
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(colors.border)
-                                    .bg(colors.subtle)
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child("Preview"),
+                    .when(view.show_intro, |hero| {
+                        hero.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .child(Icon::new(IconName::Bot).size_6())
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .child("Into the Unknown"),
+                                )
+                                .child(
+                                    div()
+                                        .px_2()
+                                        .py(px(2.0))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(colors.border)
+                                        .bg(colors.subtle)
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("Preview"),
+                                ),
+                        )
+                    })
+                    .when(view.show_workspace, |hero| {
+                        hero.child(
+                            div().flex().items_center().gap_4().child(
+                                Button::new("hero-workspace")
+                                    .icon(IconName::FolderOpen)
+                                    .label(workspace)
+                                    .ghost()
+                                    .compact()
+                                    .tooltip("Choose workspace")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_composer_menu(ComposerMenu::Workspace, window, cx)
+                                    })),
                             ),
-                    )
-                    .child(
-                        div().flex().items_center().gap_4().child(
-                            Button::new("hero-workspace")
-                                .icon(IconName::FolderOpen)
-                                .label(workspace)
-                                .ghost()
-                                .compact()
-                                .tooltip("Choose workspace")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_composer_menu(ComposerMenu::Workspace, window, cx)
-                                })),
-                        ),
-                    )
-                    .child(self.composer_card(true, cx)),
+                        )
+                    })
+                    .when(view.show_composer, |hero| {
+                        hero.child(self.composer_card(true, cx))
+                    }),
             )
     }
 
@@ -94,26 +104,19 @@ impl DesktopApp {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(metrics::COMPOSER_WIDTH))
+                    .max_w(px(self.core.layout.composer_max_width))
                     .text_center()
                     .text_xs()
                     .truncate()
                     .text_color(colors.muted_text)
-                    .child(format!(
-                        "{} turns · {} steps   |   input {} · cached {} · output {} tokens",
-                        self.turns,
-                        step_count(&self.messages),
-                        compact_number(self.input_tokens),
-                        compact_number(self.cached_tokens),
-                        compact_number(self.output_tokens)
-                    )),
+                    .child(composer_status(&self.core)),
             )
     }
 
     fn composer_card(&self, hero: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let running = self.control.is_some();
-        let preparing = self.preparing_session;
+        let preparing = matches!(self.core.run, RunState::CreatingSession { .. });
         let empty = self.input.read(cx).value().trim().is_empty();
         let elapsed = self
             .started_at
@@ -124,16 +127,25 @@ impl DesktopApp {
             .reasoning_effort()
             .map(|effort| format!("{}  {}", self.model, effort_label(effort)))
             .unwrap_or_else(|| self.model.clone());
+        let measurement_owner = cx.entity().downgrade();
         div()
+            .relative()
             .flex()
             .flex_col()
             .w_full()
-            .max_w(px(metrics::COMPOSER_WIDTH))
+            .max_w(px(self.core.layout.composer_max_width))
             .rounded(px(metrics::COMPOSER_RADIUS))
             .border_1()
             .border_color(colors.border)
             .bg(colors.surface)
             .shadow_lg()
+            .child(measured_container(
+                measurement_owner,
+                |bounds, this: &mut DesktopApp, cx| {
+                    this.update_composer_measurement(bounds.height, cx)
+                },
+                |this: &mut DesktopApp, cx| this.restore_chat_tail_after_layout(cx),
+            ))
             .child(
                 div()
                     .capture_key_down(cx.listener(|this, event, window, cx| {
@@ -264,7 +276,7 @@ impl DesktopApp {
 
     pub(crate) fn composer_menu_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let colors = palette(cx);
-        let menu = self.composer_menu?;
+        let menu = self.core.composer.menu?;
         let body = match menu {
             ComposerMenu::Commands => div()
                 .flex()
@@ -275,10 +287,10 @@ impl DesktopApp {
                     IconName::ArrowDown,
                     "Export session",
                     "Save the current JSONL session log",
-                    self.composer_menu_highlight == 0,
+                    self.core.composer.highlighted_item == 0,
                     colors,
                     cx.listener(|this, _, window, cx| {
-                        this.composer_menu = None;
+                        this.dispatch(Action::SetComposerMenu(None), window, cx);
                         this.export_session_log(window, cx)
                     }),
                 ))
@@ -287,7 +299,7 @@ impl DesktopApp {
                     IconName::CircleCheck,
                     "Permission",
                     "Choose how tool calls are approved",
-                    self.composer_menu_highlight == 1,
+                    self.core.composer.highlighted_item == 1,
                     colors,
                     cx.listener(|this, _, _, cx| {
                         this.set_composer_menu(Some(ComposerMenu::Permission), cx)
@@ -298,7 +310,7 @@ impl DesktopApp {
                     IconName::Bot,
                     "Model",
                     "Choose model reasoning effort",
-                    self.composer_menu_highlight == 2,
+                    self.core.composer.highlighted_item == 2,
                     colors,
                     cx.listener(|this, _, _, cx| {
                         this.set_composer_menu(Some(ComposerMenu::Model), cx)
@@ -314,7 +326,7 @@ impl DesktopApp {
                     "Ask before tools",
                     "Show an approval card before every shell call",
                     !self.settings.allow_all_tools(),
-                    self.composer_menu_highlight == 0,
+                    self.core.composer.highlighted_item == 0,
                     colors,
                     cx.listener(|this, _, _, cx| this.set_allow_all_tools(false, cx)),
                 ))
@@ -323,7 +335,7 @@ impl DesktopApp {
                     "Allow all tools",
                     "Automatically approve tool calls in this app",
                     self.settings.allow_all_tools(),
-                    self.composer_menu_highlight == 1,
+                    self.core.composer.highlighted_item == 1,
                     colors,
                     cx.listener(|this, _, _, cx| this.set_allow_all_tools(true, cx)),
                 ))
@@ -344,7 +356,7 @@ impl DesktopApp {
                         &selected_model,
                         "Model",
                         false,
-                        self.composer_menu_highlight == 0,
+                        self.core.composer.highlighted_item == 0,
                         colors,
                         cx.listener(|this, _, _, cx| {
                             this.set_composer_menu(Some(ComposerMenu::Models), cx)
@@ -355,7 +367,7 @@ impl DesktopApp {
                         effort,
                         "Reasoning effort",
                         false,
-                        self.composer_menu_highlight == 1,
+                        self.core.composer.highlighted_item == 1,
                         colors,
                         cx.listener(|this, _, _, cx| {
                             this.set_composer_menu(Some(ComposerMenu::Effort), cx)
@@ -380,7 +392,7 @@ impl DesktopApp {
                             &label,
                             "Use for future responses",
                             selected,
-                            self.composer_menu_highlight == index,
+                            self.core.composer.highlighted_item == index,
                             colors,
                             cx.listener(move |this, _, _, cx| this.select_model(index, cx)),
                         )
@@ -408,11 +420,11 @@ impl DesktopApp {
                             &label,
                             "Use for future responses",
                             is_selected,
-                            self.composer_menu_highlight == index,
+                            self.core.composer.highlighted_item == index,
                             colors,
                             cx.listener(move |this, _, _, cx| {
                                 this.set_reasoning_effort(effort.clone(), cx);
-                                this.composer_menu = None;
+                                this.dispatch_local(Action::SetComposerMenu(None), cx);
                             }),
                         )
                     }))
@@ -425,7 +437,11 @@ impl DesktopApp {
                     .iter()
                     .enumerate()
                     .map(|(index, project)| {
-                        (index, project.name.clone(), index == self.active_project)
+                        (
+                            index,
+                            project.name.clone(),
+                            index == self.core.workspace.active_project,
+                        )
                     })
                     .collect::<Vec<_>>();
                 let mut project_items = Vec::new();
@@ -435,10 +451,10 @@ impl DesktopApp {
                         &name,
                         "Switch the active working directory",
                         selected,
-                        self.composer_menu_highlight == index,
+                        self.core.composer.highlighted_item == index,
                         colors,
                         cx.listener(move |this, _, window, cx| {
-                            this.composer_menu = None;
+                            this.dispatch(Action::SetComposerMenu(None), window, cx);
                             this.switch_project(index, window, cx)
                         }),
                     ));
@@ -453,10 +469,10 @@ impl DesktopApp {
                         IconName::Plus,
                         "Add workspace…",
                         "Choose another folder",
-                        self.composer_menu_highlight == self.project_store.projects().len(),
+                        self.core.composer.highlighted_item == self.project_store.projects().len(),
                         colors,
                         cx.listener(|this, _, window, cx| {
-                            this.composer_menu = None;
+                            this.dispatch(Action::SetComposerMenu(None), window, cx);
                             this.add_project(window, cx)
                         }),
                     ))
@@ -507,7 +523,7 @@ impl DesktopApp {
 
     pub(crate) fn approval_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let colors = palette(cx);
-        self.approval.as_ref().map(|approval| {
+        self.core.approval.as_ref().map(|approval| {
             let allow_id = approval.call_id.clone();
             let deny_id = approval.call_id.clone();
             div()
@@ -522,7 +538,7 @@ impl DesktopApp {
                         .justify_between()
                         .gap_4()
                         .w_full()
-                        .max_w(px(metrics::COMPOSER_WIDTH))
+                        .max_w(px(self.core.layout.composer_max_width))
                         .p_4()
                         .rounded_xl()
                         .border_1()
@@ -677,16 +693,6 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn compact_number(value: u32) -> String {
-    if value >= 1_000_000 {
-        format!("{:.1}M", value as f64 / 1_000_000.0)
-    } else if value >= 1_000 {
-        format!("{:.1}K", value as f64 / 1_000.0)
-    } else {
-        value.to_string()
-    }
-}
-
 fn effort_label(effort: &kcastle_agent::ReasoningEffort) -> &'static str {
     match effort {
         kcastle_agent::ReasoningEffort::None => "Off",
@@ -695,17 +701,5 @@ fn effort_label(effort: &kcastle_agent::ReasoningEffort) -> &'static str {
         kcastle_agent::ReasoningEffort::High => "High",
         kcastle_agent::ReasoningEffort::Xhigh => "XHigh",
         _ => "Other",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn token_counts_are_compact() {
-        assert_eq!(compact_number(984), "984");
-        assert_eq!(compact_number(12_400), "12.4K");
-        assert_eq!(compact_number(2_300_000), "2.3M");
     }
 }

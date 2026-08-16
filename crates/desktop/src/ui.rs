@@ -4,12 +4,15 @@ use gpui::{
 };
 
 use crate::app::DesktopApp;
+use crate::application::conversation_view_model;
+use crate::platform::gpui::measured_container;
 use crate::ui_theme::palette;
 
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let empty = self.messages.is_empty();
+        let empty = conversation_view_model(&self.core).empty;
         let colors = palette(cx);
+        let measurement_owner = cx.entity().downgrade();
         div()
             .flex()
             .size_full()
@@ -18,15 +21,14 @@ impl Render for DesktopApp {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if this.composer_menu.is_some() {
-                        this.composer_menu = None;
-                        cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    if this.core.composer.menu.is_some() {
+                        this.dispatch(crate::domain::Action::SetComposerMenu(None), window, cx);
                     }
-                    if this.show_sidebar_options || this.session_action_target.is_some() {
-                        this.show_sidebar_options = false;
-                        this.session_action_target = None;
-                        cx.notify();
+                    if this.core.sidebar.options_open
+                        || this.core.sidebar.session_action_target.is_some()
+                    {
+                        this.dispatch(crate::domain::Action::CloseTransientOverlays, window, cx);
                     }
                 }),
             )
@@ -35,11 +37,23 @@ impl Render for DesktopApp {
             .child(self.sidebar(window, cx))
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
                     .h_full()
                     .min_w(px(0.0))
+                    .child(measured_container(
+                        measurement_owner,
+                        |bounds, this: &mut DesktopApp, cx| {
+                            this.update_main_measurement(bounds.width, cx)
+                        },
+                        |this: &mut DesktopApp, cx| {
+                            if this.core.follow_chat_tail {
+                                this.restore_chat_tail_after_layout(cx);
+                            }
+                        },
+                    ))
                     .when(empty, |main| main.child(self.empty_conversation(cx)))
                     .when(!empty, |main| {
                         main.child(self.conversation_header(cx))

@@ -16,6 +16,7 @@ gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 gpui-component = "=0.5.1"
 gpui-component-assets = "=0.5.1"
 markdown = "=1.0.0"
+proptest = "=1.11.0"
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "layout-cache", "unstable-rendered-line-info"] }
 ratatui-core = { version = "=0.1.2", features = ["scrolling-regions"] }
 ratatui-crossterm = { version = "=0.1.2", features = ["scrolling-regions"] }

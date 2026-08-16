@@ -24,3 +24,4 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+proptest.workspace = true

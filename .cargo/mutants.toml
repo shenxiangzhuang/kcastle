@@ -1,0 +1,13 @@
+test_package = ["kcastle-desktop"]
+examine_globs = [
+  "crates/desktop/src/domain/**/*.rs",
+  "crates/desktop/src/layout/**/*.rs",
+  "crates/desktop/src/application/**/*.rs",
+  "crates/desktop/src/streaming_markdown.rs",
+]
+exclude_globs = [
+  "crates/desktop/src/architecture_tests.rs",
+]
+timeout_multiplier = 2.0
+minimum_test_timeout = 20.0
+cap_lints = true

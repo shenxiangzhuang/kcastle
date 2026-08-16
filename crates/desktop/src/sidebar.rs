@@ -10,14 +10,14 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Icon, IconName, Sizable};
 
 use crate::assets::DesktopIconName;
+use crate::domain::Action;
+use crate::layout::SidebarMode;
 use crate::ui_theme::{UiPalette, metrics, motion, palette};
 
 impl DesktopApp {
-    pub(crate) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn sidebar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = palette(cx);
-        if !self.show_sidebar
-            || window.viewport_size().width < px(metrics::RESPONSIVE_SIDEBAR_BREAKPOINT)
-        {
+        if self.core.layout.sidebar == SidebarMode::Rail {
             return self.sidebar_rail(cx).into_any_element();
         }
         let panel =
@@ -45,7 +45,12 @@ impl DesktopApp {
                 )
                 .child(self.workspace_header(cx))
                 .child(self.workspace_tree(cx))
-                .children(self.show_sidebar_options.then(|| self.sidebar_options(cx)))
+                .children(
+                    self.core
+                        .sidebar
+                        .options_open
+                        .then(|| self.sidebar_options(cx)),
+                )
                 .child(
                     div().flex_none().p_3().child(
                         Button::new("settings")
@@ -102,7 +107,9 @@ impl DesktopApp {
                             .icon(IconName::PanelLeftOpen)
                             .ghost()
                             .tooltip("Open sidebar")
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
+                            ),
                     ),
             )
             .child(
@@ -134,8 +141,10 @@ impl DesktopApp {
                             .ghost()
                             .tooltip("Search sessions")
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_sidebar = true;
-                                if !this.search_sessions {
+                                if !this.core.sidebar_requested {
+                                    this.dispatch(Action::ToggleSidebar, window, cx);
+                                }
+                                if !this.core.sidebar.search_sessions {
                                     this.toggle_session_search(window, cx);
                                 } else {
                                     cx.notify();
@@ -205,7 +214,7 @@ impl DesktopApp {
                     .ghost()
                     .compact()
                     .tooltip("Collapse sidebar")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
             )
     }
 
@@ -221,8 +230,10 @@ impl DesktopApp {
                 .px_1()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .when(!self.search_sessions, |row| row.child("Workspaces"))
-                .when(!self.search_sessions, |row| {
+                .when(!self.core.sidebar.search_sessions, |row| {
+                    row.child("Workspaces")
+                })
+                .when(!self.core.sidebar.search_sessions, |row| {
                     row.child(
                         div()
                             .flex()
@@ -230,14 +241,14 @@ impl DesktopApp {
                             .gap_1()
                             .child(
                                 Button::new("search-sessions")
-                                    .icon(if self.search_sessions {
+                                    .icon(if self.core.sidebar.search_sessions {
                                         IconName::Close
                                     } else {
                                         IconName::Search
                                     })
                                     .ghost()
                                     .compact()
-                                    .tooltip(if self.search_sessions {
+                                    .tooltip(if self.core.sidebar.search_sessions {
                                         "Close search"
                                     } else {
                                         "Search sessions"
@@ -268,7 +279,7 @@ impl DesktopApp {
                             ),
                     )
                 })
-                .when(self.search_sessions, |row| {
+                .when(self.core.sidebar.search_sessions, |row| {
                     row.child(
                         div()
                             .flex()
@@ -322,23 +333,19 @@ impl DesktopApp {
             .child(sidebar_option(
                 "group-by-workspace",
                 "By workspace",
-                self.group_sessions_by_workspace,
+                self.core.sidebar.group_by_workspace,
                 colors,
-                cx.listener(|this, _, _, cx| {
-                    this.group_sessions_by_workspace = true;
-                    this.show_sidebar_options = false;
-                    cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    this.dispatch(Action::SetSidebarGrouping(true), window, cx);
                 }),
             ))
             .child(sidebar_option(
                 "group-all-sessions",
                 "All sessions",
-                !self.group_sessions_by_workspace,
+                !self.core.sidebar.group_by_workspace,
                 colors,
-                cx.listener(|this, _, _, cx| {
-                    this.group_sessions_by_workspace = false;
-                    this.show_sidebar_options = false;
-                    cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    this.dispatch(Action::SetSidebarGrouping(false), window, cx);
                 }),
             ))
             .child(
@@ -356,23 +363,19 @@ impl DesktopApp {
             .child(sidebar_option(
                 "order-newest",
                 "Last updated",
-                self.sort_sessions_by_recent,
+                self.core.sidebar.sort_by_recent,
                 colors,
-                cx.listener(|this, _, _, cx| {
-                    this.sort_sessions_by_recent = true;
-                    this.show_sidebar_options = false;
-                    cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    this.dispatch(Action::SetSidebarSort(true), window, cx);
                 }),
             ))
             .child(sidebar_option(
                 "order-oldest",
                 "Oldest first",
-                !self.sort_sessions_by_recent,
+                !self.core.sidebar.sort_by_recent,
                 colors,
-                cx.listener(|this, _, _, cx| {
-                    this.sort_sessions_by_recent = false;
-                    this.show_sidebar_options = false;
-                    cx.notify();
+                cx.listener(|this, _, window, cx| {
+                    this.dispatch(Action::SetSidebarSort(false), window, cx);
                 }),
             ))
     }
@@ -380,7 +383,7 @@ impl DesktopApp {
     fn workspace_tree(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = palette(cx);
         let query = self.session_search.read(cx).value().trim().to_lowercase();
-        if !self.group_sessions_by_workspace {
+        if !self.core.sidebar.group_by_workspace {
             return self.flat_session_tree(&query, colors, cx);
         }
         div()
@@ -391,17 +394,22 @@ impl DesktopApp {
             .px_3()
             .overflow_y_scrollbar()
             .children(self.project_store.projects().iter().enumerate().map(|(index, project)| {
-                let active = index == self.active_project;
-                let expanded = self.expanded_projects.contains(&project.path) || !query.is_empty();
+                let active = index == self.core.workspace.active_project;
+                let expanded = self
+                    .core
+                    .workspace
+                    .expanded_projects
+                    .contains(&project.path)
+                    || !query.is_empty();
                 let mut sessions = if active {
-                    self.sessions.clone()
+                    self.core.session.sessions.clone()
                 } else if expanded {
                     kcastle_agent::Session::list(&project.sessions_dir).unwrap_or_default()
                 } else {
                     Vec::new()
                 };
                 sessions.sort_by_key(session_modified_at);
-                if self.sort_sessions_by_recent {
+                if self.core.sidebar.sort_by_recent {
                     sessions.reverse();
                 }
                 let project_name =
@@ -516,9 +524,12 @@ impl DesktopApp {
                             .children(sessions.into_iter().enumerate().filter_map(|(session_index, session)| {
                                 let path = session.path.clone();
                                 let keyboard_path = path.clone();
-                                let selected = active && same_path(&path, &self.current_session);
-                                let title = if selected && self.title != "New chat" {
-                                    self.title.clone()
+                                let selected =
+                                    active && same_path(&path, &self.core.session.current);
+                                let title = if selected
+                                    && self.core.conversation.title != "New chat"
+                                {
+                                    self.core.conversation.title.clone()
                                 } else if session.title == "Untitled session" {
                                     "New Session".into()
                                 } else {
@@ -539,6 +550,8 @@ impl DesktopApp {
                                 let group = SharedString::from(format!("session-{index}-{session_index}"));
                                 let action_path = path.clone();
                                 let action_open = self
+                                    .core
+                                    .sidebar
                                     .session_action_target
                                     .as_ref()
                                     .is_some_and(|target| same_path(target, &path));
@@ -550,13 +563,23 @@ impl DesktopApp {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         if this
+                                            .core
+                                            .sidebar
                                             .session_action_target
                                             .as_ref()
                                             .is_some_and(|target| same_path(target, &action_path))
                                         {
-                                            this.session_action_target = None;
+                                            this.dispatch(
+                                                Action::SetSessionActionTarget(None),
+                                                window,
+                                                cx,
+                                            );
                                         } else {
-                                            this.session_action_target = Some(action_path.clone());
+                                            this.dispatch(
+                                                Action::SetSessionActionTarget(Some(action_path.clone())),
+                                                window,
+                                                cx,
+                                            );
                                             if !selected {
                                                 this.open_project_session(index, action_path.clone(), window, cx);
                                             }
@@ -567,7 +590,11 @@ impl DesktopApp {
                                 Some(
                                     session_row(group.clone(), group.clone(), display_title, session_age(session_modified_at(&session)), selected, colors, Some(action))
                                         .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.session_action_target = None;
+                                            this.dispatch(
+                                                Action::SetSessionActionTarget(None),
+                                                window,
+                                                cx,
+                                            );
                                             this.open_project_session(index, path.clone(), window, cx)
                                         }))
                                         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
@@ -607,10 +634,10 @@ impl DesktopApp {
                     .map(move |session| (project_index, project.name.clone(), session))
             })
             .filter_map(|(project_index, project_name, session)| {
-                let selected = project_index == self.active_project
-                    && same_path(&session.path, &self.current_session);
-                let title = if selected && self.title != "New chat" {
-                    self.title.clone()
+                let selected = project_index == self.core.workspace.active_project
+                    && same_path(&session.path, &self.core.session.current);
+                let title = if selected && self.core.conversation.title != "New chat" {
+                    self.core.conversation.title.clone()
                 } else if session.title == "Untitled session" {
                     "New Session".into()
                 } else {
@@ -633,7 +660,7 @@ impl DesktopApp {
             })
             .collect::<Vec<_>>();
         sessions.sort_by_key(|(_, _, modified, _, _, _)| *modified);
-        if self.sort_sessions_by_recent {
+        if self.core.sidebar.sort_by_recent {
             sessions.reverse();
         }
         div()
@@ -648,6 +675,8 @@ impl DesktopApp {
                     let keyboard_path = path.clone();
                     let action_path = path.clone();
                     let action_open = self
+                        .core
+                        .sidebar
                         .session_action_target
                         .as_ref()
                         .is_some_and(|target| same_path(target, &path));
@@ -661,13 +690,19 @@ impl DesktopApp {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         if this
+                            .core
+                            .sidebar
                             .session_action_target
                             .as_ref()
                             .is_some_and(|target| same_path(target, &action_path))
                         {
-                            this.session_action_target = None;
+                            this.dispatch(Action::SetSessionActionTarget(None), window, cx);
                         } else {
-                            this.session_action_target = Some(action_path.clone());
+                            this.dispatch(
+                                Action::SetSessionActionTarget(Some(action_path.clone())),
+                                window,
+                                cx,
+                            );
                             if !selected {
                                 this.open_project_session(
                                     project_index,
@@ -690,7 +725,7 @@ impl DesktopApp {
                         Some(action),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.session_action_target = None;
+                        this.dispatch(Action::SetSessionActionTarget(None), window, cx);
                         this.open_project_session(project_index, path.clone(), window, cx)
                     }))
                     .on_key_down(cx.listener(
@@ -836,7 +871,7 @@ fn session_actions_popover(
                 .w_full()
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    this.session_action_target = None;
+                    this.dispatch(Action::SetSessionActionTarget(None), window, cx);
                     this.open_rename_session_dialog(window, cx)
                 })),
         )
@@ -849,7 +884,7 @@ fn session_actions_popover(
                 .w_full()
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
-                    this.session_action_target = None;
+                    this.dispatch(Action::SetSessionActionTarget(None), window, cx);
                     this.open_delete_session_dialog(window, cx)
                 })),
         )

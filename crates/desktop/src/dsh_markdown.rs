@@ -12,6 +12,7 @@ use gpui_component::text::{TextView, TextViewStyle};
 use markdown::mdast::Node;
 
 use crate::app::DesktopApp;
+use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
 use crate::ui_theme::{UiPalette, metrics, palette};
 
@@ -20,6 +21,7 @@ pub(crate) fn render_markdown(
     state: &StreamingMarkdownState,
     streaming: bool,
     fallback: &SharedString,
+    available_width: f32,
     window: &mut Window,
     cx: &mut Context<DesktopApp>,
 ) -> AnyElement {
@@ -65,6 +67,7 @@ pub(crate) fn render_markdown(
             block,
             streaming,
             colors,
+            available_width,
         };
         root = root.child(
             div()
@@ -85,6 +88,7 @@ struct BlockContext<'a> {
     block: &'a MarkdownBlock,
     streaming: bool,
     colors: UiPalette,
+    available_width: f32,
 }
 
 fn render_node(
@@ -208,7 +212,7 @@ fn render_list(
         } else {
             "•".to_owned()
         };
-        let marker_width = if list.ordered { 28.0 } else { 18.0 };
+        let marker_width = list_marker_width(list.ordered, start, list.children.len());
         let mut item_body = div().flex().flex_col().flex_1().min_w(px(0.0));
         for (child_index, child) in item.children.iter().enumerate() {
             let child_gap = if matches!(child, Node::List(_)) {
@@ -240,6 +244,9 @@ fn render_list(
                     div()
                         .flex_none()
                         .w(px(marker_width))
+                        .pr(px(8.0))
+                        .text_right()
+                        .whitespace_nowrap()
                         .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
                         .text_color(context.colors.muted_text)
                         .child(marker),
@@ -266,11 +273,22 @@ fn render_table(
         })
         .max()
         .unwrap_or(1);
+    let preferred = (context.available_width / columns as f32).clamp(120.0, 240.0);
+    let specs = vec![
+        ColumnSpec {
+            min: 100.0,
+            preferred,
+            max: Some(320.0),
+            weight: 1.0,
+        };
+        columns
+    ];
+    let table_layout = allocate_columns(context.available_width, &specs);
     let mut grid = div()
         .flex()
         .flex_col()
-        .w_full()
-        .min_w(px((columns as f32 * 120.0).min(748.0)));
+        .flex_none()
+        .w(px(table_layout.content_width));
     for (row_index, row) in table.children.iter().enumerate() {
         let Node::TableRow(row) = row else {
             continue;
@@ -288,11 +306,16 @@ fn render_table(
             let Node::TableCell(cell) = cell else {
                 continue;
             };
+            let width = table_layout
+                .tracks
+                .get(cell_index)
+                .copied()
+                .unwrap_or(100.0);
             row_view = row_view.child(
                 div()
-                    .flex_1()
-                    .min_w(px(100.0))
-                    .max_w(px(320.0))
+                    .flex_none()
+                    .w(px(width))
+                    .min_w(px(0.0))
                     .px_4()
                     .py(px(10.0))
                     .when(cell_index == 0, |element| element.pl(px(0.0)))

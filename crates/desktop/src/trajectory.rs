@@ -12,7 +12,9 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable, IconName, Sizable};
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
 
-use crate::app::{DesktopApp, DetailsTab, Message, Role};
+use crate::app::DesktopApp;
+use crate::domain::{Action, DetailsTab, Message, Role};
+use crate::layout::TrajectoryMode;
 use crate::ui_theme::{TrajectoryPalette, metrics, trajectory_palette};
 
 #[derive(Clone, Debug)]
@@ -42,10 +44,14 @@ impl DesktopApp {
             .trim()
             .to_lowercase();
         let rows = self.ledger_rows(&query);
-        let selected = self
-            .selected_trajectory
-            .and_then(|index| self.messages.get(index).map(|_| index));
-        let narrow_details = window.viewport_size().width < px(1_020.0);
+        let selected = self.core.details.selected.and_then(|selected| {
+            self.core
+                .conversation
+                .messages
+                .iter()
+                .position(|message| message.key == selected)
+        });
+        let narrow_details = self.core.layout.trajectory == TrajectoryMode::Overlay;
         div()
             .flex()
             .flex_col()
@@ -130,12 +136,16 @@ impl DesktopApp {
             .trim()
             .to_lowercase();
         let match_count = (!query.is_empty()).then(|| {
-            self.messages
+            self.core
+                .conversation
+                .messages
                 .iter()
                 .filter(|message| message_matches(message, &query))
                 .count()
         });
         let has_timing = self
+            .core
+            .conversation
             .messages
             .iter()
             .any(|message| message.duration_ms.is_some());
@@ -165,14 +175,13 @@ impl DesktopApp {
                             } else {
                                 "Recorded timing is unavailable in this JSONL session"
                             })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.trajectory_duration = !this.trajectory_duration;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dispatch(Action::ToggleTrajectoryDuration, window, cx);
                             })),
                     )
                     .child(
                         Button::new("trajectory-turns")
-                            .icon(if self.trajectory_collapsed_turns {
+                            .icon(if self.core.trajectory.collapsed_turns {
                                 IconName::Plus
                             } else {
                                 IconName::Minus
@@ -181,19 +190,18 @@ impl DesktopApp {
                             .ghost()
                             .compact()
                             .text_color(colors.label_tertiary)
-                            .tooltip(if self.trajectory_collapsed_turns {
+                            .tooltip(if self.core.trajectory.collapsed_turns {
                                 "Expand turns"
                             } else {
                                 "Collapse turns"
                             })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.trajectory_collapsed_turns = !this.trajectory_collapsed_turns;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dispatch(Action::ToggleTrajectoryTurns, window, cx);
                             })),
                     )
                     .child(
                         Button::new("trajectory-calls")
-                            .icon(if self.trajectory_collapsed_calls {
+                            .icon(if self.core.trajectory.collapsed_calls {
                                 IconName::Plus
                             } else {
                                 IconName::Minus
@@ -202,14 +210,13 @@ impl DesktopApp {
                             .ghost()
                             .compact()
                             .text_color(colors.label_tertiary)
-                            .tooltip(if self.trajectory_collapsed_calls {
+                            .tooltip(if self.core.trajectory.collapsed_calls {
                                 "Expand calls"
                             } else {
                                 "Collapse calls"
                             })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.trajectory_collapsed_calls = !this.trajectory_collapsed_calls;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dispatch(Action::ToggleTrajectoryCalls, window, cx);
                             })),
                     ),
             )
@@ -270,9 +277,14 @@ impl DesktopApp {
     }
 
     fn overview_model_lane(&self, query: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let geometry = timeline_geometry(&self.messages, self.trajectory_duration);
+        let geometry = timeline_geometry(
+            &self.core.conversation.messages,
+            self.core.trajectory.show_duration,
+        );
         div().relative().h(px(8.0)).children(
-            self.messages
+            self.core
+                .conversation
+                .messages
                 .iter()
                 .enumerate()
                 .filter(|(_, message)| matches!(message.role, Role::Reasoning | Role::Assistant))
@@ -283,9 +295,14 @@ impl DesktopApp {
     }
 
     fn overview_lane(&self, role: Role, query: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let geometry = timeline_geometry(&self.messages, self.trajectory_duration);
+        let geometry = timeline_geometry(
+            &self.core.conversation.messages,
+            self.core.trajectory.show_duration,
+        );
         div().relative().h(px(8.0)).children(
-            self.messages
+            self.core
+                .conversation
+                .messages
                 .iter()
                 .enumerate()
                 .filter(move |(_, message)| message.role == role)
@@ -304,7 +321,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
-        let selected = self.selected_trajectory == Some(index);
+        let selected = self.core.details.selected == Some(message.key);
         let matched = query.is_empty() || message_matches(message, query);
         let (position, width) = geometry;
         let tooltip = format!("{}\n{}", role_label(message.role), timing_text(message));
@@ -331,18 +348,22 @@ impl DesktopApp {
             })
             .cursor_pointer()
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            .on_click(cx.listener(move |this, _, _, cx| this.select_trajectory(index, cx)))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.select_trajectory(index, window, cx)),
+            )
             .into_any_element()
     }
 
     fn ledger_rows(&self, query: &str) -> Vec<LedgerRow> {
-        if self.trajectory_collapsed_turns {
+        if self.core.trajectory.collapsed_turns {
             return self.collapsed_turn_rows(query);
         }
-        if self.trajectory_collapsed_calls {
+        if self.core.trajectory.collapsed_calls {
             return self.collapsed_call_rows(query);
         }
-        self.messages
+        self.core
+            .conversation
+            .messages
             .iter()
             .enumerate()
             .filter_map(|(index, message)| {
@@ -361,8 +382,8 @@ impl DesktopApp {
         let mut rows = Vec::new();
         let mut turn = 0;
         let mut index = 0;
-        while index < self.messages.len() {
-            let message = &self.messages[index];
+        while index < self.core.conversation.messages.len() {
+            let message = &self.core.conversation.messages[index];
             if message.role != Role::User {
                 if turn == 0 && (query.is_empty() || message_matches(message, query)) {
                     rows.push(LedgerRow::Message {
@@ -377,10 +398,12 @@ impl DesktopApp {
             turn += 1;
             let start = index;
             index += 1;
-            while index < self.messages.len() && self.messages[index].role != Role::User {
+            while index < self.core.conversation.messages.len()
+                && self.core.conversation.messages[index].role != Role::User
+            {
                 index += 1;
             }
-            let body = &self.messages[start + 1..index];
+            let body = &self.core.conversation.messages[start + 1..index];
             let steps = body
                 .iter()
                 .map(|message| message.step)
@@ -392,7 +415,7 @@ impl DesktopApp {
                 .filter(|message| message.role == Role::Tool)
                 .count();
             let matches = query.is_empty()
-                || self.messages[start..index]
+                || self.core.conversation.messages[start..index]
                     .iter()
                     .any(|message| message_matches(message, query));
             if matches {
@@ -419,11 +442,11 @@ impl DesktopApp {
         let mut rows = Vec::new();
         let mut calls = 0;
         let mut summary_key = 0;
-        for (index, message) in self.messages.iter().enumerate() {
+        for (index, message) in self.core.conversation.messages.iter().enumerate() {
             if calls > 0 && matches!(message.role, Role::User | Role::Reasoning | Role::Assistant) {
                 rows.push(call_summary(
                     summary_key,
-                    self.messages[summary_key].turn,
+                    self.core.conversation.messages[summary_key].turn,
                     calls,
                 ));
                 calls = 0;
@@ -443,6 +466,8 @@ impl DesktopApp {
         }
         if calls > 0 {
             let turn = self
+                .core
+                .conversation
                 .messages
                 .last()
                 .map(|message| message.turn)
@@ -466,8 +491,8 @@ impl DesktopApp {
         match row {
             LedgerRow::Message { index, turn, step } => {
                 let index = *index;
-                let message = &self.messages[index];
-                let selected = self.selected_trajectory == Some(index);
+                let message = &self.core.conversation.messages[index];
+                let selected = self.core.details.selected == Some(message.key);
                 div()
                     .id(("trajectory-row", index))
                     .flex()
@@ -480,12 +505,16 @@ impl DesktopApp {
                     .hover(move |item| item.bg(colors.hover))
                     .cursor_pointer()
                     .tab_index(0)
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_trajectory(index, cx)))
-                    .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                            this.select_trajectory(index, cx);
-                        }
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_trajectory(index, window, cx)
                     }))
+                    .on_key_down(cx.listener(
+                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                this.select_trajectory(index, window, cx);
+                            }
+                        },
+                    ))
                     .child(turn_marker(*turn, *step, message.role, colors))
                     .child(role_chip(message.role, colors))
                     .children(message.title.clone().map(|title| {
@@ -524,22 +553,12 @@ impl DesktopApp {
                 .cursor_pointer()
                 .tab_index(0)
                 .hover(move |item| item.bg(colors.hover))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if this.trajectory_collapsed_turns {
-                        this.trajectory_collapsed_turns = false;
-                    } else {
-                        this.trajectory_collapsed_calls = false;
-                    }
-                    cx.notify();
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.dispatch(Action::ExpandTrajectoryGroups, window, cx);
                 }))
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        if this.trajectory_collapsed_turns {
-                            this.trajectory_collapsed_turns = false;
-                        } else {
-                            this.trajectory_collapsed_calls = false;
-                        }
-                        cx.notify();
+                        this.dispatch(Action::ExpandTrajectoryGroups, window, cx);
                     }
                 }))
                 .child(turn_marker(*turn, 0, Role::Notice, colors))
@@ -561,7 +580,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
-        let message = &self.messages[index];
+        let message = &self.core.conversation.messages[index];
         let tabs = detail_tabs(message).iter().copied().fold(
             div()
                 .flex()
@@ -569,7 +588,7 @@ impl DesktopApp {
                 .overflow_hidden()
                 .border_b_1()
                 .border_color(colors.border_l2),
-            |tabs, tab| tabs.child(details_tab(tab, self.details_tab == tab, colors, cx)),
+            |tabs, tab| tabs.child(details_tab(tab, self.core.details.tab == tab, colors, cx)),
         );
         div()
             .flex()
@@ -609,9 +628,8 @@ impl DesktopApp {
                             .compact()
                             .text_color(colors.label_secondary)
                             .tooltip("Close details")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.selected_trajectory = None;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.dispatch(Action::SelectDetails(None), window, cx);
                             })),
                     ),
             )
@@ -639,7 +657,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
-        match self.details_tab {
+        match self.core.details.tab {
             DetailsTab::Summary => match message.role {
                 Role::Tool => div()
                     .flex()
@@ -764,11 +782,14 @@ impl DesktopApp {
         }
     }
 
-    fn select_trajectory(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.selected_trajectory = Some(index);
-        self.details_tab = DetailsTab::Summary;
-        self.trajectory_collapsed_turns = false;
-        self.trajectory_collapsed_calls = false;
+    fn select_trajectory(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.dispatch(
+            Action::SelectDetails(Some(self.core.conversation.messages[index].key)),
+            window,
+            cx,
+        );
+        self.dispatch_local(Action::SetDetailsTab(DetailsTab::Summary), cx);
+        self.dispatch_local(Action::ExpandTrajectoryGroups, cx);
         self.details_scroll
             .set_offset(gpui::point(px(0.0), px(0.0)));
         self.scroll_trajectory_to_record(index, cx);
@@ -776,7 +797,7 @@ impl DesktopApp {
     }
 
     fn open_details_tab(&mut self, tab: DetailsTab, cx: &mut Context<Self>) {
-        self.details_tab = tab;
+        self.dispatch_local(Action::SetDetailsTab(tab), cx);
         self.details_scroll
             .set_offset(gpui::point(px(0.0), px(0.0)));
         cx.notify();
@@ -1197,12 +1218,8 @@ fn details_linked_section(
 fn detail_content_id(prefix: &str, message: &Message) -> SharedString {
     SharedString::from(format!(
         "{prefix}-{}-{}",
-        message.render_key,
-        if message.pending {
-            message.streaming_markdown.revision()
-        } else {
-            0
-        }
+        message.key,
+        if message.pending { message.revision } else { 0 }
     ))
 }
 
@@ -1432,12 +1449,12 @@ mod tests {
 
     fn record(role: Role, text: &str) -> Message {
         Message {
-            render_key: crate::app::next_message_render_key(),
+            key: crate::app::next_message_render_key(),
+            revision: 0,
             role,
-            id: None,
+            tool_call_id: None,
             title: None,
             text: text.into(),
-            render_text: text.to_owned().into(),
             payload: None,
             schema: None,
             pending: false,
@@ -1450,7 +1467,6 @@ mod tests {
             step: 0,
             request_id: None,
             search_text: text.to_lowercase(),
-            streaming_markdown: Default::default(),
         }
     }
 
@@ -1461,7 +1477,7 @@ mod tests {
         tool.title = Some("shell".into());
         tool.payload = Some(r#"{"command":"cargo test"}"#.into());
         let mut messages = vec![user, record(Role::Assistant, "running checks"), tool];
-        crate::app::reindex_messages(&mut messages);
+        crate::domain::reindex_messages(&mut messages);
 
         assert!(message_matches(&messages[2], "cargo test"));
         assert!(message_summary(&messages[2]).contains("exit_code=0"));
