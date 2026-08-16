@@ -7,6 +7,9 @@ pub(crate) struct NativeTitlebarController {
 
 impl NativeTitlebarController {
     pub(crate) fn install(window: &Window) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        let _ = window;
+
         Self {
             #[cfg(target_os = "macos")]
             inner: {
