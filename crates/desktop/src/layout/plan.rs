@@ -8,8 +8,7 @@ const PANE_GUTTER: f32 = 1.0;
 const CONTENT_MAX_WIDTH_REM: f32 = 46.75;
 const COMPOSER_MAX_WIDTH_REM: f32 = 48.75;
 const CHAT_SIDE_PADDING_REM: f32 = 1.0;
-const STATUS_BAR_HEIGHT_REM: f32 = 1.75;
-const TAIL_COMFORT_GAP_REM: f32 = 1.0;
+const TRANSCRIPT_TOP_INSET_REM: f32 = 1.0;
 const COMPACT_HEIGHT: f32 = 680.0;
 const SPACIOUS_HEIGHT: f32 = 920.0;
 
@@ -73,6 +72,7 @@ pub(crate) struct LayoutPlan {
     pub(crate) content_max_width: f32,
     pub(crate) composer_max_width: f32,
     pub(crate) chat_side_padding: f32,
+    pub(crate) transcript_top_inset: f32,
     pub(crate) tail_inset: f32,
 }
 
@@ -128,8 +128,6 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         preferred_padding_rem: CHAT_SIDE_PADDING_REM,
     });
     let chat_side_padding = reading.inline_padding;
-    let composer_height = finite_non_negative(input.composer_height);
-    let safe_area_bottom = finite_non_negative(input.safe_area_bottom);
     let height = if viewport_height < COMPACT_HEIGHT {
         HeightMode::Compact
     } else if viewport_height >= SPACIOUS_HEIGHT {
@@ -138,12 +136,6 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         HeightMode::Regular
     };
     let show_status_bar = height != HeightMode::Compact;
-    let status_height = if show_status_bar {
-        STATUS_BAR_HEIGHT_REM * rem
-    } else {
-        0.0
-    };
-
     LayoutPlan {
         sidebar,
         sidebar_width,
@@ -154,7 +146,8 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         content_max_width: reading.content_width,
         composer_max_width: composer.content_width,
         chat_side_padding,
-        tail_inset: composer_height + safe_area_bottom + status_height + TAIL_COMFORT_GAP_REM * rem,
+        transcript_top_inset: TRANSCRIPT_TOP_INSET_REM * rem,
+        tail_inset: 0.0,
     }
 }
 
@@ -205,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_inset_is_derived_from_measured_composer_height() {
+    fn docked_composer_does_not_require_a_transcript_tail_inset() {
         let one_line = resolve_layout(LayoutInput {
             composer_height: 88.0,
             ..LayoutInput::default()
@@ -214,7 +207,8 @@ mod tests {
             composer_height: 360.0,
             ..LayoutInput::default()
         });
-        assert_eq!(fourteen_lines.tail_inset - one_line.tail_inset, 272.0);
+        assert_eq!(one_line.tail_inset, 0.0);
+        assert_eq!(fourteen_lines.tail_inset, one_line.tail_inset);
     }
 
     #[test]
@@ -230,7 +224,7 @@ mod tests {
         assert_eq!(compact.height, HeightMode::Compact);
         assert!(!compact.show_status_bar);
         assert!(regular.show_status_bar);
-        assert!(regular.tail_inset > compact.tail_inset);
+        assert_eq!(regular.tail_inset, compact.tail_inset);
     }
 
     #[test]
@@ -246,6 +240,7 @@ mod tests {
             plan.main_width,
             plan.content_max_width,
             plan.composer_max_width,
+            plan.transcript_top_inset,
             plan.tail_inset,
         ] {
             assert!(value.is_finite());
@@ -283,6 +278,7 @@ mod tests {
                 plan.content_max_width,
                 plan.composer_max_width,
                 plan.chat_side_padding,
+                plan.transcript_top_inset,
                 plan.tail_inset,
             ] {
                 prop_assert!(value.is_finite());

@@ -9,7 +9,17 @@ impl NativeTitlebarController {
     pub(crate) fn install(window: &Window) -> Self {
         Self {
             #[cfg(target_os = "macos")]
-            inner: macos::MacTitlebarController::install(window),
+            inner: {
+                #[cfg(test)]
+                {
+                    let _ = window;
+                    None
+                }
+                #[cfg(not(test))]
+                {
+                    macos::MacTitlebarController::install(window)
+                }
+            },
         }
     }
 
@@ -25,6 +35,7 @@ impl NativeTitlebarController {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg_attr(test, allow(dead_code))]
 mod macos {
     use std::ptr::NonNull;
     use std::sync::{Arc, Mutex, MutexGuard};

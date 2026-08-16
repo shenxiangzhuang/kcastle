@@ -145,7 +145,7 @@ impl DesktopApp {
                         },
                     ))
                     .px(px(self.core.layout.chat_side_padding))
-                    .pt_4()
+                    .pt(px(self.core.layout.transcript_top_inset))
                     .pb(px(self.core.layout.tail_inset))
                     .child(measured_container(
                         transcript_owner,
@@ -737,7 +737,7 @@ mod tests {
     use crate::ui_theme::metrics;
 
     #[gpui::test]
-    fn transcript_reserves_scrollable_space_above_the_composer(cx: &mut TestAppContext) {
+    fn transcript_scroll_range_covers_its_content(cx: &mut TestAppContext) {
         let scroll = ScrollHandle::new();
 
         struct TranscriptHarness(ScrollHandle);

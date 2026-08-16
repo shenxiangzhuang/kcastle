@@ -199,7 +199,7 @@ impl DesktopApp {
                 }
                 InputEvent::Change => {
                     if this.core.follow_chat_tail {
-                        this.scroll.scroll_to_bottom();
+                        this.apply_chat_tail();
                     }
                     cx.notify();
                 }
@@ -309,7 +309,7 @@ impl DesktopApp {
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
         for effect in self.transition(action) {
             match effect {
-                Effect::ApplyChatTail => self.scroll.scroll_to_bottom(),
+                Effect::ApplyChatTail => self.apply_chat_tail(),
                 effect => panic!("async effect {effect:?} requires a Window dispatch"),
             }
         }
@@ -370,7 +370,7 @@ impl DesktopApp {
 
     pub(crate) fn restore_chat_tail_after_layout(&mut self, cx: &mut Context<Self>) {
         if self.core.follow_chat_tail {
-            self.scroll.scroll_to_bottom();
+            self.apply_chat_tail();
             cx.notify();
         }
     }
@@ -427,7 +427,7 @@ impl DesktopApp {
         };
         match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
             ScrollRestore::Tail => {
-                self.scroll.scroll_to_bottom();
+                self.apply_chat_tail();
                 self.layout_runtime.pending_chat_anchor = None;
             }
             ScrollRestore::Message { .. } => {
@@ -1710,6 +1710,21 @@ impl DesktopApp {
         within_bottom_threshold(self.scroll.max_offset().height, self.scroll.offset().y)
     }
 
+    pub(crate) fn apply_chat_tail(&mut self) {
+        let max_offset = self.scroll.max_offset().height;
+        let leading_inset = px(self.core.layout.transcript_top_inset);
+        if max_offset <= leading_inset + px(0.5) {
+            let offset = self.scroll.offset();
+            self.scroll.set_offset(point(offset.x, px(0.0)));
+            // The transcript content column follows the measurement sentinel.
+            // Keeping it active preserves the inset through the next reflow, while
+            // still aligning its bottom once the conversation outgrows the viewport.
+            self.scroll.scroll_to_item(1);
+        } else {
+            self.scroll.scroll_to_bottom();
+        }
+    }
+
     pub(crate) fn handle_chat_scroll(
         &mut self,
         event: &ScrollWheelEvent,
@@ -1748,7 +1763,7 @@ impl DesktopApp {
             sessions,
         });
         self.sync_message_presentations();
-        self.scroll.scroll_to_bottom();
+        self.apply_chat_tail();
     }
 
     fn activate_session_for_run(&mut self, session: Session, previous_key: String) {
@@ -1765,7 +1780,7 @@ impl DesktopApp {
         let _ = self.transition(Action::ResetConversation);
         self.message_presentations.clear();
         self.modal = None;
-        self.scroll.scroll_to_bottom();
+        self.apply_chat_tail();
     }
 }
 
@@ -2236,6 +2251,110 @@ mod tests {
         let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
 
         window.update(|window, _| arm_next_frame(window, ready_tx));
+    }
+
+    #[gpui::test]
+    fn first_submitted_user_keeps_leading_gap_after_empty_state_reflow(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-first-turn-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), workspace.clone()).unwrap();
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let test_view = view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                DesktopApp::new(
+                    DesktopStartup {
+                        agent,
+                        models: vec![configured],
+                        selected_model: 0,
+                        project_store,
+                        active_project,
+                        settings,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            test_view.replace(Some(view.clone()));
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = view.borrow().clone().unwrap();
+        cx.simulate_resize(gpui::size(px(1180.0), px(720.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.dispatch(
+                    Action::Conversation(ConversationAction::SubmitUser(message(
+                        Role::User,
+                        "hello".into(),
+                    ))),
+                    window,
+                    cx,
+                );
+                this.sync_message_presentations();
+                this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let (offset, max_offset, viewport, content) = cx.read_entity(&view, |app, _| {
+            (
+                app.scroll.offset(),
+                app.scroll.max_offset(),
+                app.scroll.bounds(),
+                app.scroll.bounds_for_item(1).unwrap(),
+            )
+        });
+        assert!(
+            content.top() + offset.y >= viewport.top() + px(16.0)
+                && content.bottom() + offset.y <= viewport.bottom(),
+            "first user did not keep its leading gap: offset={offset:?}, max={max_offset:?}, viewport={viewport:?}, content={content:?}"
+        );
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.dispatch(
+                    Action::Conversation(ConversationAction::SubmitUser(message(
+                        Role::User,
+                        "overflow ".repeat(800),
+                    ))),
+                    window,
+                    cx,
+                );
+                this.sync_message_presentations();
+                this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let (offset, max_offset) = cx.read_entity(&view, |app, _| {
+            (app.scroll.offset(), app.scroll.max_offset())
+        });
+        assert!(
+            f32::from(max_offset.height + offset.y).abs() <= 1.0,
+            "overflowing conversation did not follow the tail: offset={offset:?}, max={max_offset:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
