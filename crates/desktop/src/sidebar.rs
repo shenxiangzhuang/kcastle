@@ -1,7 +1,8 @@
 use crate::app::{DesktopApp, same_path, session_age};
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, deferred, div,
+    prelude::FluentBuilder, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
@@ -788,45 +789,57 @@ fn session_actions_popover(
     colors: UiPalette,
     cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
-    div()
-        .absolute()
-        .top(px(metrics::SESSION_ROW_HEIGHT - 2.0))
-        .right_0()
-        .w(px(156.0))
-        .p_1()
-        .rounded_lg()
-        .border_1()
-        .border_color(colors.border)
-        .bg(colors.surface)
-        .shadow_lg()
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
-            Button::new(SharedString::from(format!("rename-session-{key}")))
-                .icon(IconName::ALargeSmall)
-                .label("Rename")
-                .ghost()
-                .w_full()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.dispatch(Action::SetSessionActionTarget(None), window, cx);
-                    this.open_rename_session_dialog(window, cx)
-                })),
-        )
-        .child(
-            Button::new(SharedString::from(format!("delete-session-{key}")))
-                .icon(IconName::Delete)
-                .label("Delete")
-                .ghost()
-                .danger()
-                .w_full()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.dispatch(Action::SetSessionActionTarget(None), window, cx);
-                    this.open_delete_session_dialog(window, cx)
-                })),
-        )
-        .into_any_element()
+    deferred(
+        div()
+            .absolute()
+            .top_0()
+            .left(relative(1.0))
+            .ml_2()
+            .w(px(184.0))
+            .p_1()
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.sidebar)
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                Button::new(SharedString::from(format!("rename-session-{key}")))
+                    .label("Rename")
+                    .ghost()
+                    .w_full()
+                    .h(px(metrics::WORKSPACE_ROW_HEIGHT))
+                    .px_2()
+                    .rounded(px(8.0))
+                    .justify_start()
+                    .text_sm()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.dispatch(Action::SetSessionActionTarget(None), window, cx);
+                        this.open_rename_session_dialog(window, cx)
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("delete-session-{key}")))
+                    .label("Delete")
+                    .ghost()
+                    .w_full()
+                    .h(px(metrics::WORKSPACE_ROW_HEIGHT))
+                    .px_2()
+                    .rounded(px(8.0))
+                    .justify_start()
+                    .text_sm()
+                    .text_color(colors.danger)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.dispatch(Action::SetSessionActionTarget(None), window, cx);
+                        this.open_delete_session_dialog(window, cx)
+                    })),
+            ),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 fn sidebar_label(value: &str, max_units: usize) -> String {
