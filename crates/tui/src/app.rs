@@ -258,7 +258,7 @@ impl App {
                     Line::from(vec![
                         Span::styled(">_  ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
-                            "K CASTLE ",
+                            "kcastle ",
                             Style::default()
                                 .fg(Color::White)
                                 .add_modifier(Modifier::BOLD),
@@ -414,10 +414,31 @@ impl App {
         match event {
             AgentEvent::RunStarted(_) => {}
             AgentEvent::ModelStarted(_) => {}
+            AgentEvent::ReasoningDelta(delta) => {
+                if let Some(Entry::Assistant { text, .. }) = self
+                    .streaming_entry
+                    .and_then(|index| self.entries.get_mut(index))
+                    .filter(|entry| {
+                        matches!(entry, Entry::Assistant { text, .. } if text.starts_with("Think · "))
+                    })
+                {
+                    text.push_str(&delta);
+                } else {
+                    self.active_tool_row = None;
+                    self.entries.push(Entry::Assistant {
+                        text: format!("Think · {delta}"),
+                        committed_lines: 0,
+                    });
+                    self.streaming_entry = Some(self.entries.len() - 1);
+                }
+            }
             AgentEvent::TextDelta(delta) => {
                 if let Some(Entry::Assistant { text, .. }) = self
                     .streaming_entry
                     .and_then(|index| self.entries.get_mut(index))
+                    .filter(|entry| {
+                        matches!(entry, Entry::Assistant { text, .. } if !text.starts_with("Think · "))
+                    })
                 {
                     text.push_str(&delta);
                 } else {
@@ -554,6 +575,13 @@ impl App {
                 TranscriptItem::User(text) => {
                     tool_row = None;
                     self.entries.push(Entry::User(text));
+                }
+                TranscriptItem::Reasoning(text) => {
+                    tool_row = None;
+                    self.entries.push(Entry::Assistant {
+                        text: format!("Think · {text}"),
+                        committed_lines: 0,
+                    });
                 }
                 TranscriptItem::Assistant(text) => {
                     if !text.is_empty() {
@@ -1640,7 +1668,7 @@ fn precise_percentage(part: usize, total: usize) -> f64 {
 fn new_textarea() -> TextArea<'static> {
     let mut input = TextArea::default();
     input.set_cursor_line_style(Style::default());
-    input.set_placeholder_text("Message K…  / for commands");
+    input.set_placeholder_text("Message kcastle…  / for commands");
     input.set_wrap_mode(WrapMode::WordOrGlyph);
     input
 }
@@ -1770,7 +1798,7 @@ fn command_items(running: bool) -> Vec<CommandItem> {
         },
         CommandItem {
             command: "/exit".into(),
-            description: "Exit K".into(),
+            description: "Exit kcastle".into(),
             prefill: false,
         },
     ];
@@ -2797,6 +2825,22 @@ mod tests {
         ));
         app.show_tools();
         assert!(matches!(app.modal, Some(Modal::Tools { .. })));
+    }
+
+    #[test]
+    fn reasoning_stream_does_not_merge_the_final_answer() {
+        let mut app = app();
+        app.apply_event(AgentEvent::ReasoningDelta("inspect ".into()));
+        app.apply_event(AgentEvent::ReasoningDelta("workspace".into()));
+        app.apply_event(AgentEvent::TextDelta("done".into()));
+
+        assert!(matches!(
+            app.entries.as_slice(),
+            [
+                Entry::Assistant { text: reasoning, .. },
+                Entry::Assistant { text: answer, .. }
+            ] if reasoning == "Think · inspect workspace" && answer == "done"
+        ));
     }
 
     #[test]

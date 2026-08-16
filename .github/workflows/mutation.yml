@@ -1,0 +1,22 @@
+name: Mutation tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 19 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-pure-core:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+      - name: Verify desktop pure-core mutants
+        run: cargo mutants --package kcastle-desktop --jobs 2

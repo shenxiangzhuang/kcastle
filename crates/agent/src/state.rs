@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use async_openai::types::responses::{
     EasyInputContent, EasyInputMessage, FunctionCallOutput, InputItem, InputParam, Item,
-    MessageItem, OutputMessageContent, ResponseUsage, Role,
+    MessageItem, OutputMessageContent, ReasoningItemContent, ResponseUsage, Role, SummaryPart,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,7 @@ impl StateEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TranscriptItem {
     User(String),
+    Reasoning(String),
     Assistant(String),
     ToolCall {
         call_id: String,
@@ -227,6 +228,28 @@ impl State {
                             transcript.push(TranscriptItem::Assistant(text));
                         }
                     }
+                    InputItem::Item(Item::Reasoning(reasoning)) => {
+                        let mut text = reasoning
+                            .content
+                            .iter()
+                            .flatten()
+                            .map(|content| match content {
+                                ReasoningItemContent::ReasoningText(text) => text.text.as_str(),
+                            })
+                            .collect::<String>();
+                        if text.is_empty() {
+                            text = reasoning
+                                .summary
+                                .iter()
+                                .map(|part| match part {
+                                    SummaryPart::SummaryText(text) => text.text.as_str(),
+                                })
+                                .collect();
+                        }
+                        if !text.is_empty() {
+                            transcript.push(TranscriptItem::Reasoning(text));
+                        }
+                    }
                     InputItem::Item(Item::FunctionCall(call)) => {
                         transcript.push(TranscriptItem::ToolCall {
                             call_id: call.call_id.clone(),
@@ -289,9 +312,36 @@ pub fn estimate_tokens(value: &impl Serialize) -> usize {
 mod tests {
     use async_openai::types::responses::{
         EasyInputMessage, FunctionCallOutputItemParam, FunctionToolCall, InputItem, Item,
+        ReasoningItem, ReasoningItemContent, ReasoningTextContent,
     };
 
     use super::{State, TranscriptItem};
+
+    #[test]
+    fn transcript_preserves_reasoning_text() {
+        let mut state = State::default();
+        state
+            .append_items(
+                vec![InputItem::from(Item::Reasoning(ReasoningItem {
+                    id: None,
+                    summary: Vec::new(),
+                    content: Some(vec![ReasoningItemContent::ReasoningText(
+                        ReasoningTextContent {
+                            text: "inspect the workspace".into(),
+                        },
+                    )]),
+                    encrypted_content: None,
+                    status: None,
+                }))],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.transcript(),
+            vec![TranscriptItem::Reasoning("inspect the workspace".into())]
+        );
+    }
 
     #[test]
     fn projects_compacted_history_and_tracks_tools() {

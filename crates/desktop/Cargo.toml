@@ -1,0 +1,34 @@
+[package]
+name = "kcastle-desktop"
+description = "Native GPUI desktop interface for kcastle-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "kcastle-desktop"
+path = "src/main.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+kcastle-agent.workspace = true
+markdown.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "block2"] }
+raw-window-handle = "=0.6.2"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
