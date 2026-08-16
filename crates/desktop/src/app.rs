@@ -309,7 +309,7 @@ impl DesktopApp {
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
         for effect in self.transition(action) {
             match effect {
-                Effect::ApplyChatTail => self.apply_chat_tail(),
+                Effect::ApplyChatTail => self.request_chat_tail(),
                 effect => panic!("async effect {effect:?} requires a Window dispatch"),
             }
         }
@@ -382,7 +382,10 @@ impl DesktopApp {
     ) -> bool {
         self.layout_runtime
             .observe_transcript(self.core.layout_generation, bounds);
-        self.can_restore_pending_chat_anchor()
+        let restore_anchor = self.can_restore_pending_chat_anchor();
+        let realign_tail =
+            self.core.follow_chat_tail && self.layout_runtime.schedule_tail_realign();
+        restore_anchor || realign_tail
     }
 
     pub(crate) fn observe_message_bounds(
@@ -422,26 +425,28 @@ impl DesktopApp {
 
     pub(crate) fn apply_pending_chat_anchor(&mut self, cx: &mut Context<Self>) {
         self.layout_runtime.restore_scheduled = false;
-        let Some((generation, anchor)) = self.layout_runtime.pending_chat_anchor else {
-            return;
-        };
-        match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
-            ScrollRestore::Tail => {
-                self.apply_chat_tail();
-                self.layout_runtime.pending_chat_anchor = None;
-            }
-            ScrollRestore::Message { .. } => {
-                if let Some(offset_y) = self.layout_runtime.restored_offset_y(
-                    generation,
-                    anchor,
-                    f32::from(self.scroll.offset().y),
-                ) {
-                    let offset = self.scroll.offset();
-                    self.scroll.set_offset(point(offset.x, px(offset_y)));
+        if let Some((generation, anchor)) = self.layout_runtime.pending_chat_anchor {
+            match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
+                ScrollRestore::Tail => {
+                    self.apply_chat_tail();
                     self.layout_runtime.pending_chat_anchor = None;
                 }
+                ScrollRestore::Message { .. } => {
+                    if let Some(offset_y) = self.layout_runtime.restored_offset_y(
+                        generation,
+                        anchor,
+                        f32::from(self.scroll.offset().y),
+                    ) {
+                        let offset = self.scroll.offset();
+                        self.scroll.set_offset(point(offset.x, px(offset_y)));
+                        self.layout_runtime.pending_chat_anchor = None;
+                    }
+                }
+                ScrollRestore::IgnoreStale => self.layout_runtime.pending_chat_anchor = None,
             }
-            ScrollRestore::IgnoreStale => self.layout_runtime.pending_chat_anchor = None,
+        }
+        if self.layout_runtime.take_tail_realign() && self.core.follow_chat_tail {
+            self.apply_chat_tail();
         }
         cx.notify();
     }
@@ -1713,7 +1718,10 @@ impl DesktopApp {
     pub(crate) fn apply_chat_tail(&mut self) {
         let max_offset = self.scroll.max_offset().height;
         let leading_inset = px(self.core.layout.transcript_top_inset);
-        if max_offset <= leading_inset + px(0.5) {
+        let trailing_inset = px(self.core.layout.tail_inset);
+        // The scroll extent includes both paddings even when the messages fit. Treat that as a
+        // short transcript so tail following cannot consume the leading gap after a reflow.
+        if max_offset <= leading_inset + trailing_inset + px(0.5) {
             let offset = self.scroll.offset();
             self.scroll.set_offset(point(offset.x, px(0.0)));
             // The transcript content column follows the measurement sentinel.
@@ -1723,6 +1731,11 @@ impl DesktopApp {
         } else {
             self.scroll.scroll_to_bottom();
         }
+    }
+
+    pub(crate) fn request_chat_tail(&mut self) {
+        self.layout_runtime.request_tail_realign();
+        self.apply_chat_tail();
     }
 
     pub(crate) fn handle_chat_scroll(
@@ -2294,7 +2307,7 @@ mod tests {
             gpui_component::Root::new(view, window, cx)
         });
         let view = view.borrow().clone().unwrap();
-        cx.simulate_resize(gpui::size(px(1180.0), px(720.0)));
+        cx.simulate_resize(gpui::size(px(1180.0), px(620.0)));
         cx.refresh().unwrap();
         cx.run_until_parked();
 
@@ -2346,12 +2359,126 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
 
-        let (offset, max_offset) = cx.read_entity(&view, |app, _| {
-            (app.scroll.offset(), app.scroll.max_offset())
+        let (offset, max_offset, tail_inset) = cx.read_entity(&view, |app, _| {
+            (
+                app.scroll.offset(),
+                app.scroll.max_offset(),
+                app.core.layout.tail_inset,
+            )
         });
         assert!(
-            f32::from(max_offset.height + offset.y).abs() <= 1.0,
+            (f32::from(max_offset.height + offset.y) - tail_inset).abs() <= 1.0,
             "overflowing conversation did not follow the tail: offset={offset:?}, max={max_offset:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn answer_block_after_collapsed_reasoning_follows_the_tail_after_layout(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-reasoning-tail-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), workspace.clone()).unwrap();
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let test_view = view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                DesktopApp::new(
+                    DesktopStartup {
+                        agent,
+                        models: vec![configured],
+                        selected_model: 0,
+                        project_store,
+                        active_project,
+                        settings,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            test_view.replace(Some(view.clone()));
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = view.borrow().clone().unwrap();
+        cx.simulate_resize(gpui::size(px(1180.0), px(720.0)));
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.dispatch(
+                    Action::Conversation(ConversationAction::SubmitUser(message(
+                        Role::User,
+                        "line\n".repeat(12),
+                    ))),
+                    window,
+                    cx,
+                );
+                this.dispatch(
+                    Action::Conversation(ConversationAction::ReasoningDelta {
+                        delta: "thinking".into(),
+                        new_message: message(Role::Reasoning, "thinking".into()),
+                    }),
+                    window,
+                    cx,
+                );
+                this.sync_message_presentations();
+                this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let max_offset_before = cx.read_entity(&view, |app, _| app.scroll.max_offset().height);
+        assert!(
+            max_offset_before <= px(40.5),
+            "test transcript already overflowed before the answer: max={max_offset_before:?}"
+        );
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.dispatch(
+                    Action::Conversation(ConversationAction::TextDelta {
+                        delta: "answer\nline\nline\nline".into(),
+                        new_message: message(Role::Assistant, "answer\nline\nline\nline".into()),
+                    }),
+                    window,
+                    cx,
+                );
+                this.sync_message_presentations();
+                this.dispatch(Action::StreamDeltasReceived(1), window, cx);
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let (offset, max_offset, tail_inset) = cx.read_entity(&view, |app, _| {
+            (
+                app.scroll.offset(),
+                app.scroll.max_offset(),
+                app.core.layout.tail_inset,
+            )
+        });
+        assert!(
+            max_offset.height > px(40.5),
+            "test answer did not make the transcript overflow: max={max_offset:?}"
+        );
+        assert!(
+            (f32::from(max_offset.height + offset.y) - tail_inset).abs() <= 1.0,
+            "answer block did not follow the tail after layout: offset={offset:?}, max={max_offset:?}"
         );
 
         std::fs::remove_dir_all(root).unwrap();

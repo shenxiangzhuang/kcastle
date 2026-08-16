@@ -11,7 +11,7 @@ pub(crate) fn run_effects(
 ) {
     for effect in effects {
         match effect {
-            Effect::ApplyChatTail => app.apply_chat_tail(),
+            Effect::ApplyChatTail => app.request_chat_tail(),
             Effect::CreateSession { operation, input } => {
                 app.create_session_for_run(operation, input, window, cx)
             }
