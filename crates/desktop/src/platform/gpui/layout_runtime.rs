@@ -16,6 +16,8 @@ pub(crate) struct GpuiLayoutRuntime {
     messages: HashMap<MessageId, GenerationBounds>,
     pub(crate) pending_chat_anchor: Option<(LayoutGeneration, ScrollAnchor)>,
     pub(crate) restore_scheduled: bool,
+    tail_realign_pending: bool,
+    tail_realign_scheduled: bool,
 }
 
 impl GpuiLayoutRuntime {
@@ -26,6 +28,23 @@ impl GpuiLayoutRuntime {
 }
 
 impl GpuiLayoutRuntime {
+    pub(crate) fn request_tail_realign(&mut self) {
+        self.tail_realign_pending = true;
+    }
+
+    pub(crate) fn schedule_tail_realign(&mut self) -> bool {
+        if !self.tail_realign_pending || self.tail_realign_scheduled {
+            return false;
+        }
+        self.tail_realign_scheduled = true;
+        true
+    }
+
+    pub(crate) fn take_tail_realign(&mut self) -> bool {
+        self.tail_realign_scheduled = false;
+        std::mem::take(&mut self.tail_realign_pending)
+    }
+
     pub(crate) fn observe_transcript(
         &mut self,
         generation: LayoutGeneration,
@@ -142,5 +161,16 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn requested_tail_realign_runs_once_after_the_next_layout() {
+        let mut runtime = GpuiLayoutRuntime::default();
+
+        runtime.request_tail_realign();
+        assert!(runtime.schedule_tail_realign());
+        assert!(!runtime.schedule_tail_realign());
+        assert!(runtime.take_tail_realign());
+        assert!(!runtime.take_tail_realign());
     }
 }

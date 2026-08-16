@@ -9,6 +9,7 @@ const CONTENT_MAX_WIDTH_REM: f32 = 46.75;
 const COMPOSER_MAX_WIDTH_REM: f32 = 48.75;
 const CHAT_SIDE_PADDING_REM: f32 = 1.0;
 const TRANSCRIPT_TOP_INSET_REM: f32 = 1.0;
+const TRANSCRIPT_TAIL_INSET_REM: f32 = 1.5;
 const COMPACT_HEIGHT: f32 = 680.0;
 const SPACIOUS_HEIGHT: f32 = 920.0;
 
@@ -147,7 +148,7 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         composer_max_width: composer.content_width,
         chat_side_padding,
         transcript_top_inset: TRANSCRIPT_TOP_INSET_REM * rem,
-        tail_inset: 0.0,
+        tail_inset: TRANSCRIPT_TAIL_INSET_REM * rem,
     }
 }
 
@@ -198,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn docked_composer_does_not_require_a_transcript_tail_inset() {
+    fn docked_composer_keeps_a_transcript_tail_gap() {
         let one_line = resolve_layout(LayoutInput {
             composer_height: 88.0,
             ..LayoutInput::default()
@@ -207,7 +208,7 @@ mod tests {
             composer_height: 360.0,
             ..LayoutInput::default()
         });
-        assert_eq!(one_line.tail_inset, 0.0);
+        assert_eq!(one_line.tail_inset, 24.0);
         assert_eq!(fourteen_lines.tail_inset, one_line.tail_inset);
     }
 
