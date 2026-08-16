@@ -304,7 +304,7 @@ impl DesktopApp {
             Role::Reasoning => {
                 let preview = reasoning_preview(&message.text, message.pending);
                 let follow_summary_end = message.pending && !message.expanded;
-                presentation.align_reasoning_summary(follow_summary_end);
+                presentation.align_reasoning_summary(follow_summary_end, message.revision, window);
                 let reasoning_summary_scroll = presentation.reasoning_summary_scroll();
                 div()
                     .flex()

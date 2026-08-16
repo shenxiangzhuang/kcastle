@@ -1,15 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
-use gpui::{ScrollHandle, SharedString, point, px};
+use gpui::{ScrollHandle, SharedString, Window};
 
 use crate::domain::MessageId;
 use crate::streaming_markdown::StreamingMarkdownState;
+
+use super::frame_clock::FrameThrottledScroll;
 
 #[derive(Debug)]
 pub(crate) struct MessagePresentation {
     pub(crate) render_text: SharedString,
     pub(crate) markdown: StreamingMarkdownState,
-    reasoning_summary_scroll: ScrollHandle,
+    reasoning_summary_scroll: FrameThrottledScroll,
     source: String,
 }
 
@@ -18,7 +20,7 @@ impl MessagePresentation {
         let mut presentation = Self {
             render_text: source.to_owned().into(),
             markdown: StreamingMarkdownState::default(),
-            reasoning_summary_scroll: ScrollHandle::new(),
+            reasoning_summary_scroll: FrameThrottledScroll::default(),
             source: source.to_owned(),
         };
         if markdown {
@@ -40,16 +42,19 @@ impl MessagePresentation {
     }
 
     pub(crate) fn reasoning_summary_scroll(&self) -> ScrollHandle {
-        self.reasoning_summary_scroll.clone()
+        self.reasoning_summary_scroll.handle()
     }
 
-    pub(crate) fn align_reasoning_summary(&self, follow_end: bool) {
+    pub(crate) fn align_reasoning_summary(
+        &self,
+        follow_end: bool,
+        revision: u64,
+        window: &mut Window,
+    ) {
         if follow_end {
-            self.reasoning_summary_scroll.scroll_to_item(0);
-        } else if self.reasoning_summary_scroll.offset().x != px(0.0) {
-            let offset = self.reasoning_summary_scroll.offset();
-            self.reasoning_summary_scroll
-                .set_offset(point(px(0.0), offset.y));
+            self.reasoning_summary_scroll.follow_end(revision, window);
+        } else {
+            self.reasoning_summary_scroll.cancel_and_reset();
         }
     }
 }
@@ -98,16 +103,5 @@ mod tests {
         store.sync([(MessageId(1), "one", true)]);
         assert_eq!(store.get(MessageId(1)).markdown.revision(), revision);
         assert!(!store.entries.contains_key(&MessageId(2)));
-    }
-
-    #[test]
-    fn settled_reasoning_resets_its_summary_to_the_leading_edge() {
-        let presentation = MessagePresentation::new("reasoning", false);
-        let scroll = presentation.reasoning_summary_scroll();
-        scroll.set_offset(point(px(-80.0), px(0.0)));
-
-        presentation.align_reasoning_summary(false);
-
-        assert_eq!(scroll.offset().x, px(0.0));
     }
 }
