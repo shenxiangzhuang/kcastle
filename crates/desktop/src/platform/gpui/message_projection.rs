@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use gpui::SharedString;
+use gpui::{ScrollHandle, SharedString, point, px};
 
 use crate::domain::MessageId;
 use crate::streaming_markdown::StreamingMarkdownState;
@@ -9,6 +9,7 @@ use crate::streaming_markdown::StreamingMarkdownState;
 pub(crate) struct MessagePresentation {
     pub(crate) render_text: SharedString,
     pub(crate) markdown: StreamingMarkdownState,
+    reasoning_summary_scroll: ScrollHandle,
     source: String,
 }
 
@@ -17,6 +18,7 @@ impl MessagePresentation {
         let mut presentation = Self {
             render_text: source.to_owned().into(),
             markdown: StreamingMarkdownState::default(),
+            reasoning_summary_scroll: ScrollHandle::new(),
             source: source.to_owned(),
         };
         if markdown {
@@ -34,6 +36,20 @@ impl MessagePresentation {
         self.render_text = source.to_owned().into();
         if markdown {
             self.markdown.update(source);
+        }
+    }
+
+    pub(crate) fn reasoning_summary_scroll(&self) -> ScrollHandle {
+        self.reasoning_summary_scroll.clone()
+    }
+
+    pub(crate) fn align_reasoning_summary(&self, follow_end: bool) {
+        if follow_end {
+            self.reasoning_summary_scroll.scroll_to_item(0);
+        } else if self.reasoning_summary_scroll.offset().x != px(0.0) {
+            let offset = self.reasoning_summary_scroll.offset();
+            self.reasoning_summary_scroll
+                .set_offset(point(px(0.0), offset.y));
         }
     }
 }
@@ -82,5 +98,16 @@ mod tests {
         store.sync([(MessageId(1), "one", true)]);
         assert_eq!(store.get(MessageId(1)).markdown.revision(), revision);
         assert!(!store.entries.contains_key(&MessageId(2)));
+    }
+
+    #[test]
+    fn settled_reasoning_resets_its_summary_to_the_leading_edge() {
+        let presentation = MessagePresentation::new("reasoning", false);
+        let scroll = presentation.reasoning_summary_scroll();
+        scroll.set_offset(point(px(-80.0), px(0.0)));
+
+        presentation.align_reasoning_summary(false);
+
+        assert_eq!(scroll.offset().x, px(0.0));
     }
 }

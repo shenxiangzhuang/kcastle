@@ -48,6 +48,8 @@ Key constraints:
 - An idle `Agent` is owned by `DesktopApp`; an active run owns it until `finish` returns it.
 - Streaming deltas are coalesced at the display-frame boundary, while structural events flush
   immediately.
+- A collapsed live Think row shows the latest non-blank reasoning line and follows its horizontal
+  tail; expanding it exposes the complete reasoning, and settlement restores the stable first line.
 - Chat position is restored with semantic message anchors rather than raw pixel snapshots.
 - Session metadata and modification times are cached outside the render path and refreshed after
   project or session mutations.

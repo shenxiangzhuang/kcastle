@@ -302,13 +302,10 @@ impl DesktopApp {
                 }))
                 .into_any_element(),
             Role::Reasoning => {
-                let preview = message
-                    .text
-                    .lines()
-                    .next()
-                    .filter(|line| !line.is_empty())
-                    .unwrap_or("Thinking…")
-                    .to_owned();
+                let preview = reasoning_preview(&message.text, message.pending);
+                let follow_summary_end = message.pending && !message.expanded;
+                presentation.align_reasoning_summary(follow_summary_end);
+                let reasoning_summary_scroll = presentation.reasoning_summary_scroll();
                 div()
                     .flex()
                     .flex_col()
@@ -362,15 +359,30 @@ impl DesktopApp {
                                     })
                                     .into_any_element()
                             })
-                            .child(
+                            .child(if message.expanded {
+                                div().flex_1().into_any_element()
+                            } else if message.pending {
+                                div()
+                                    .id(("reasoning-summary", index))
+                                    .flex()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_x_scroll()
+                                    .track_scroll(&reasoning_summary_scroll)
+                                    .text_sm()
+                                    .text_color(colors.muted_text)
+                                    .child(div().flex_none().whitespace_nowrap().child(preview))
+                                    .into_any_element()
+                            } else {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.0))
                                     .truncate()
                                     .text_sm()
                                     .text_color(colors.muted_text)
-                                    .child(preview),
-                            ),
+                                    .child(preview)
+                                    .into_any_element()
+                            }),
                     )
                     .when(message.expanded, |row| {
                         row.child(
@@ -696,6 +708,22 @@ fn tool_icon(title: &str) -> IconName {
     }
 }
 
+fn reasoning_preview(text: &str, running: bool) -> String {
+    let line = if running {
+        let visible = text.trim_end();
+        visible
+            .rsplit_once('\n')
+            .map_or(visible, |(_, latest)| latest)
+    } else {
+        text.split_once('\n').map_or(text, |(first, _)| first)
+    };
+    if line.is_empty() {
+        "Thinking…".into()
+    } else {
+        line.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{
@@ -703,7 +731,7 @@ mod tests {
         StatefulInteractiveElement, Styled, TestAppContext, Window, div, px, size,
     };
 
-    use super::transcript_content_column;
+    use super::{reasoning_preview, transcript_content_column};
     use crate::layout::{LayoutInput, resolve_layout};
     use crate::platform::gpui::measured_container;
     use crate::ui_theme::metrics;
@@ -826,5 +854,50 @@ mod tests {
             layout.content_max_width + layout.chat_side_padding * 2.0,
             layout.composer_max_width
         );
+    }
+
+    #[test]
+    fn running_reasoning_previews_the_latest_non_blank_line() {
+        assert_eq!(
+            reasoning_preview("Inspect the session\nNewest reasoning tokens\n", true),
+            "Newest reasoning tokens"
+        );
+        assert_eq!(
+            reasoning_preview("Inspect the session\nNewest reasoning tokens", false),
+            "Inspect the session"
+        );
+    }
+
+    #[gpui::test]
+    fn reasoning_summary_scroll_follows_the_inline_end(cx: &mut TestAppContext) {
+        let scroll = ScrollHandle::new();
+
+        struct ReasoningSummaryHarness(ScrollHandle);
+
+        impl Render for ReasoningSummaryHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.scroll_to_item(0);
+                div()
+                    .id("reasoning-summary-harness")
+                    .flex()
+                    .w(px(120.0))
+                    .overflow_x_scroll()
+                    .track_scroll(&self.0)
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child("Newest reasoning tokens keep arriving past the viewport"),
+                    )
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| ReasoningSummaryHarness(scroll.clone()));
+        cx.simulate_resize(size(px(320.0), px(120.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        assert!(scroll.max_offset().width > px(0.0));
+        assert!(scroll.max_offset().width + scroll.offset().x <= px(1.0));
     }
 }
