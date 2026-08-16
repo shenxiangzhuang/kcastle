@@ -8,7 +8,7 @@ the GPUI control changes real application state and has been clicked in the buil
 
 | Surface | DSH control/state observed by clicking | GPUI acceptance |
 | --- | --- | --- |
-| Sidebar | Collapse leaves a 64 px icon rail with reopen/new/add/search/settings | Keep the rail; the sidebar must always be recoverable, including an empty session |
+| Sidebar | Collapse leaves fixed titlebar controls without reserving content width | Keep the toggle at the same coordinate in both sidebar states; shift the control group left only when fullscreen removes the traffic lights |
 | Sidebar | Workspace menu lists current workspaces and `Add workspace…` | Workspace selector opens the registered project list and switches the active project |
 | Sidebar | Search expands inline; view menu selects grouping and recency ordering | Search and ordering change the visible session rows |
 | Header | Preset menu shows Standard/Code/Minimal/Creator with descriptions | Omit the preset affordance because this agent has no preset capability |
@@ -61,7 +61,7 @@ Summary/Payload/Result/Schema/Timing tabs, and the supported General/Models Sett
 
 Final Computer Use pass completed after the 2026-08-15 refinement: composer model/effort selection
 opens in place, Settings contains only General/Models, light/dark themes cover primary surfaces, the
-collapsed rail clears the macOS traffic lights, the composer no longer overlaps Trajectory, the
+collapsed titlebar toggle clears the macOS traffic lights, the composer no longer overlaps Trajectory, the
 details divider resizes through its range, all five tabs fit, and a long highlighted Markdown result
 scrolls independently to its conclusion. A live long response remains pinned to its newest partial
 line; upward scrolling wins over subsequent deltas and exposes a fixed Back to bottom control.

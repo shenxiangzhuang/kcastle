@@ -21,8 +21,13 @@ cargo install --path crates/tui --locked
 Run the GPUI desktop app from a source checkout:
 
 ```bash
-cargo run -p kcastle-desktop
+just macos-run
 ```
+
+This recipe builds the release binary, places it in `target/K Castle.app`, applies the tracked
+`Info.plist`, signs the bundle, and launches a fresh instance. Use `just macos-run-debug` for a
+debug build. A direct `cargo run -p kcastle-desktop` launches an unbundled executable and does not
+reproduce macOS AppKit behavior such as fullscreen titlebar reveal.
 
 The desktop app treats folders as projects. Each project keeps an isolated session history under
 `~/.kcastle/projects`, while removing a project from the sidebar never deletes its folder or saved
@@ -49,11 +54,12 @@ kcastle
 ## Develop
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-cargo build --workspace --release --locked
+just --list
+just qa
 ```
+
+The `Justfile` also exposes focused recipes including `fmt`, `check`, `clippy`, `test`,
+`test-agent`, `build`, `tui`, `macos-app`, and their debug/run variants.
 
 The pure Desktop core also has scheduled mutation coverage. Run a focused local pass with
 `cargo mutants --package kcastle-desktop --re '<pattern>'` after installing `cargo-mutants`.

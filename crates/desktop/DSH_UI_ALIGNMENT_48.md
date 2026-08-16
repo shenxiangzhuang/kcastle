@@ -18,7 +18,7 @@ and mapping contracts; Computer Use covers native layout and interaction journey
 | 4 | Real General/Models settings | Permission, project, appearance, motion, busy-Enter behavior, model, and effort write through `SettingsStore`. | Done · unit round-trip test, including reduced motion and per-model effort. |
 | 5 | Settings geometry and scrolling | Centered responsive dialog with 188px navigation, bounded viewport height, fixed header, and independently scrollable content. | Done · Release at 1180×720; content and close control stayed inside the window. |
 | 6 | Modal interaction contract | Application-owned modal layer adds focus scope, initial focus, Escape, backdrop dismissal, and destructive confirmations. | Done · Release: General/Models navigation and close path exercised. |
-| 7 | macOS traffic-light safe rail | Full sidebar is 280px; collapsed rail is 56px with a 96px top safe zone and no control hit target under the traffic lights. | Done · Release: collapse/reopen visually verified. |
+| 7 | macOS traffic-light safe toggle | Full sidebar is 280px; collapsed state reserves no content width. The toggle keeps one coordinate across sidebar states. A desktop-layer AppKit adapter restores native titlebar frames for fullscreen and reapplies the windowed layout after exit without patching GPUI. | Done · release collapse/reopen and fullscreen layouts visually verified; top-edge AppKit reveal remains a manual macOS pass. |
 | 8 | Streaming scroll ownership | `follow_chat_tail` is released by a real upward wheel delta and restored only explicitly or when the reader returns to the tail. | Done · state test `streaming_only_follows_when_the_view_is_near_the_tail`. |
 | 9 | Frame-batched streaming | Visible text/reasoning deltas are coalesced up to 128 events on the next GPUI display frame; approvals, tools, completion, and other structural events publish immediately. Markdown freezes all but its trailing two blocks and re-parses only that frontier. | Done · cadence, stable-key, frontier, fence/list, and bounded-work regression tests. |
 | 10 | Chat/composer non-overlap | Transcript and auto-growing composer are flex siblings with `min-height: 0`; the final content remains in the scrollport rather than behind an absolute input. | Done · Release: restored chat final line and stats remained visible. |
@@ -39,11 +39,11 @@ and mapping contracts; Computer Use covers native layout and interaction journey
 | 20 | True duration domain | Block position and width share one recorded time domain, include minimum visible width, and clamp to lane bounds. | Done · `duration_geometry_uses_one_time_domain_and_stays_in_bounds`. |
 | 21 | Cached trajectory search | Each message has a cached lowercase record document covering role/title/text/payload/result/schema; UI shows match count. | Done · cache coverage test; search exercised in the native app. |
 | 22 | Details tabs | All five tabs are real buttons in a horizontally scrollable 42px strip, with selected state and independent content. | Done · Release details Summary view and all tab implementations inspected. |
-| 23 | Resizable/responsive details | Drag resizer remains available on wide windows; fixed-step narrow/reset/widen controls support keyboard activation; <1020px uses a bounded overlay. | Done · implementation and wide Release split-pane verification. |
+| 23 | Resizable/responsive details | Drag resizer remains available on wide windows; fixed-step narrow/reset/widen controls support keyboard activation; widths below the split-pane minimum use a bounded overlay. | Done · implementation and wide Release split-pane verification. |
 | 24 | 1–14-line composer | One `InputState` uses `auto_grow(1, 14)` and becomes internally scrollable after the cap. | Done · component contract and native composer layout. |
 | 25 | Draft/caret/IME safety | GPUI component owns marked text, caret reveal, and the draft scrollport; only primary `PressEnter` submits, secondary Enter remains a newline. | Done · relies on the tested gpui-component input path; no raw keyCode interception remains. |
 | 26 | Persistent composer entity | Hero and docked seats render the same long-lived input entity; switching phases does not reconstruct draft state. | Done · first-send session preparation is guarded and focus is restored after runs. |
-| 27 | Anchored composer menus | Menu is absolutely anchored to the composer card at `bottom: 100% + 8px`, with side chosen by command/model intent and viewport-bounded height. | Done · Release model menu remained attached in full and rail sidebar states. |
+| 27 | Anchored composer menus | Menu is absolutely anchored to the composer card at `bottom: 100% + 8px`, with side chosen by command/model intent and viewport-bounded height. | Done · Release model menu remained attached in expanded and collapsed sidebar states. |
 | 28 | Menu keyboard/dismiss state | Highlight index wraps with Up/Down; Enter activates; Escape backs out/closes; outside mouse-down dismisses without triggering the parent. | Done · central root/menu state machine; native outside-dismiss exercised. |
 | 29 | Honest action states | Send is disabled for empty/preparing input, shows loading while preparing, and becomes Stop only during a real run. | Done · Release empty-state send was visibly disabled; duplicate preparation is guarded. |
 | 30 | Honest permissions | Only Ask before tools and Allow all tools are exposed, and both change the real approval behavior. | Done · settings persistence test and native General/composer controls. |
@@ -57,7 +57,7 @@ and mapping contracts; Computer Use covers native layout and interaction journey
 
 | # | Alignment item | Delivered implementation | Acceptance evidence |
 |---:|---|---|---|
-| 36 | Sidebar rail/motion/scroll | 280/56 geometry is tokenized; full/rail transitions use 150/120ms motion; workspace trees have stable independent scrolling. | Done · Release collapse/reopen. |
+| 36 | Sidebar collapse/scroll | The 280px expanded width and fixed titlebar-toggle geometry are tokenized; state changes avoid opacity animation so controls do not drift or flash; workspace trees have stable independent scrolling. | Done · Release collapse/reopen. |
 | 37 | Message hover feedback | User/assistant message scopes reveal time/runtime plus copy/rating actions only on hover, without reserving new height. | Done · group-hover implementation and native chat inspection. |
 | 38 | Think status | Pending reasoning shows a primary spinner; reduced-motion mode substitutes a static status dot; completed state stops animation. | Done · live/restored pending transitions and reduced-motion branch. |
 | 39 | Tool state/renderers | Shell and generic tool intents use distinct icons, pending/success/failure colors, terminal/JSON-aware expanded renderers, and safe fallback. | Done · restored failure test and native shell row/detail inspection. |
@@ -67,8 +67,8 @@ and mapping contracts; Computer Use covers native layout and interaction journey
 | 43 | Semantic color/theme | Canvas/surface/sidebar/text/border/interactive/status/role colors come from `UiPalette`; System/Light/Dark are functional. | Done · settings round-trip and native light-theme pass. |
 | 44 | Geometry tokens | Sidebar/content/composer widths, composer radius, row heights, headers, line heights, and breakpoint live in one metrics layer. | Done · key axes measured in the 1180×720 release screenshot. |
 | 45 | Turn/step/token semantics | User messages define turns; reasoning+answer share one step; tools are separate steps; token counters come from real usage. | Done · semantic-step regression test; restored session showed 1 turn · 2 steps. |
-| 46 | Responsive column concession | <1024px replaces sidebar with recoverable rail; <1020px turns details into a right overlay; center widths remain min-zero and unclipped. | Done · code breakpoints plus release rail and wide split-pane journeys. |
-| 47 | Motion and Reduced Motion | FAST/STANDARD tokens drive sidebar transitions; persisted Reduced mode removes sidebar and pending-reasoning looping motion. | Done · settings persistence test and General Motion control. |
+| 46 | Responsive column concession | Constrained widths replace the sidebar with a fixed recoverable titlebar toggle; below the split-pane minimum, details become a right overlay; center widths remain min-zero and unclipped. | Done · code breakpoints plus collapsed and wide split-pane journeys. |
+| 47 | Motion and Reduced Motion | Sidebar geometry changes without animation; persisted Reduced mode removes pending-reasoning looping motion. | Done · settings persistence test and General Motion control. |
 | 48 | Regression and release QA | State tests cover streaming ownership, semantic steps, search caches/snippets, duration bounds, renderer fences, failures, persistence, and project isolation; release journeys cover native geometry. | Done · 81 workspace tests, warnings-denied Clippy, locked release build, `git diff --check`, and Computer Use journeys. |
 
 ## Required release gate
@@ -84,6 +84,6 @@ git diff --check
 ```
 
 Native acceptance uses the signed `target/K Castle.app` bundle. At minimum exercise: inline model
-and effort, General/Models persistence, full/rail sidebar, populated Chat, Trajectory with and
+and effort, General/Models persistence, expanded/collapsed sidebar, populated Chat, Trajectory with and
 without Details, detail scrolling, search/grouping, and a live response while alternating between
 tail-follow and historical reading.

@@ -3589,12 +3589,17 @@ dependencies = [
 name = "kcastle-desktop"
 version = "0.2.0-alpha.2"
 dependencies = [
+ "block2",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "kcastle-agent",
  "markdown",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "proptest",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "time",
@@ -4394,6 +4399,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.13.1",
+ "block2",
  "objc2",
  "objc2-core-foundation",
 ]

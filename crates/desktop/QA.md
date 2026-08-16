@@ -33,7 +33,11 @@ Last exercised on macOS on 2026-08-16 with the bundled release application and C
   session directory.
 - Open Settings, change reasoning effort, close it, and retain the preference across a restart.
 - Change System/Light/Dark appearance and verify all primary surfaces use the active theme.
-- Resize below 1024 px and verify the sidebar becomes a recoverable 56 px rail.
+- Resize below 1024 px and verify the sidebar collapses without reserving content width while its
+  fixed titlebar toggle remains recoverable and does not move.
+- Enter macOS fullscreen, move the pointer to the screen's top edge, and verify AppKit reveals the
+  menu bar and all three traffic-light controls. Exit fullscreen and verify their custom windowed
+  position is restored.
 - Scroll a long Trajectory result independently to its conclusion while the ledger stays fixed.
 - Compare Trajectory in both appearances against DSH tokens: business-blue user records,
   violet assistant records, amber tools, green context, neutral active rows, blue active tabs,

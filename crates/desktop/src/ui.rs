@@ -5,15 +5,18 @@ use gpui::{
 
 use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
+use crate::layout::SidebarMode;
 use crate::platform::gpui::measured_container;
 use crate::ui_theme::palette;
 
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = conversation_view_model(&self.core).empty;
+        let sidebar_mode = self.core.layout.sidebar;
         let colors = palette(cx);
         let measurement_owner = cx.entity().downgrade();
         div()
+            .relative()
             .flex()
             .size_full()
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
@@ -34,7 +37,9 @@ impl Render for DesktopApp {
             )
             .bg(colors.canvas)
             .text_color(colors.text)
-            .child(self.sidebar(window, cx))
+            .when(sidebar_mode == SidebarMode::Expanded, |root| {
+                root.child(self.sidebar(window, cx))
+            })
             .child(
                 div()
                     .relative()
@@ -62,6 +67,9 @@ impl Render for DesktopApp {
                             .child(self.docked_composer(cx))
                     }),
             )
+            .when(sidebar_mode == SidebarMode::Rail, |root| {
+                root.child(self.sidebar(window, cx))
+            })
             .children(self.modal_view(window, cx))
     }
 }

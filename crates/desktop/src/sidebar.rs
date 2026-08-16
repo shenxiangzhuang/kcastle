@@ -1,8 +1,7 @@
 use crate::app::{DesktopApp, same_path, session_age};
 use gpui::{
-    Animation, AnimationExt, Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window, WindowControlArea, div,
-    prelude::FluentBuilder, px,
+    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
@@ -12,13 +11,18 @@ use gpui_component::{Icon, IconName, Sizable};
 use crate::assets::DesktopIconName;
 use crate::domain::Action;
 use crate::layout::SidebarMode;
-use crate::ui_theme::{UiPalette, metrics, motion, palette};
+use crate::ui_theme::{UiPalette, metrics, palette};
 
 impl DesktopApp {
-    pub(crate) fn sidebar(&self, _window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = palette(cx);
+        let toggle_leading = if window.is_fullscreen() {
+            metrics::SIDEBAR_TOGGLE_FULLSCREEN_LEADING
+        } else {
+            metrics::SIDEBAR_TOGGLE_WINDOWED_LEADING
+        };
         if self.core.layout.sidebar == SidebarMode::Rail {
-            return self.sidebar_rail(cx).into_any_element();
+            return self.sidebar_rail(toggle_leading, cx).into_any_element();
         }
         let panel =
             div()
@@ -31,18 +35,8 @@ impl DesktopApp {
                 .bg(colors.sidebar)
                 .border_r_1()
                 .border_color(colors.border)
-                .child(self.sidebar_brand(cx))
-                .child(
-                    div().px_3().pt_2().pb_3().child(
-                        Button::new("new-chat")
-                            .icon(IconName::Plus)
-                            .label("New Session")
-                            .outline()
-                            .large()
-                            .w_full()
-                            .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
-                    ),
-                )
+                .child(self.sidebar_titlebar(toggle_leading, cx))
+                .child(self.sidebar_primary_navigation(cx))
                 .child(self.workspace_header(cx))
                 .child(self.workspace_tree(cx))
                 .children(
@@ -58,163 +52,120 @@ impl DesktopApp {
                             .label("Settings")
                             .ghost()
                             .w_full()
+                            .justify_start()
+                            .px_2()
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings_dialog(window, cx)
                             })),
                     ),
                 );
-        if self.settings.reduce_motion() {
-            panel.into_any_element()
-        } else {
-            panel
-                .with_animation(
-                    "sidebar-expand",
-                    Animation::new(motion::STANDARD),
-                    |panel, delta| panel.opacity(delta),
-                )
-                .into_any_element()
-        }
+        panel.into_any_element()
     }
 
-    fn sidebar_rail(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn sidebar_rail(&self, toggle_leading: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = palette(cx);
         let panel = div()
+            .absolute()
+            .top_0()
+            .left_0()
             .flex()
-            .flex_col()
-            .w(px(metrics::SIDEBAR_RAIL_WIDTH))
-            .h_full()
-            .flex_none()
             .items_center()
-            .bg(colors.sidebar)
-            .border_r_1()
-            .border_color(colors.border)
+            .w(px(metrics::COLLAPSED_TITLEBAR_CONTROLS_WIDTH))
+            .h(px(metrics::TITLEBAR_HEIGHT))
+            .pl(px(toggle_leading))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .h(px(96.0))
-                    .w_full()
-                    .child(
-                        div()
-                            .h(px(56.0))
-                            .w_full()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
-                    .child(
-                        Button::new("open-sidebar")
-                            .icon(IconName::PanelLeftOpen)
-                            .ghost()
-                            .tooltip("Open sidebar")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
-                            ),
-                    ),
+                Button::new("open-sidebar")
+                    .icon(IconName::PanelLeftOpen)
+                    .ghost()
+                    .compact()
+                    .tooltip("Toggle sidebar (⌘B)")
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            )
+            .child(
+                Button::new("collapsed-new-chat")
+                    .icon(DesktopIconName::SquarePen)
+                    .ghost()
+                    .compact()
+                    .tooltip("New session")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap_2()
-                    .pt_3()
-                    .child(
-                        Button::new("rail-new-chat")
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .tooltip("New session")
-                            .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
-                    )
-                    .child(
-                        Button::new("rail-add-workspace")
-                            .icon(IconName::FolderOpen)
-                            .ghost()
-                            .tooltip("Add workspace")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.add_project(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("rail-search")
-                            .icon(IconName::Search)
-                            .ghost()
-                            .tooltip("Search sessions")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if !this.core.sidebar_requested {
-                                    this.dispatch(Action::ToggleSidebar, window, cx);
-                                }
-                                if !this.core.sidebar.search_sessions {
-                                    this.toggle_session_search(window, cx);
-                                } else {
-                                    cx.notify();
-                                }
-                            })),
-                    ),
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
             )
-            .child(div().flex_1())
-            .child(
-                div().pb_3().child(
-                    Button::new("rail-settings")
-                        .icon(IconName::Settings)
-                        .ghost()
-                        .tooltip("Settings")
-                        .on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.open_settings_dialog(window, cx)
-                            }),
-                        ),
-                ),
-            );
-        if self.settings.reduce_motion() {
-            panel.into_any_element()
-        } else {
-            panel
-                .with_animation(
-                    "sidebar-collapse",
-                    Animation::new(motion::FAST),
-                    |panel, delta| panel.opacity(delta),
-                )
-                .into_any_element()
-        }
+            .child(div().h(px(24.0)).border_l_1().border_color(colors.border));
+        panel.into_any_element()
     }
 
-    fn sidebar_brand(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = palette(cx);
+    fn sidebar_titlebar(&self, toggle_leading: f32, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .items_center()
-            .justify_between()
-            .h(px(62.0))
-            .pl(px(76.0))
+            .h(px(metrics::TITLEBAR_HEIGHT))
+            .pl(px(toggle_leading))
             .pr_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .items_center()
-                    .gap_2()
-                    .window_control_area(WindowControlArea::Drag)
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(Icon::new(IconName::Bot).size_5())
-                    .child("K CASTLE")
-                    .child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .bg(colors.text)
-                            .text_xs()
-                            .text_color(colors.canvas)
-                            .child("AGENT"),
-                    ),
-            )
             .child(
                 Button::new("hide-sidebar")
                     .icon(IconName::PanelLeftClose)
                     .ghost()
                     .compact()
-                    .tooltip("Collapse sidebar")
+                    .tooltip("Toggle sidebar (⌘B)")
                     .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag),
+            )
+    }
+
+    fn sidebar_primary_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .px_3()
+            .pb_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .h(px(40.0))
+                    .px_2()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child("K Castle")
+                    .child(
+                        Button::new("search-sessions")
+                            .icon(if self.core.sidebar.search_sessions {
+                                IconName::Close
+                            } else {
+                                IconName::Search
+                            })
+                            .ghost()
+                            .compact()
+                            .tooltip(if self.core.sidebar.search_sessions {
+                                "Close search"
+                            } else {
+                                "Search sessions"
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_session_search(window, cx)
+                            })),
+                    ),
+            )
+            .child(
+                Button::new("new-chat")
+                    .icon(DesktopIconName::SquarePen)
+                    .label("New Session")
+                    .ghost()
+                    .w_full()
+                    .h(px(40.0))
+                    .justify_start()
+                    .px_2()
+                    .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
             )
     }
 
@@ -239,24 +190,6 @@ impl DesktopApp {
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(
-                                Button::new("search-sessions")
-                                    .icon(if self.core.sidebar.search_sessions {
-                                        IconName::Close
-                                    } else {
-                                        IconName::Search
-                                    })
-                                    .ghost()
-                                    .compact()
-                                    .tooltip(if self.core.sidebar.search_sessions {
-                                        "Close search"
-                                    } else {
-                                        "Search sessions"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_session_search(window, cx)
-                                    })),
-                            )
                             .child(
                                 Button::new("sort-sessions")
                                     .icon(IconName::Settings2)
@@ -310,7 +243,7 @@ impl DesktopApp {
         let colors = palette(cx);
         div()
             .absolute()
-            .top(px(124.0))
+            .top(px(176.0))
             .right(px(36.0))
             .w(px(210.0))
             .p_2()

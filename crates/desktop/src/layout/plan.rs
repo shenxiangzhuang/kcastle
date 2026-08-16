@@ -1,7 +1,6 @@
 use crate::layout::{ContainerInput, resolve_container};
 
 const SIDEBAR_EXPANDED_WIDTH: f32 = 280.0;
-const SIDEBAR_RAIL_WIDTH: f32 = 56.0;
 const MAIN_MIN_WIDTH: f32 = 720.0;
 const LEDGER_MIN_WIDTH: f32 = 500.0;
 const DETAILS_MIN_WIDTH: f32 = 380.0;
@@ -98,7 +97,7 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         SidebarMode::Rail
     };
     let sidebar_width = match sidebar {
-        SidebarMode::Rail => SIDEBAR_RAIL_WIDTH,
+        SidebarMode::Rail => 0.0,
         SidebarMode::Expanded => SIDEBAR_EXPANDED_WIDTH,
     }
     .min(viewport_width);
@@ -175,7 +174,7 @@ mod tests {
     #[test]
     fn layout_modes_follow_available_main_width() {
         let narrow = resolve_layout(LayoutInput {
-            viewport_width: 900.0,
+            viewport_width: 850.0,
             trajectory_visible: true,
             details_visible: true,
             ..LayoutInput::default()
@@ -191,6 +190,18 @@ mod tests {
         });
         assert_eq!(wide.sidebar, SidebarMode::Expanded);
         assert_eq!(wide.trajectory, TrajectoryMode::Split);
+    }
+
+    #[test]
+    fn collapsed_sidebar_is_an_overlay_and_does_not_reserve_main_width() {
+        let plan = resolve_layout(LayoutInput {
+            viewport_width: 1180.0,
+            sidebar_requested: false,
+            ..LayoutInput::default()
+        });
+        assert_eq!(plan.sidebar, SidebarMode::Rail);
+        assert_eq!(plan.sidebar_width, 0.0);
+        assert_eq!(plan.main_width, 1180.0);
     }
 
     #[test]

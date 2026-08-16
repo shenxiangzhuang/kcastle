@@ -21,6 +21,7 @@ use crate::domain::{
     SessionOperationKind, Surface, UsageSnapshot, reduce, reindex_messages,
 };
 use crate::layout::{LayoutInput, ScrollAnchor, ScrollRestore, resolve_scroll_restore};
+use crate::platform::NativeTitlebarController;
 use crate::platform::gpui::{
     GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore, arm_next_frame, run_effects,
 };
@@ -113,6 +114,7 @@ pub(crate) struct DesktopApp {
     pub(crate) stream_telemetry: StreamTelemetry,
     pub(crate) tool_schemas: HashMap<String, String>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
+    native_titlebar: NativeTitlebarController,
     view_states: HashMap<String, SessionViewState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -199,6 +201,7 @@ impl DesktopApp {
             },
         );
         input.update(cx, |input, cx| input.focus(window, cx));
+        let native_titlebar = NativeTitlebarController::install(window);
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.settings.appearance() == Appearance::System {
                 Theme::sync_system_appearance(Some(window), cx);
@@ -206,6 +209,7 @@ impl DesktopApp {
             }
         });
         let bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
+            this.native_titlebar.sync(window);
             this.sync_window_layout(window, cx);
         });
         Self {
@@ -232,6 +236,7 @@ impl DesktopApp {
             stream_telemetry: StreamTelemetry::default(),
             tool_schemas,
             session_search_documents,
+            native_titlebar,
             view_states: HashMap::new(),
             _subscriptions: vec![
                 subscription,
@@ -1125,6 +1130,17 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let modifiers = event.keystroke.modifiers;
+        if event.keystroke.key.eq_ignore_ascii_case("b")
+            && modifiers.secondary()
+            && !modifiers.alt
+            && !modifiers.shift
+            && !modifiers.function
+        {
+            self.toggle_sidebar(window, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.core.composer.menu.is_some() {
             match event.keystroke.key.as_str() {
                 "escape" => self.dismiss_transient(window, cx),

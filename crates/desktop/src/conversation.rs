@@ -13,6 +13,7 @@ use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
 use crate::domain::{Message, Role, Surface};
 use crate::dsh_markdown;
+use crate::layout::SidebarMode;
 use crate::platform::gpui::MessagePresentation;
 use crate::platform::gpui::measured_container;
 use crate::ui_theme::{UiPalette, metrics, palette, trajectory_palette};
@@ -21,6 +22,11 @@ impl DesktopApp {
     pub(crate) fn conversation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let trajectory_colors = trajectory_palette(cx);
+        let title_left_padding = if self.core.layout.sidebar == SidebarMode::Rail {
+            px(metrics::COLLAPSED_CONTENT_LEADING)
+        } else {
+            px(20.0)
+        };
         div()
             .flex()
             .flex_col()
@@ -33,7 +39,8 @@ impl DesktopApp {
                     .items_center()
                     .justify_between()
                     .h(px(40.0))
-                    .px_5()
+                    .pl(title_left_padding)
+                    .pr_5()
                     .child(
                         div()
                             .flex()

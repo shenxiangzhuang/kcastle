@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use gpui::{App, Hsla, rgb, rgba};
 use gpui_component::ActiveTheme;
 
@@ -57,7 +55,11 @@ pub(crate) struct TrajectoryPalette {
 
 pub(crate) mod metrics {
     pub(crate) const SIDEBAR_WIDTH: f32 = 280.0;
-    pub(crate) const SIDEBAR_RAIL_WIDTH: f32 = 56.0;
+    pub(crate) const TITLEBAR_HEIGHT: f32 = 40.0;
+    pub(crate) const SIDEBAR_TOGGLE_WINDOWED_LEADING: f32 = 80.0;
+    pub(crate) const SIDEBAR_TOGGLE_FULLSCREEN_LEADING: f32 = 0.0;
+    pub(crate) const COLLAPSED_TITLEBAR_CONTROLS_WIDTH: f32 = 224.0;
+    pub(crate) const COLLAPSED_CONTENT_LEADING: f32 = 240.0;
     pub(crate) const COMPOSER_RADIUS: f32 = 22.0;
     pub(crate) const WORKSPACE_ROW_HEIGHT: f32 = 34.0;
     pub(crate) const SESSION_ROW_HEIGHT: f32 = 32.0;
@@ -72,13 +74,6 @@ pub(crate) mod metrics {
     pub(crate) const MESSAGE_LINE_HEIGHT: f32 = 28.0;
     pub(crate) const MARKDOWN_BLOCK_GAP: f32 = 16.0;
     pub(crate) const MARKDOWN_SECTION_GAP: f32 = 32.0;
-}
-
-pub(crate) mod motion {
-    use super::Duration;
-
-    pub(crate) const FAST: Duration = Duration::from_millis(120);
-    pub(crate) const STANDARD: Duration = Duration::from_millis(150);
 }
 
 pub(crate) fn palette(cx: &App) -> UiPalette {

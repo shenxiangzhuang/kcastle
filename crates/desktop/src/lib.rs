@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use gpui::{
     AppContext, Application, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, px, size,
+    WindowOptions, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
 use kcastle_agent::{Agent, Model, ReasoningEffort, Session};
@@ -92,7 +92,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                     titlebar: Some(TitlebarOptions {
                         title: Some("K Castle".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(16.0), px(19.0))),
+                        traffic_light_position: None,
                     }),
                     window_background: WindowBackgroundAppearance::Blurred,
                     app_id: Some("dev.kcastle.desktop".into()),
