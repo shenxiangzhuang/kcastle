@@ -16,7 +16,7 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use kcastle_agent::{
     ActiveAgent, Agent, AgentEvent, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID, Model,
-    OPENAI_MODEL_PRESETS, OPENAI_PROVIDER_ID, Session, SessionInfo,
+    OPENAI_MODEL_PRESETS, OPENAI_PROVIDER_ID, Session, SessionConfig, SessionInfo,
 };
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -41,6 +41,7 @@ struct Runtime {
     sessions_dir: PathBuf,
     session_path: PathBuf,
     compacting: bool,
+    session_config: SessionConfig,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -63,7 +64,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         }
         command => {
             let models = models_from_env()?;
-            let sessions_dir = home_dir()?.join(".kcastle/sessions");
+            let sessions_dir = home_dir()?.join(".kcastle/sessions/default");
             let cwd = env::current_dir()?;
             match command {
                 Command::Prompt {
@@ -193,7 +194,7 @@ async fn run_prompt(agent: Agent, prompt: String, allow_tools: bool) -> Result<(
 }
 
 async fn run_tui(
-    agent: Agent,
+    mut agent: Agent,
     models: Vec<Model>,
     sessions_dir: PathBuf,
     cwd: PathBuf,
@@ -206,7 +207,28 @@ async fn run_tui(
             usage.input_tokens_details.cached_tokens,
         )
     });
-    let allow_all = read_permission(agent.session_info());
+    let mut session_config = if agent.session_info().path.as_os_str().is_empty() {
+        SessionConfig::default()
+    } else {
+        Session::inspect(&agent.session_info().path)
+            .map(|snapshot| snapshot.config().clone())
+            .unwrap_or_default()
+    };
+    let mut config_changed = false;
+    if session_config.model_id.is_none() {
+        session_config.model_id = Some(runtime_model_id(agent.model()));
+        session_config.reasoning_effort = agent.model().reasoning_effort().map(reasoning_key);
+        config_changed = true;
+    }
+    if !session_config.allow_all_tools && read_legacy_permission(agent.session_info()) {
+        session_config.allow_all_tools = true;
+        config_changed = true;
+        let _ = fs::remove_file(permission_path(&agent.session_info().path));
+    }
+    if config_changed && !agent.session_info().path.as_os_str().is_empty() {
+        agent.persist_session_config(&session_config).await?;
+    }
+    let allow_all = session_config.allow_all_tools;
     let mut app = App::new(agent.model(), agent.transcript(), &cwd, usage, allow_all);
     let session_path = agent.session_info().path.clone();
     let mut runtime = Runtime {
@@ -217,6 +239,7 @@ async fn run_tui(
         sessions_dir,
         session_path,
         compacting: false,
+        session_config,
     };
     let mut terminal = ratatui::try_init_with_options(TerminalOptions {
         viewport: Viewport::Inline(INLINE_VIEWPORT_HEIGHT),
@@ -387,7 +410,7 @@ async fn handle_action(
         UiAction::SetPermissions {
             allow_all,
             pending_call_id,
-        } => match write_runtime_permission(runtime, allow_all) {
+        } => match write_runtime_permission(runtime, allow_all).await {
             Ok(()) => {
                 app.set_permission_mode(allow_all);
                 if let Some(call_id) = pending_call_id
@@ -412,9 +435,35 @@ async fn handle_action(
             } else {
                 match Session::open(path).await {
                     Ok(session) => {
-                        let allow_all = read_permission(session.info());
+                        runtime.session_config = session.config().clone();
+                        let allow_all = runtime.session_config.allow_all_tools;
                         runtime.session_path = session.info().path.clone();
+                        let configured_model = runtime
+                            .session_config
+                            .model_id
+                            .as_deref()
+                            .and_then(|model_id| {
+                                runtime
+                                    .models
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(_, model)| runtime_model_id(model) == model_id)
+                            })
+                            .map(|(index, model)| (index, model.clone()));
                         let agent = runtime.agent.as_mut().expect("idle agent");
+                        if let Some((index, mut configured)) = configured_model {
+                            if let Some(effort) = runtime
+                                .session_config
+                                .reasoning_effort
+                                .as_deref()
+                                .and_then(parse_reasoning_effort)
+                                && configured.reasoning_efforts().contains(&effort)
+                            {
+                                configured.set_reasoning_effort(effort);
+                            }
+                            runtime.selected_model = index;
+                            agent.set_model(configured);
+                        }
                         agent.set_session(session);
                         app.load_transcript(agent.transcript());
                         app.set_identity(agent.model());
@@ -463,6 +512,12 @@ async fn handle_action(
                     runtime.selected_model = index;
                     let agent = runtime.agent.as_mut().expect("idle agent");
                     agent.set_model(model.clone());
+                    runtime.session_config.model_id = Some(runtime_model_id(model));
+                    runtime.session_config.reasoning_effort =
+                        model.reasoning_effort().map(reasoning_key);
+                    agent
+                        .persist_session_config(&runtime.session_config)
+                        .await?;
                     app.set_identity(agent.model());
                     app.set_usage_values(None);
                 } else {
@@ -489,6 +544,12 @@ async fn handle_action(
                     app.set_usage_values(None);
                 }
                 app.set_identity(agent.model());
+                runtime.session_config.model_id = Some(runtime_model_id(agent.model()));
+                runtime.session_config.reasoning_effort =
+                    agent.model().reasoning_effort().map(reasoning_key);
+                agent
+                    .persist_session_config(&runtime.session_config)
+                    .await?;
             }
         }
         UiAction::Submit(value) => handle_submit(value, app, runtime).await?,
@@ -516,7 +577,7 @@ async fn handle_submit(
             "model" => app.show_models(&runtime.models, runtime.selected_model),
             "permissions" => {
                 if let Some(allow_all) = app.request_permission_toggle() {
-                    match write_runtime_permission(runtime, allow_all) {
+                    match write_runtime_permission(runtime, allow_all).await {
                         Ok(()) => app.set_permission_mode(allow_all),
                         Err(error) => app.notice(format!("Permission save failed: {error}")),
                     }
@@ -545,7 +606,6 @@ async fn handle_submit(
                     .expect("active agent")
                     .control()
                     .queue(argument.trim().to_owned())?;
-                app.push_user(argument.trim().to_owned());
             }
             "queue" => app.notice("Usage: /queue MESSAGE while the agent is running"),
             "help" => app.notice(HELP),
@@ -560,7 +620,6 @@ async fn handle_submit(
         return Ok(());
     }
     ensure_persistent_session(app, runtime).await?;
-    app.push_user(value.clone());
     if let Some(active) = &runtime.active {
         active.control().steer(value)?;
     } else {
@@ -578,17 +637,16 @@ async fn ensure_persistent_session(
     if !runtime.session_path.as_os_str().is_empty() {
         return Ok(());
     }
-    let session = Session::create(&runtime.sessions_dir).await?;
+    let session = Session::create_in_project_with_config(
+        &runtime.sessions_dir,
+        kcastle_agent::DEFAULT_PROJECT_ID,
+        runtime.session_config.clone(),
+    )
+    .await?;
     runtime.session_path = session.info().path.clone();
     let agent = runtime.agent.as_mut().expect("idle agent");
     agent.set_session(session);
     app.set_identity(agent.model());
-    if app.permission_mode()
-        && let Err(error) = write_permission(&runtime.session_path, true)
-    {
-        app.set_permission_mode(false);
-        app.notice(format!("Permission save failed; using ask mode: {error}"));
-    }
     Ok(())
 }
 
@@ -617,7 +675,27 @@ fn permission_path(session_path: &Path) -> PathBuf {
     session_path.with_extension("permissions")
 }
 
-fn read_permission(session: &SessionInfo) -> bool {
+fn runtime_model_id(model: &Model) -> String {
+    let provider = match model.name() {
+        "DeepSeek" => DEEPSEEK_PROVIDER_ID,
+        "OpenAI" => OPENAI_PROVIDER_ID,
+        name => name,
+    };
+    format!("{provider}/{}", model.model())
+}
+
+fn reasoning_key(effort: &kcastle_agent::ReasoningEffort) -> String {
+    serde_json::to_value(effort)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
+}
+
+fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
+}
+
+fn read_legacy_permission(session: &SessionInfo) -> bool {
     if session.path.as_os_str().is_empty() {
         return false;
     }
@@ -625,14 +703,20 @@ fn read_permission(session: &SessionInfo) -> bool {
         .is_ok_and(|value| value.trim() == "allow all")
 }
 
-fn write_runtime_permission(runtime: &Runtime, allow_all: bool) -> io::Result<()> {
-    if runtime.session_path.as_os_str().is_empty() {
-        Ok(())
-    } else {
-        write_permission(&runtime.session_path, allow_all)
+async fn write_runtime_permission(
+    runtime: &mut Runtime,
+    allow_all: bool,
+) -> Result<(), kcastle_agent::AgentError> {
+    runtime.session_config.allow_all_tools = allow_all;
+    if let Some(agent) = &mut runtime.agent {
+        agent
+            .persist_session_config(&runtime.session_config)
+            .await?;
     }
+    Ok(())
 }
 
+#[cfg(test)]
 fn write_permission(session_path: &Path, allow_all: bool) -> io::Result<()> {
     let path = permission_path(session_path);
     fs::write(path, if allow_all { "allow all\n" } else { "ask\n" })
@@ -640,7 +724,10 @@ fn write_permission(session_path: &Path, allow_all: bool) -> io::Result<()> {
 
 async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<dyn Error>> {
     let active = runtime.active.take().expect("active agent");
-    let agent = active.finish().await?;
+    let mut agent = active.finish().await?;
+    agent
+        .persist_session_config(&runtime.session_config)
+        .await?;
     app.set_identity(agent.model());
     runtime.agent = Some(agent);
     runtime.compacting = false;
@@ -649,13 +736,13 @@ async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<d
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::{Agent, Model, Session};
+    use kcastle_agent::{Agent, Model, Session, SessionConfig};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::{
         App, Command, Runtime, SessionInfo, ensure_persistent_session, handle_submit,
-        parse_args_from, read_permission, write_permission,
+        parse_args_from, read_legacy_permission, write_permission,
     };
 
     #[test]
@@ -693,16 +780,12 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let info = SessionInfo {
-            path: path.clone(),
-            title: "test".into(),
-            created_at: 0,
-        };
-        assert!(!read_permission(&info));
+        let info = SessionInfo::legacy(path.clone(), "test", 0);
+        assert!(!read_legacy_permission(&info));
         write_permission(&path, true).unwrap();
-        assert!(read_permission(&info));
+        assert!(read_legacy_permission(&info));
         write_permission(&path, false).unwrap();
-        assert!(!read_permission(&info));
+        assert!(!read_legacy_permission(&info));
         std::fs::remove_file(path.with_extension("permissions")).unwrap();
     }
 
@@ -729,6 +812,7 @@ mod tests {
             sessions_dir: directory.clone(),
             session_path: std::path::PathBuf::new(),
             compacting: false,
+            session_config: SessionConfig::default(),
         };
 
         handle_submit("/help".into(), &mut app, &mut runtime)
@@ -737,13 +821,19 @@ mod tests {
         assert!(Session::list(&directory).unwrap().is_empty());
 
         app.set_permission_mode(true);
+        runtime.session_config.allow_all_tools = true;
         ensure_persistent_session(&mut app, &mut runtime)
             .await
             .unwrap();
         let sessions = Session::list(&directory).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(runtime.session_path, sessions[0].path);
-        assert!(read_permission(&sessions[0]));
+        assert!(
+            Session::inspect(&sessions[0].path)
+                .unwrap()
+                .config()
+                .allow_all_tools
+        );
 
         ensure_persistent_session(&mut app, &mut runtime)
             .await
@@ -768,6 +858,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::new(),
             session_path: std::path::PathBuf::new(),
             compacting: true,
+            session_config: SessionConfig::default(),
         };
 
         handle_submit("do not lose this".into(), &mut app, &mut runtime)

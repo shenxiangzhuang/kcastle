@@ -5,6 +5,7 @@ use gpui::{ScrollHandle, Window, point, px};
 
 const VISUAL_UPDATE_INTERVAL_FRAMES: u8 = 3;
 
+#[cfg(test)]
 pub(crate) fn arm_next_frame(window: &mut Window, ready: tokio::sync::oneshot::Sender<()>) {
     window.on_next_frame(move |_, _| {
         let _ = ready.send(());

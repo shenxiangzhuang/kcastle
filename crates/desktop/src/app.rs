@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
@@ -10,24 +9,30 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{Theme, ThemeMode};
 use kcastle_agent::{
-    Agent, AgentEvent, Model, RunControl, Session, SessionInfo, ToolResult, TranscriptItem,
+    Agent, Model, Session, SessionConfig, SessionEvent, SessionId, SessionInfo, SessionIssue,
+    TranscriptItem,
 };
 
-use crate::application::{
-    MAX_EVENTS_PER_FRAME, StreamBatch, StreamTelemetry, is_frame_stream_event,
-};
+#[cfg(test)]
+use kcastle_agent::AgentEvent;
+
+#[cfg(test)]
+use crate::application::is_frame_stream_event;
 use crate::dialogs::Modal;
 use crate::domain::{
-    Action, AppState, ApprovalState, ComposerMenu, ConversationAction, ConversationState,
-    DetailsTab, Effect, Message, MessageId, Role, RunId, RunState, ScrollIntent,
-    SessionOperationKind, Surface, UsageSnapshot, reduce, reindex_messages,
+    Action, AppState, ComposerMenu, ConversationAction, ConversationState, DetailsTab, Effect,
+    Message, MessageId, Role, RunState, ScrollIntent, Surface, next_message_id, reduce,
+    reindex_messages,
 };
 use crate::layout::{LayoutInput, ScrollAnchor, ScrollRestore, resolve_scroll_restore};
 use crate::platform::NativeTitlebarController;
+#[cfg(test)]
+use crate::platform::gpui::arm_next_frame;
 use crate::platform::gpui::{
-    GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore, arm_next_frame, run_effects,
+    GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore, SessionRuntime,
+    SessionRuntimeSnapshot, SessionRuntimeStatus, run_effects,
 };
-use crate::project::ProjectStore;
+use crate::project::{ProjectId, ProjectStore};
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
 
 #[derive(Clone)]
@@ -61,12 +66,6 @@ impl ConfiguredModel {
         };
         format!("{} · {model}", self.model.name())
     }
-}
-
-static NEXT_MESSAGE_RENDER_KEY: AtomicU64 = AtomicU64::new(1);
-
-pub(crate) fn next_message_render_key() -> MessageId {
-    MessageId(NEXT_MESSAGE_RENDER_KEY.fetch_add(1, Ordering::Relaxed))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -106,12 +105,17 @@ pub(crate) struct DesktopStartup {
     pub(crate) settings: SettingsStore,
 }
 
+struct ProjectSessionRuntimes {
+    selected: SessionId,
+    sessions: HashMap<SessionId, Entity<SessionRuntime>>,
+}
+
 pub(crate) struct DesktopApp {
     pub(crate) core: AppState,
     pub(crate) layout_runtime: GpuiLayoutRuntime,
     pub(crate) message_presentations: MessagePresentationStore,
-    pub(crate) agent: Option<Agent>,
-    pub(crate) control: Option<RunControl>,
+    pub(crate) selected_runtime: Entity<SessionRuntime>,
+    project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
     pub(crate) input: Entity<InputState>,
     pub(crate) session_search: Entity<InputState>,
     pub(crate) trajectory_search: Entity<InputState>,
@@ -123,13 +127,14 @@ pub(crate) struct DesktopApp {
     pub(crate) details_scroll: ScrollHandle,
     pub(crate) models: Vec<ConfiguredModel>,
     pub(crate) selected_model: usize,
+    pub(crate) selected_reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
     pub(crate) model: String,
     pub(crate) project_store: ProjectStore,
     pub(crate) settings: SettingsStore,
-    pub(crate) started_at: Option<Instant>,
-    pub(crate) stream_telemetry: StreamTelemetry,
+    pub(crate) selected_started_at: Option<Instant>,
     pub(crate) tool_schemas: HashMap<String, String>,
     pub(crate) project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
+    pub(crate) project_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     native_titlebar: NativeTitlebarController,
@@ -158,7 +163,33 @@ impl DesktopApp {
         let model = models[selected_model].label();
         let tool_schemas = tool_schema_map(&agent);
         let current_session = agent.session_info().path.clone();
-        let project_sessions = load_project_sessions(&project_store);
+        let current_session_id = agent.session_info().id.clone();
+        let runtime_config = config_for_model(&models[selected_model], settings.allow_all_tools());
+        let selected_reasoning_effort = runtime_config
+            .reasoning_effort
+            .as_deref()
+            .and_then(parse_reasoning_effort);
+        let runtime = cx.new(|_| {
+            SessionRuntime::new(
+                agent,
+                project.id.as_str().to_owned(),
+                project.sessions_dir.clone(),
+                ConversationState::default(),
+                runtime_config,
+            )
+        });
+        let runtime_subscription = cx.observe(&runtime, |this, runtime, cx| {
+            this.sync_runtime_snapshot(&runtime, cx);
+        });
+        let mut project_runtimes = HashMap::new();
+        project_runtimes.insert(
+            project.id.clone(),
+            ProjectSessionRuntimes {
+                selected: current_session_id.clone(),
+                sessions: HashMap::from([(current_session_id, runtime.clone())]),
+            },
+        );
+        let (project_sessions, project_session_issues) = load_project_sessions(&project_store);
         let session_activity = load_session_activity(&project_sessions);
         let sessions = project_sessions
             .get(&project.sessions_dir)
@@ -240,8 +271,8 @@ impl DesktopApp {
             core,
             layout_runtime: GpuiLayoutRuntime::default(),
             message_presentations: MessagePresentationStore::default(),
-            agent: Some(agent),
-            control: None,
+            selected_runtime: runtime,
+            project_runtimes,
             input,
             session_search,
             trajectory_search,
@@ -253,13 +284,14 @@ impl DesktopApp {
             details_scroll: ScrollHandle::new(),
             models,
             selected_model,
+            selected_reasoning_effort,
             model,
             project_store,
             settings,
-            started_at: None,
-            stream_telemetry: StreamTelemetry::default(),
+            selected_started_at: None,
             tool_schemas,
             project_sessions,
+            project_session_issues,
             session_activity,
             session_search_documents,
             native_titlebar,
@@ -270,8 +302,281 @@ impl DesktopApp {
                 trajectory_subscription,
                 appearance_subscription,
                 bounds_subscription,
+                runtime_subscription,
             ],
         }
+    }
+
+    fn sync_runtime_snapshot(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
+        let snapshot = runtime.read(cx).snapshot();
+        let location = self
+            .project_runtimes
+            .iter()
+            .find_map(|(project_id, runtimes)| {
+                runtimes
+                    .sessions
+                    .iter()
+                    .find(|(_, candidate)| candidate.entity_id() == runtime.entity_id())
+                    .map(|(session_id, _)| (project_id.clone(), session_id.clone()))
+            });
+        if let Some((project_id, _)) = location
+            && !snapshot.session.path.as_os_str().is_empty()
+            && !self
+                .project_store
+                .projects()
+                .iter()
+                .find(|project| project.id == project_id)
+                .and_then(|project| self.project_sessions.get(&project.sessions_dir))
+                .is_some_and(|sessions| sessions.iter().any(|info| info.id == snapshot.session.id))
+        {
+            self.refresh_project_session_cache();
+            self.refresh_session_search_documents();
+        }
+        if runtime.entity_id() != self.selected_runtime.entity_id() {
+            cx.notify();
+            return;
+        }
+        self.apply_selected_runtime_snapshot(snapshot);
+        self.sync_message_presentations();
+        cx.notify();
+    }
+
+    fn apply_selected_runtime_snapshot(&mut self, snapshot: SessionRuntimeSnapshot) {
+        if let Some(model_id) = snapshot.config.model_id.as_deref()
+            && let Some(index) = self.models.iter().position(|model| model.id == model_id)
+        {
+            self.selected_model = index;
+            self.model = self.models[index].label();
+        }
+        self.selected_reasoning_effort = snapshot
+            .config
+            .reasoning_effort
+            .as_deref()
+            .and_then(parse_reasoning_effort)
+            .or_else(|| {
+                self.models[self.selected_model]
+                    .model
+                    .reasoning_effort()
+                    .cloned()
+            });
+        let previous_path = self.core.session.current.clone();
+        self.core.conversation = snapshot.conversation;
+        self.core.approval = snapshot.approval;
+        self.core.session.current = snapshot.session.path.clone();
+        self.selected_started_at = snapshot.started_at;
+        self.core.run = match snapshot.status {
+            SessionRuntimeStatus::Idle => RunState::Idle,
+            SessionRuntimeStatus::Creating | SessionRuntimeStatus::Configuring => {
+                RunState::Preparing
+            }
+            SessionRuntimeStatus::Running => RunState::Running {
+                run: snapshot.active_run.unwrap_or_default(),
+            },
+            SessionRuntimeStatus::Failed(message) => RunState::Failed { message },
+        };
+        if previous_path != snapshot.session.path {
+            if let Some(project) = self
+                .project_store
+                .project(self.core.workspace.active_project)
+                && let Some(runtimes) = self.project_runtimes.get_mut(&project.id)
+            {
+                runtimes.selected = snapshot.session.id.clone();
+            }
+            self.reload_active_sessions();
+            self.refresh_project_session_cache();
+            self.refresh_session_search_documents();
+        }
+    }
+
+    fn register_runtime(
+        &mut self,
+        project_id: ProjectId,
+        runtime: Entity<SessionRuntime>,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = runtime.read(cx).snapshot().session.id;
+        let subscription = cx.observe(&runtime, |this, runtime, cx| {
+            this.sync_runtime_snapshot(&runtime, cx);
+        });
+        self._subscriptions.push(subscription);
+        let project =
+            self.project_runtimes
+                .entry(project_id)
+                .or_insert_with(|| ProjectSessionRuntimes {
+                    selected: session_id.clone(),
+                    sessions: HashMap::new(),
+                });
+        project.sessions.insert(session_id, runtime);
+    }
+
+    fn create_runtime(
+        &mut self,
+        project_index: usize,
+        session: Session,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<SessionRuntime>> {
+        let project = self.project_store.project(project_index)?.clone();
+        let mut conversation = conversation_from_session(&session, &self.tool_schemas);
+        if session.recovery_needed() {
+            conversation.messages.push(restored_message(
+                Role::Notice,
+                "The session log has an incomplete tail. It will be backed up and repaired when this session next writes."
+                    .into(),
+            ));
+            reindex_messages(&mut conversation.messages);
+        }
+        let mut config = session.config().clone();
+        let model_index = config
+            .model_id
+            .as_ref()
+            .and_then(|id| self.models.iter().position(|candidate| &candidate.id == id))
+            .unwrap_or(self.selected_model);
+        let configured = &self.models[model_index];
+        if config.model_id.is_none() {
+            config = config_for_model(configured, self.settings.allow_all_tools());
+        }
+        let mut model = configured.model.clone();
+        if let Some(effort) = config.reasoning_effort.as_deref()
+            && let Some(effort) = model
+                .reasoning_efforts()
+                .iter()
+                .find(|candidate| reasoning_key(candidate) == effort)
+        {
+            model.set_reasoning_effort(effort.clone());
+        }
+        let agent = Agent::new(model, crate::INSTRUCTIONS, session, project.path.clone());
+        let runtime = cx.new(|_| {
+            SessionRuntime::new(
+                agent,
+                project.id.as_str().to_owned(),
+                project.sessions_dir,
+                conversation,
+                config,
+            )
+        });
+        self.register_runtime(project.id, runtime.clone(), cx);
+        Some(runtime)
+    }
+
+    fn active_project_runtime(&self, path: &Path) -> Option<Entity<SessionRuntime>> {
+        self.project_runtime(self.core.workspace.active_project, path)
+    }
+
+    fn project_runtime(&self, project_index: usize, path: &Path) -> Option<Entity<SessionRuntime>> {
+        let project = self.project_store.project(project_index)?;
+        let session_id = self
+            .project_sessions
+            .get(&project.sessions_dir)?
+            .iter()
+            .find(|session| same_path(&session.path, path))?
+            .id
+            .clone();
+        self.project_runtimes
+            .get(&project.id)?
+            .sessions
+            .get(&session_id)
+            .cloned()
+    }
+
+    pub(crate) fn session_is_active(
+        &self,
+        project_index: usize,
+        path: &Path,
+        cx: &Context<Self>,
+    ) -> bool {
+        self.project_runtime(project_index, path)
+            .is_some_and(|runtime| runtime.read(cx).is_active())
+    }
+
+    pub(crate) fn session_status_label(
+        &self,
+        project_index: usize,
+        path: &Path,
+        cx: &Context<Self>,
+    ) -> Option<&'static str> {
+        let snapshot = self
+            .project_runtime(project_index, path)?
+            .read(cx)
+            .snapshot();
+        if snapshot.approval.is_some() {
+            return Some("Approval needed");
+        }
+        match snapshot.status {
+            SessionRuntimeStatus::Creating | SessionRuntimeStatus::Configuring => Some("Preparing"),
+            SessionRuntimeStatus::Running => Some("Running"),
+            SessionRuntimeStatus::Failed(_) => Some("Failed"),
+            SessionRuntimeStatus::Idle => None,
+        }
+    }
+
+    pub(crate) fn project_has_active_sessions(
+        &self,
+        project_index: usize,
+        cx: &Context<Self>,
+    ) -> bool {
+        let Some(project) = self.project_store.project(project_index) else {
+            return false;
+        };
+        self.project_runtimes
+            .get(&project.id)
+            .is_some_and(|runtimes| {
+                runtimes
+                    .sessions
+                    .values()
+                    .any(|runtime| runtime.read(cx).is_active())
+            })
+    }
+
+    fn target_session_info(&self, project_index: usize, path: &Path) -> Option<SessionInfo> {
+        let project = self.project_store.project(project_index)?;
+        self.project_sessions
+            .get(&project.sessions_dir)?
+            .iter()
+            .find(|session| same_path(&session.path, path))
+            .cloned()
+    }
+
+    fn select_runtime(&mut self, runtime: Entity<SessionRuntime>, cx: &mut Context<Self>) {
+        self.selected_runtime = runtime.clone();
+        let snapshot = runtime.read(cx).snapshot();
+        if let Some(project) = self
+            .project_store
+            .project(self.core.workspace.active_project)
+            && let Some(runtimes) = self.project_runtimes.get_mut(&project.id)
+        {
+            runtimes.selected = snapshot.session.id.clone();
+        }
+        self.apply_selected_runtime_snapshot(snapshot);
+        self.sync_message_presentations();
+        self.restore_current_view_state(cx);
+        cx.notify();
+    }
+
+    fn select_or_create_project_draft(
+        &mut self,
+        project_index: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<SessionRuntime>> {
+        let project = self.project_store.project(project_index)?.clone();
+        if let Some(runtime) = self
+            .project_runtimes
+            .get(&project.id)
+            .and_then(|runtimes| {
+                runtimes.sessions.values().find(|runtime| {
+                    runtime
+                        .read(cx)
+                        .snapshot()
+                        .session
+                        .path
+                        .as_os_str()
+                        .is_empty()
+                })
+            })
+            .cloned()
+        {
+            return Some(runtime);
+        }
+        self.create_runtime(project_index, Session::memory(), cx)
     }
 
     fn sync_window_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -308,10 +613,8 @@ impl DesktopApp {
 
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
         for effect in self.transition(action) {
-            match effect {
-                Effect::ApplyChatTail => self.request_chat_tail(),
-                effect => panic!("async effect {effect:?} requires a Window dispatch"),
-            }
+            let Effect::ApplyChatTail = effect;
+            self.request_chat_tail();
         }
         cx.notify();
     }
@@ -319,8 +622,12 @@ impl DesktopApp {
     pub(crate) fn task_active(&self) -> bool {
         matches!(
             self.core.run,
-            RunState::CreatingSession { .. } | RunState::Running { .. }
-        ) || self.core.pending_session_operation.is_some()
+            RunState::Preparing | RunState::Running { .. }
+        )
+    }
+
+    pub(crate) fn session_running(&self) -> bool {
+        matches!(self.core.run, RunState::Running { .. })
     }
 
     pub(crate) fn update_composer_measurement(
@@ -452,11 +759,6 @@ impl DesktopApp {
     }
 
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.core.run, RunState::CreatingSession { .. })
-            || self.core.pending_session_operation.is_some()
-        {
-            return;
-        }
         let value = self.input.read(cx).value().trim().to_owned();
         if value.is_empty() {
             return;
@@ -466,361 +768,25 @@ impl DesktopApp {
         self.input.update(cx, |input, cx| {
             input.set_placeholder("Message the agent", window, cx)
         });
-        self.dispatch(
-            Action::Conversation(ConversationAction::SubmitUser(message(
-                Role::User,
-                value.clone(),
-            ))),
-            window,
-            cx,
-        );
-        self.sync_message_presentations();
+        let behavior = self.settings.enter_behavior();
+        self.selected_runtime
+            .update(cx, |runtime, cx| runtime.submit(value, behavior, cx));
         self.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
-
-        if let Some(control) = &self.control {
-            let result = match self.settings.enter_behavior() {
-                EnterBehavior::Steer => control.steer(value),
-                EnterBehavior::Queue => control.queue(value),
-            };
-            if let Err(error) = result {
-                self.notice(error.to_string());
-            }
-            cx.notify();
-            return;
-        }
-
-        let action = if self.core.session.current.as_os_str().is_empty() {
-            Action::BeginSessionCreation(value)
-        } else {
-            Action::BeginRun(value)
-        };
-        self.dispatch(action, window, cx);
-    }
-
-    pub(crate) fn create_session_for_run(
-        &mut self,
-        operation: crate::domain::OperationId,
-        retry_value: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let sessions_dir = self.core.workspace.sessions_dir.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let session = Session::create(&sessions_dir).await;
-            let _ = cx.update(|window, app| {
-                if let Some(this) = this.upgrade() {
-                    this.update(app, |this, cx| match session {
-                        Ok(session) => {
-                            let previous_key = this.view_state_key();
-                            let current_session = session.info().path.clone();
-                            let sessions = this.reload_sessions(&sessions_dir);
-                            let effects = this.transition(Action::SessionCreated {
-                                operation,
-                                current_session,
-                                sessions,
-                            });
-                            if effects
-                                .iter()
-                                .any(|effect| matches!(effect, Effect::StartRun { .. }))
-                            {
-                                this.activate_session_for_run(session, previous_key);
-                                run_effects(this, effects, window, cx);
-                            }
-                            cx.notify();
-                        }
-                        Err(error) => {
-                            let message = error.to_string();
-                            let before = this.core.run.clone();
-                            let effects = this.transition(Action::SessionCreationFailed {
-                                operation,
-                                message: message.clone(),
-                            });
-                            if before != this.core.run {
-                                let _ = this.transition(Action::Conversation(
-                                    ConversationAction::RollbackSubmittedUser,
-                                ));
-                                this.input.update(cx, |input, cx| {
-                                    input.set_value(&retry_value, window, cx);
-                                    input.set_placeholder(
-                                        "Describe what you want to build",
-                                        window,
-                                        cx,
-                                    );
-                                });
-                                this.notice(format!("Could not create session: {message}"));
-                            }
-                            run_effects(this, effects, window, cx);
-                            cx.notify();
-                        }
-                    });
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn start_run(
-        &mut self,
-        run: RunId,
-        value: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(agent) = self.agent.take() else {
-            self.dispatch(
-                Action::RunStartFailed {
-                    run,
-                    message: "Agent is unavailable".into(),
-                },
-                window,
-                cx,
-            );
-            return;
-        };
-        let mut active = agent.start(value);
-        self.control = Some(active.control());
-        self.started_at = Some(Instant::now());
-        cx.notify();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let mut stream_ended = false;
-            while !stream_ended {
-                let Some(first) = active.next_event().await else {
-                    break;
-                };
-                let collect_frame = is_frame_stream_event(&first);
-                let mut batch = StreamBatch::new(first);
-                if collect_frame {
-                    let (frame_tx, mut frame_rx) = tokio::sync::oneshot::channel();
-                    cx.update(|window, _| {
-                        arm_next_frame(window, frame_tx);
-                    })
-                    .ok();
-                    let mut reached_frame = false;
-                    let mut reached_structure = false;
-                    while batch.len() < MAX_EVENTS_PER_FRAME {
-                        tokio::select! {
-                            biased;
-                            _ = &mut frame_rx => {
-                                reached_frame = true;
-                                break;
-                            }
-                            event = active.next_event() => match event {
-                            Some(event) => {
-                                let structural = !is_frame_stream_event(&event);
-                                batch.push(event);
-                                if structural {
-                                    reached_structure = true;
-                                    break;
-                                }
-                            }
-                            None => {
-                                stream_ended = true;
-                                break;
-                            }
-                            },
-                        }
-                    }
-                    if !reached_frame && !reached_structure && !stream_ended {
-                        let _ = frame_rx.await;
-                    }
-                }
-                let _ = cx.update(|window, app| {
-                    if let Some(entity) = this.upgrade() {
-                        entity.update(app, |this, cx| {
-                            if !matches!(this.core.run, RunState::Running { run: active } if active == run)
-                            {
-                                return;
-                            }
-                            let previous_len = this.core.conversation.messages.len();
-                            let delta_count = batch.raw_delta_count();
-                            this.stream_telemetry.record(&batch);
-                            for event in batch.into_events() {
-                                this.apply_event(event);
-                            }
-                            if delta_count > 0 {
-                                let _ = this.transition(Action::Conversation(
-                                    ConversationAction::RefreshLiveSearch,
-                                ));
-                            }
-                            if this.core.conversation.messages.len() != previous_len {
-                                reindex_messages(&mut this.core.conversation.messages);
-                            }
-                            this.sync_message_presentations();
-                            let effects =
-                                this.transition(Action::StreamDeltasReceived(delta_count));
-                            run_effects(this, effects, window, cx);
-                            cx.notify();
-                        });
-                    }
-                });
-            }
-            let agent = active.finish().await;
-            let _ = cx.update(|window, app| {
-                if let Some(this) = this.upgrade() {
-                    this.update(app, |this, cx| {
-                        if !matches!(this.core.run, RunState::Running { run: active } if active == run)
-                        {
-                            return;
-                        }
-                        let effects = this.transition(Action::RunFinished(run));
-                        this.control = None;
-                        this.started_at = None;
-                        match agent {
-                            Ok(agent) => {
-                                let sessions = this.reload_active_sessions();
-                                this.dispatch(
-                                    Action::SetCurrentSession(agent.session_info().path.clone()),
-                                    window,
-                                    cx,
-                                );
-                                this.dispatch(
-                                    Action::RefreshSessions(sessions),
-                                    window,
-                                    cx,
-                                );
-                                this.refresh_session_search_documents();
-                                this.agent = Some(agent);
-                            }
-                            Err(error) => this.notice(error.to_string()),
-                        }
-                        run_effects(this, effects, window, cx);
-                        this.input.update(cx, |input, cx| input.focus(window, cx));
-                        cx.notify();
-                    });
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn apply_event(&mut self, event: AgentEvent) {
-        match event {
-            AgentEvent::ReasoningDelta(delta) => {
-                let _ = self.transition(Action::Conversation(ConversationAction::ReasoningDelta {
-                    new_message: message(Role::Reasoning, delta.clone()),
-                    delta,
-                }));
-            }
-            AgentEvent::TextDelta(delta) => {
-                let _ = self.transition(Action::Conversation(ConversationAction::TextDelta {
-                    new_message: message(Role::Assistant, delta.clone()),
-                    delta,
-                }));
-            }
-            AgentEvent::ApprovalRequired(call) => {
-                if self.settings.allow_all_tools() {
-                    if let Some(control) = &self.control
-                        && let Err(error) = control.approve(call.call_id, true)
-                    {
-                        self.notice(error.to_string());
-                    }
-                } else {
-                    let _ = self.transition(Action::SetApproval(Some(ApprovalState {
-                        call_id: call.call_id,
-                        name: call.name,
-                        arguments: call.arguments,
-                    })));
-                }
-            }
-            AgentEvent::ToolStarted(call) => {
-                let schema = self.tool_schemas.get(&call.name).cloned();
-                let _ = self.transition(Action::Conversation(ConversationAction::ToolStarted(
-                    Message {
-                        key: next_message_render_key(),
-                        revision: 0,
-                        role: Role::Tool,
-                        tool_call_id: Some(call.call_id),
-                        title: Some(call.name),
-                        text: String::new(),
-                        payload: Some(call.arguments),
-                        schema,
-                        pending: true,
-                        failed: false,
-                        expanded: false,
-                        rating: None,
-                        started_at_ms: Some(now_ms()),
-                        duration_ms: None,
-                        turn: 0,
-                        step: 0,
-                        request_id: None,
-                        search_text: String::new(),
-                    },
-                )));
-            }
-            AgentEvent::ToolFinished { call, result } => self.tool_result(&call.call_id, result),
-            AgentEvent::RunFinished(summary) => {
-                let usage = summary.usage.map(|usage| UsageSnapshot {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cached_tokens: usage.input_tokens_details.cached_tokens,
-                });
-                let _ = self.transition(Action::Conversation(ConversationAction::RunFinished {
-                    response_id: summary.response_id,
-                    usage,
-                }));
-            }
-            AgentEvent::RunFailed(error) => {
-                self.finish_reasoning();
-                self.notice(error);
-            }
-            AgentEvent::RunAborted => {
-                self.finish_reasoning();
-                self.notice("Stopped");
-            }
-            AgentEvent::CompactionStarted { .. } => self.notice("Compacting context…"),
-            AgentEvent::CompactionFinished { .. } => self.notice("Context compacted"),
-            _ => {}
-        }
-    }
-
-    fn finish_reasoning(&mut self) {
-        let _ = self.transition(Action::Conversation(ConversationAction::FinishReasoning));
     }
 
     pub(crate) fn decide(&mut self, call_id: String, allow: bool, cx: &mut Context<Self>) {
-        if let Some(control) = &self.control
-            && let Err(error) = control.approve(call_id, allow)
-        {
-            self.notice(error.to_string());
-        }
-        self.dispatch_local(Action::SetApproval(None), cx);
-        self.notice(if allow { "Tool allowed" } else { "Tool denied" });
-        cx.notify();
+        self.selected_runtime
+            .update(cx, |runtime, cx| runtime.decide(call_id, allow, cx));
     }
 
     pub(crate) fn abort(&mut self, cx: &mut Context<Self>) {
-        if let Some(control) = &self.control {
-            control.abort();
-            self.notice("Stopping…");
-            cx.notify();
-        }
-    }
-
-    fn tool_result(&mut self, call_id: &str, result: ToolResult) {
-        let duration_ms = self
-            .core
-            .conversation
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.tool_call_id.as_deref() == Some(call_id))
-            .and_then(|message| {
-                message
-                    .started_at_ms
-                    .map(|started| now_ms().saturating_sub(started))
-            });
-        let _ = self.transition(Action::Conversation(ConversationAction::ToolFinished {
-            call_id: call_id.to_owned(),
-            output: result.output,
-            is_error: result.is_error,
-            duration_ms,
-        }));
+        self.selected_runtime
+            .update(cx, |runtime, cx| runtime.abort(cx));
     }
 
     pub(crate) fn notice(&mut self, text: impl Into<String>) {
-        let _ = self.transition(Action::Conversation(ConversationAction::AppendNotice(
-            message(Role::Notice, text.into()),
+        let _ = self.transition(Action::Conversation(Box::new(
+            ConversationAction::AppendNotice(message(Role::Notice, text.into())),
         )));
         self.sync_message_presentations();
     }
@@ -1016,20 +982,20 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) {
         self.dispatch_local(
-            Action::Conversation(ConversationAction::ToggleExpanded {
+            Action::Conversation(Box::new(ConversationAction::ToggleExpanded {
                 index,
                 role: Role::Tool,
-            }),
+            })),
             cx,
         );
     }
 
     pub(crate) fn toggle_reasoning(&mut self, index: usize, cx: &mut Context<Self>) {
         self.dispatch_local(
-            Action::Conversation(ConversationAction::ToggleExpanded {
+            Action::Conversation(Box::new(ConversationAction::ToggleExpanded {
                 index,
                 role: Role::Reasoning,
-            }),
+            })),
             cx,
         );
     }
@@ -1062,7 +1028,10 @@ impl DesktopApp {
 
     pub(crate) fn rate_message(&mut self, index: usize, positive: bool, cx: &mut Context<Self>) {
         self.dispatch_local(
-            Action::Conversation(ConversationAction::RateAssistant { index, positive }),
+            Action::Conversation(Box::new(ConversationAction::RateAssistant {
+                index,
+                positive,
+            })),
             cx,
         );
     }
@@ -1203,22 +1172,32 @@ impl DesktopApp {
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) {
-        if let Err(error) = self.settings.set_allow_all_tools(allow) {
-            self.notice(format!("Could not save permission setting: {error}"));
+        if !self
+            .selected_runtime
+            .update(cx, |runtime, cx| runtime.set_allow_all_tools(allow, cx))
+        {
+            self.notice("Stop this session before changing its tool permission");
         }
         self.dispatch_local(Action::SetComposerMenu(None), cx);
         cx.notify();
     }
 
-    pub(crate) fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.task_active() {
-            self.notice("Stop the active task before starting a new chat");
-            cx.notify();
-            return;
+    pub(crate) fn set_default_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if let Err(error) = self.settings.set_allow_all_tools(allow) {
+            self.notice(format!("Could not save default permission: {error}"));
         }
+        cx.notify();
+    }
+
+    pub(crate) fn new_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.save_current_view_state();
-        self.activate_session(Session::memory());
-        self.restore_current_view_state(cx);
+        let Some(runtime) =
+            self.select_or_create_project_draft(self.core.workspace.active_project, cx)
+        else {
+            self.notice("Could not create a session runtime for this project");
+            return;
+        };
+        self.select_runtime(runtime, cx);
         self.input.update(cx, |input, cx| {
             input.set_placeholder("Describe what you want to build", window, cx);
             input.focus(window, cx);
@@ -1240,11 +1219,6 @@ impl DesktopApp {
     }
 
     pub(crate) fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.task_active() {
-            self.notice("Stop the active task before opening another project");
-            cx.notify();
-            return;
-        }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
@@ -1286,6 +1260,47 @@ impl DesktopApp {
         .detach();
     }
 
+    pub(crate) fn relocate_project(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Relocate Project".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let selection = receiver.await;
+            let _ = cx.update(|_, app| {
+                if let Some(this) = this.upgrade() {
+                    this.update(app, |this, cx| {
+                        match selection {
+                            Ok(Ok(Some(paths))) => {
+                                if let Some(path) = paths.into_iter().next()
+                                    && let Err(error) = this.project_store.relocate(index, path)
+                                {
+                                    this.notice(format!("Could not relocate project: {error}"));
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                this.notice(format!("Could not open project picker: {error}"));
+                            }
+                            Err(error) => {
+                                this.notice(format!("Project picker closed unexpectedly: {error}"))
+                            }
+                            Ok(Ok(None)) => {}
+                        }
+                        cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn switch_project(
         &mut self,
         index: usize,
@@ -1295,19 +1310,10 @@ impl DesktopApp {
         if index == self.core.workspace.active_project {
             return;
         }
-        if self.task_active() {
-            self.notice("Stop the active task before switching projects");
-            cx.notify();
-            return;
-        }
         let Some(project) = self.project_store.project(index).cloned() else {
             return;
         };
         self.save_current_view_state();
-        if let Some(agent) = &mut self.agent {
-            agent.set_cwd(project.path.clone());
-            agent.set_session(Session::memory());
-        }
         let sessions = self
             .project_sessions
             .get(&project.sessions_dir)
@@ -1324,8 +1330,15 @@ impl DesktopApp {
             cx,
         );
         self.refresh_session_search_documents();
-        self.reset_conversation();
-        self.restore_current_view_state(cx);
+        let runtime = self
+            .project_runtimes
+            .get(&project.id)
+            .and_then(|runtimes| runtimes.sessions.get(&runtimes.selected))
+            .cloned()
+            .or_else(|| self.select_or_create_project_draft(index, cx));
+        if let Some(runtime) = runtime {
+            self.select_runtime(runtime, cx);
+        }
         self.input.update(cx, |input, cx| {
             input.set_placeholder("Describe what you want to build", window, cx);
             input.focus(window, cx);
@@ -1339,13 +1352,25 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.task_active() {
-            self.notice("Stop the active task before removing a project");
+        let Some(project) = self.project_store.project(index).cloned() else {
+            return;
+        };
+        if project.is_default() {
+            self.notice("The default project cannot be removed");
             cx.notify();
             return;
         }
-        if self.project_store.projects().len() == 1 {
-            self.notice("At least one project must remain open");
+        if self
+            .project_runtimes
+            .get(&project.id)
+            .is_some_and(|runtimes| {
+                runtimes
+                    .sessions
+                    .values()
+                    .any(|runtime| runtime.read(cx).is_active())
+            })
+        {
+            self.notice("Stop this project's active sessions before removing it");
             cx.notify();
             return;
         }
@@ -1354,6 +1379,7 @@ impl DesktopApp {
             cx.notify();
             return;
         }
+        self.project_runtimes.remove(&project.id);
         self.refresh_project_session_cache();
         let next = if index < self.core.workspace.active_project {
             self.core.workspace.active_project - 1
@@ -1375,78 +1401,45 @@ impl DesktopApp {
         if path == self.core.session.current {
             return;
         }
-        if self.task_active() {
-            self.notice("Stop the active task before opening another session");
-            cx.notify();
+        self.save_current_view_state();
+        if let Some(runtime) = self.active_project_runtime(&path) {
+            self.select_runtime(runtime, cx);
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder("Message the agent", window, cx);
+                input.focus(window, cx);
+            });
             return;
         }
-        self.save_current_view_state();
-        self.dispatch(Action::BeginOpenSession(path), window, cx);
+        self.open_session_async(path, window, cx);
     }
 
-    pub(crate) fn open_session_effect(
-        &mut self,
-        operation: crate::domain::OperationId,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_session_async(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let project_id = self
+            .project_store
+            .project(self.core.workspace.active_project)
+            .map(|project| project.id.as_str().to_owned())
+            .unwrap_or_default();
         cx.spawn_in(window, async move |this, cx| {
-            let session = Session::open(path).await;
+            let session = Session::open_readonly_in_project(path, &project_id);
             let _ = cx.update(|window, app| {
                 if let Some(this) = this.upgrade() {
                     this.update(app, |this, cx| {
                         match session {
                             Ok(session) => {
-                                let current_session = session.info().path.clone();
-                                let was_pending = matches!(
-                                    this.core.pending_session_operation.as_ref(),
-                                    Some(pending)
-                                        if pending.operation == operation
-                                            && matches!(
-                                                &pending.kind,
-                                                SessionOperationKind::Open { path }
-                                                    if *path == current_session
-                                            )
-                                );
-                                let conversation =
-                                    conversation_from_session(&session, &this.tool_schemas);
-                                let sessions = this.reload_active_sessions();
-                                let effects = this.transition(Action::SessionOpened {
-                                    operation,
-                                    conversation,
-                                    current_session: current_session.clone(),
-                                    sessions,
-                                });
-                                let accepted = was_pending
-                                    && this.core.session.current == current_session
-                                    && this.core.pending_session_operation.is_none();
-                                if accepted {
-                                    if let Some(agent) = &mut this.agent {
-                                        agent.set_session(session);
-                                    }
-                                    this.sync_message_presentations();
-                                    this.restore_current_view_state(cx);
+                                if let Some(runtime) = this.create_runtime(
+                                    this.core.workspace.active_project,
+                                    session,
+                                    cx,
+                                ) {
+                                    this.select_runtime(runtime, cx);
                                     this.input.update(cx, |input, cx| {
-                                        input.set_placeholder("Message the agent", window, cx)
+                                        input.set_placeholder("Message the agent", window, cx);
                                     });
                                 }
-                                run_effects(this, effects, window, cx);
                             }
                             Err(error) => {
                                 let message = format!("Could not open session: {error}");
-                                let pending_before = this.core.pending_session_operation.clone();
-                                this.dispatch(
-                                    Action::SessionOperationFailed {
-                                        operation,
-                                        message: message.clone(),
-                                    },
-                                    window,
-                                    cx,
-                                );
-                                if pending_before != this.core.pending_session_operation {
-                                    this.notice(message);
-                                }
+                                this.notice(message);
                             }
                         }
                         this.input.update(cx, |input, cx| input.focus(window, cx));
@@ -1473,114 +1466,76 @@ impl DesktopApp {
         }
     }
 
-    pub(crate) fn rename_current_session(
+    pub(crate) fn rename_target_session(
         &mut self,
+        project_index: usize,
+        path: PathBuf,
         title: String,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
+            self.notice("This session cannot be renamed while it is active");
+            return;
+        }
+        let runtime = self.project_runtime(project_index, &path).or_else(|| {
+            let project_id = self.project_store.project(project_index)?.id.as_str();
+            let session = Session::open_readonly_in_project(&path, project_id).ok()?;
+            self.create_runtime(project_index, session, cx)
+        });
+        let Some(runtime) = runtime else {
+            self.notice("Could not open the target session for renaming");
+            return;
+        };
+        if !runtime.update(cx, |runtime, cx| runtime.rename(title, cx)) {
+            self.notice("This session cannot be renamed while it is active");
+        }
+    }
+
+    pub(crate) fn delete_target_session(
+        &mut self,
+        project_index: usize,
+        path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.task_active() || self.core.session.current.as_os_str().is_empty() {
+        if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
+            self.notice("This session cannot be deleted while it is active");
             return;
         }
-        self.dispatch(Action::BeginRenameSession(title), window, cx);
-    }
-
-    pub(crate) fn rename_session_effect(
-        &mut self,
-        operation: crate::domain::OperationId,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(mut agent) = self.agent.take() else {
-            self.dispatch(
-                Action::SessionOperationFailed {
-                    operation,
-                    message: "Agent is unavailable".into(),
-                },
-                window,
-                cx,
-            );
+        let Some(session) = self.target_session_info(project_index, &path) else {
+            self.notice("Could not find the target session");
             return;
         };
-        cx.spawn_in(window, async move |this, cx| {
-            let result = agent.rename_session(&title).await;
-            let _ = cx.update(|window, app| {
-                if let Some(this) = this.upgrade() {
-                    this.update(app, |this, cx| {
-                        match result {
-                            Ok(()) => {
-                                let was_pending = this
-                                    .core
-                                    .pending_session_operation
-                                    .as_ref()
-                                    .is_some_and(|pending| pending.operation == operation);
-                                let sessions = this.reload_active_sessions();
-                                this.dispatch(
-                                    Action::SessionRenamed {
-                                        operation,
-                                        title: agent.session_info().title.clone(),
-                                        sessions,
-                                    },
-                                    window,
-                                    cx,
-                                );
-                                if was_pending {
-                                    this.refresh_session_search_documents();
-                                }
-                            }
-                            Err(error) => {
-                                let message = format!("Could not rename session: {error}");
-                                let pending_before = this.core.pending_session_operation.clone();
-                                this.dispatch(
-                                    Action::SessionOperationFailed {
-                                        operation,
-                                        message: message.clone(),
-                                    },
-                                    window,
-                                    cx,
-                                );
-                                if pending_before != this.core.pending_session_operation {
-                                    this.notice(message);
-                                }
-                            }
-                        }
-                        this.agent = Some(agent);
-                        cx.notify();
-                    });
-                }
-            });
-        })
-        .detach();
-    }
-
-    pub(crate) fn delete_current_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.task_active() || self.core.session.current.as_os_str().is_empty() {
-            return;
-        }
-        let Some(session) = self
-            .core
-            .session
-            .sessions
-            .iter()
-            .find(|session| same_path(&session.path, &self.core.session.current))
-            .cloned()
-        else {
-            return;
-        };
-        if let Some(agent) = &mut self.agent {
-            agent.set_session(Session::memory());
-        }
         match Session::delete(&session) {
             Ok(()) => {
-                let sessions = self.reload_active_sessions();
-                self.dispatch(Action::RefreshSessions(sessions), window, cx);
+                if let Some(project) = self.project_store.project(project_index)
+                    && let Some(runtimes) = self.project_runtimes.get_mut(&project.id)
+                {
+                    runtimes.sessions.remove(&session.id);
+                }
+                let sessions_dir = self
+                    .project_store
+                    .project(project_index)
+                    .map(|project| project.sessions_dir.clone());
+                if let Some(sessions_dir) = sessions_dir {
+                    let sessions = self.reload_sessions(&sessions_dir);
+                    if project_index == self.core.workspace.active_project {
+                        self.dispatch(Action::RefreshSessions(sessions), window, cx);
+                    }
+                }
                 self.refresh_session_search_documents();
-                self.reset_conversation();
-                self.input.update(cx, |input, cx| {
-                    input.set_placeholder("Describe what you want to build", window, cx);
-                    input.focus(window, cx);
-                });
+                let deleted_selected = project_index == self.core.workspace.active_project
+                    && same_path(&path, &self.core.session.current);
+                if deleted_selected
+                    && let Some(runtime) = self.select_or_create_project_draft(project_index, cx)
+                {
+                    self.select_runtime(runtime, cx);
+                    self.input.update(cx, |input, cx| {
+                        input.set_placeholder("Describe what you want to build", window, cx);
+                        input.focus(window, cx);
+                    });
+                }
             }
             Err(error) => self.notice(format!("Could not delete session: {error}")),
         }
@@ -1592,41 +1547,58 @@ impl DesktopApp {
         effort: kcastle_agent::ReasoningEffort,
         cx: &mut Context<Self>,
     ) {
-        if self.control.is_some() || self.core.pending_session_operation.is_some() {
+        if self.task_active() {
             return;
         }
-        let model_id = self.models[self.selected_model].id.clone();
-        self.models[self.selected_model]
-            .model
-            .set_reasoning_effort(effort.clone());
-        if let Some(agent) = &mut self.agent {
-            agent.set_reasoning_effort(effort.clone());
-        }
-        if let Err(error) = self.settings.set_effort(&model_id, &effort) {
-            self.notice(format!("Could not save settings: {error}"));
-        }
+        self.selected_runtime.update(cx, |runtime, cx| {
+            runtime.set_reasoning_effort(effort.clone(), cx)
+        });
+        self.selected_reasoning_effort = Some(effort);
         cx.notify();
     }
 
     pub(crate) fn select_model(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.control.is_some()
-            || self.core.pending_session_operation.is_some()
-            || index >= self.models.len()
-            || index == self.selected_model
-        {
+        if self.task_active() || index >= self.models.len() || index == self.selected_model {
             return;
         }
         let configured = self.models[index].clone();
         let label = configured.label();
-        if let Some(agent) = &mut self.agent {
-            agent.set_model(configured.model);
-        }
+        self.selected_runtime.update(cx, |runtime, cx| {
+            runtime.set_model(configured.id.clone(), configured.model.clone(), cx)
+        });
         self.selected_model = index;
         self.model = label;
-        if let Err(error) = self.settings.set_selected_model(&configured.id) {
-            self.notice(format!("Could not save model selection: {error}"));
-        }
+        self.selected_reasoning_effort = configured.model.reasoning_effort().cloned();
         self.dispatch_local(Action::SetComposerMenu(None), cx);
+    }
+
+    pub(crate) fn refresh_idle_runtime_models(&mut self, cx: &mut Context<Self>) {
+        let updates = self
+            .project_runtimes
+            .values()
+            .flat_map(|project| project.sessions.values())
+            .filter_map(|runtime| {
+                let snapshot = runtime.read(cx).snapshot();
+                let model_id = snapshot.config.model_id?;
+                let configured = self.models.iter().find(|model| model.id == model_id)?;
+                let mut model = configured.model.clone();
+                if let Some(effort) = snapshot
+                    .config
+                    .reasoning_effort
+                    .as_deref()
+                    .and_then(parse_reasoning_effort)
+                    && model.reasoning_efforts().contains(&effort)
+                {
+                    model.set_reasoning_effort(effort);
+                }
+                Some((runtime.clone(), configured.id.clone(), model))
+            })
+            .collect::<Vec<_>>();
+        for (runtime, model_id, model) in updates {
+            runtime.update(cx, |runtime, cx| {
+                runtime.set_model(model_id, model, cx);
+            });
+        }
     }
 
     pub(crate) fn set_appearance(
@@ -1685,7 +1657,30 @@ impl DesktopApp {
     }
 
     fn reload_sessions(&mut self, sessions_dir: &Path) -> Vec<SessionInfo> {
-        let sessions = Session::list(sessions_dir).unwrap_or_default();
+        let project_id = self
+            .project_store
+            .projects()
+            .iter()
+            .find(|project| project.sessions_dir == sessions_dir)
+            .map(|project| project.id.as_str())
+            .unwrap_or(kcastle_agent::DEFAULT_PROJECT_ID);
+        let (sessions, issues) = match Session::catalog_in_project(sessions_dir, project_id) {
+            Ok(catalog) => (catalog.sessions, catalog.issues),
+            Err(error) => {
+                let sessions = self
+                    .project_sessions
+                    .get(sessions_dir)
+                    .cloned()
+                    .unwrap_or_default();
+                (
+                    sessions,
+                    vec![SessionIssue {
+                        path: sessions_dir.to_owned(),
+                        message: error.to_string(),
+                    }],
+                )
+            }
+        };
         if let Some(previous) = self.project_sessions.get(sessions_dir) {
             for session in previous {
                 self.session_activity.remove(&session.path);
@@ -1697,6 +1692,8 @@ impl DesktopApp {
         }
         self.project_sessions
             .insert(sessions_dir.to_owned(), sessions.clone());
+        self.project_session_issues
+            .insert(sessions_dir.to_owned(), issues);
         sessions
     }
 
@@ -1706,9 +1703,10 @@ impl DesktopApp {
     }
 
     fn refresh_project_session_cache(&mut self) {
-        let sessions = load_project_sessions(&self.project_store);
+        let (sessions, issues) = load_project_sessions(&self.project_store);
         self.session_activity = load_session_activity(&sessions);
         self.project_sessions = sessions;
+        self.project_session_issues = issues;
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
@@ -1762,52 +1760,11 @@ impl DesktopApp {
     pub(crate) fn scroll_chat_to_bottom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
     }
-
-    fn activate_session(&mut self, session: Session) {
-        let path = session.info().path.clone();
-        let conversation = conversation_from_session(&session, &self.tool_schemas);
-        if let Some(agent) = &mut self.agent {
-            agent.set_session(session);
-        }
-        let sessions = self.reload_active_sessions();
-        let _ = self.transition(Action::ReplaceConversation {
-            conversation,
-            current_session: path,
-            sessions,
-        });
-        self.sync_message_presentations();
-        self.apply_chat_tail();
-    }
-
-    fn activate_session_for_run(&mut self, session: Session, previous_key: String) {
-        let current_key = self.view_state_key();
-        if let Some(state) = self.view_states.remove(&previous_key) {
-            self.view_states.insert(current_key, state);
-        }
-        if let Some(agent) = &mut self.agent {
-            agent.set_session(session);
-        }
-    }
-
-    fn reset_conversation(&mut self) {
-        let _ = self.transition(Action::ResetConversation);
-        self.message_presentations.clear();
-        self.modal = None;
-        self.apply_chat_tail();
-    }
-}
-
-impl Drop for DesktopApp {
-    fn drop(&mut self) {
-        if let Some(control) = &self.control {
-            control.abort();
-        }
-    }
 }
 
 fn message(role: Role, text: String) -> Message {
     Message {
-        key: next_message_render_key(),
+        key: next_message_id(),
         revision: 0,
         role,
         tool_call_id: None,
@@ -1846,7 +1803,7 @@ fn messages_from_transcript(transcript: Vec<TranscriptItem>) -> Vec<Message> {
                 name,
                 arguments,
             } => messages.push(Message {
-                key: next_message_render_key(),
+                key: next_message_id(),
                 revision: 0,
                 role: Role::Tool,
                 tool_call_id: Some(call_id),
@@ -1889,6 +1846,7 @@ fn conversation_from_session(
     tool_schemas: &HashMap<String, String>,
 ) -> ConversationState {
     let mut messages = messages_from_transcript(session.state().transcript());
+    append_interrupted_stream(&mut messages, session.events());
     for message in &mut messages {
         if message.role == Role::Tool
             && let Some(name) = message.title.as_deref()
@@ -1933,6 +1891,87 @@ fn conversation_from_session(
     }
 }
 
+fn append_interrupted_stream(messages: &mut Vec<Message>, events: &[SessionEvent]) {
+    let mut reasoning = String::new();
+    let mut answer = String::new();
+    let mut active = false;
+    let mut current_input = None;
+    let mut admitted = Vec::<(String, String)>::new();
+    let mut interruption = None;
+    for event in events {
+        match event {
+            SessionEvent::RunStarted { input } => {
+                reasoning.clear();
+                answer.clear();
+                active = true;
+                current_input = Some(input.clone());
+                interruption = Some("Run interrupted before completion");
+            }
+            SessionEvent::ReasoningDelta { delta } if active => reasoning.push_str(delta),
+            SessionEvent::TextDelta { delta } if active => answer.push_str(delta),
+            SessionEvent::ResponseCommitted => {
+                reasoning.clear();
+                answer.clear();
+                current_input = None;
+            }
+            SessionEvent::RunFinished => {
+                active = false;
+                reasoning.clear();
+                answer.clear();
+                interruption = None;
+                current_input = None;
+            }
+            SessionEvent::RunAborted => {
+                active = false;
+                interruption = Some("Run stopped; partial output was preserved");
+            }
+            SessionEvent::RunFailed { .. } => {
+                active = false;
+                interruption = Some("Run failed; partial output was preserved");
+            }
+            SessionEvent::InputAdmitted { id, input, .. } => {
+                admitted.push((id.clone(), input.clone()));
+            }
+            SessionEvent::InputConsumed { id } => {
+                admitted.retain(|(candidate, _)| candidate != id);
+            }
+            SessionEvent::ReasoningDelta { .. } | SessionEvent::TextDelta { .. } => {}
+        }
+    }
+    if let Some(input) = current_input
+        && !messages
+            .last()
+            .is_some_and(|message| message.role == Role::User && message.text == input)
+    {
+        messages.push(restored_message(Role::User, input));
+    }
+    let had_partial = !reasoning.is_empty() || !answer.is_empty();
+    if !reasoning.is_empty() {
+        let mut message = restored_message(Role::Reasoning, reasoning);
+        message.title = Some("Think · interrupted".into());
+        messages.push(message);
+    }
+    if !answer.is_empty() {
+        messages.push(restored_message(Role::Assistant, answer));
+    }
+    if had_partial && let Some(interruption) = interruption {
+        messages.push(restored_message(Role::Notice, interruption.into()));
+    }
+    for (_, input) in admitted {
+        if !messages
+            .last()
+            .is_some_and(|message| message.role == Role::User && message.text == input)
+        {
+            messages.push(restored_message(Role::User, input));
+        }
+        messages.push(restored_message(
+            Role::Notice,
+            "This queued input was durably accepted but not consumed before the run stopped. Resend it to continue."
+                .into(),
+        ));
+    }
+}
+
 fn restored_message(role: Role, text: String) -> Message {
     let mut message = message(role, text);
     message.started_at_ms = None;
@@ -1967,6 +2006,25 @@ fn tool_schema_map(agent: &Agent) -> HashMap<String, String> {
             Some((name, display))
         })
         .collect()
+}
+
+fn reasoning_key(effort: &kcastle_agent::ReasoningEffort) -> String {
+    serde_json::to_value(effort)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
+}
+
+fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
+}
+
+fn config_for_model(model: &ConfiguredModel, allow_all_tools: bool) -> SessionConfig {
+    SessionConfig {
+        model_id: Some(model.id.clone()),
+        reasoning_effort: model.model.reasoning_effort().map(reasoning_key),
+        allow_all_tools,
+    }
 }
 
 fn safe_file_name(value: &str) -> String {
@@ -2067,17 +2125,33 @@ fn build_session_search_documents(
     documents
 }
 
-fn load_project_sessions(project_store: &ProjectStore) -> HashMap<PathBuf, Vec<SessionInfo>> {
-    project_store
-        .projects()
-        .iter()
-        .map(|project| {
-            (
-                project.sessions_dir.clone(),
-                Session::list(&project.sessions_dir).unwrap_or_default(),
-            )
-        })
-        .collect()
+fn load_project_sessions(
+    project_store: &ProjectStore,
+) -> (
+    HashMap<PathBuf, Vec<SessionInfo>>,
+    HashMap<PathBuf, Vec<SessionIssue>>,
+) {
+    let mut sessions = HashMap::new();
+    let mut issues = HashMap::new();
+    for project in project_store.projects() {
+        match Session::catalog_in_project(&project.sessions_dir, project.id.as_str()) {
+            Ok(catalog) => {
+                sessions.insert(project.sessions_dir.clone(), catalog.sessions);
+                issues.insert(project.sessions_dir.clone(), catalog.issues);
+            }
+            Err(error) => {
+                sessions.insert(project.sessions_dir.clone(), Vec::new());
+                issues.insert(
+                    project.sessions_dir.clone(),
+                    vec![SessionIssue {
+                        path: project.sessions_dir.clone(),
+                        message: error.to_string(),
+                    }],
+                );
+            }
+        }
+    }
+    (sessions, issues)
 }
 
 fn load_session_activity(
@@ -2278,7 +2352,7 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let (project_store, active_project) =
-            ProjectStore::load(root.join("state"), workspace.clone()).unwrap();
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
         let settings = SettingsStore::load(root.join("settings")).unwrap();
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
@@ -2314,10 +2388,10 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |this, cx| {
                 this.dispatch(
-                    Action::Conversation(ConversationAction::SubmitUser(message(
+                    Action::Conversation(Box::new(ConversationAction::SubmitUser(message(
                         Role::User,
                         "hello".into(),
-                    ))),
+                    )))),
                     window,
                     cx,
                 );
@@ -2345,10 +2419,10 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |this, cx| {
                 this.dispatch(
-                    Action::Conversation(ConversationAction::SubmitUser(message(
+                    Action::Conversation(Box::new(ConversationAction::SubmitUser(message(
                         Role::User,
                         "overflow ".repeat(800),
-                    ))),
+                    )))),
                     window,
                     cx,
                 );
@@ -2386,7 +2460,7 @@ mod tests {
         let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         let (project_store, active_project) =
-            ProjectStore::load(root.join("state"), workspace.clone()).unwrap();
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
         let settings = SettingsStore::load(root.join("settings")).unwrap();
         let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
         let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
@@ -2420,18 +2494,18 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |this, cx| {
                 this.dispatch(
-                    Action::Conversation(ConversationAction::SubmitUser(message(
+                    Action::Conversation(Box::new(ConversationAction::SubmitUser(message(
                         Role::User,
                         "line\n".repeat(12),
-                    ))),
+                    )))),
                     window,
                     cx,
                 );
                 this.dispatch(
-                    Action::Conversation(ConversationAction::ReasoningDelta {
+                    Action::Conversation(Box::new(ConversationAction::ReasoningDelta {
                         delta: "thinking".into(),
                         new_message: message(Role::Reasoning, "thinking".into()),
-                    }),
+                    })),
                     window,
                     cx,
                 );
@@ -2451,10 +2525,10 @@ mod tests {
         cx.update(|window, app| {
             view.update(app, |this, cx| {
                 this.dispatch(
-                    Action::Conversation(ConversationAction::TextDelta {
+                    Action::Conversation(Box::new(ConversationAction::TextDelta {
                         delta: "answer\nline\nline\nline".into(),
                         new_message: message(Role::Assistant, "answer\nline\nline\nline".into()),
-                    }),
+                    })),
                     window,
                     cx,
                 );
@@ -2633,5 +2707,49 @@ mod tests {
             ),
             Some("The requested ambiguous phrase".into())
         );
+    }
+
+    #[test]
+    fn interrupted_stream_replay_preserves_durable_input_and_partial_output() {
+        let mut messages = Vec::new();
+        append_interrupted_stream(
+            &mut messages,
+            &[
+                SessionEvent::RunStarted {
+                    input: "question".into(),
+                },
+                SessionEvent::ReasoningDelta {
+                    delta: "partial thought".into(),
+                },
+                SessionEvent::TextDelta {
+                    delta: "partial answer".into(),
+                },
+                SessionEvent::RunAborted,
+            ],
+        );
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].text, "question");
+        assert_eq!(messages[1].role, Role::Reasoning);
+        assert_eq!(messages[2].text, "partial answer");
+        assert_eq!(messages[3].role, Role::Notice);
+    }
+
+    #[test]
+    fn consumed_queue_admissions_do_not_create_recovery_notices() {
+        let mut messages = Vec::new();
+        append_interrupted_stream(
+            &mut messages,
+            &[
+                SessionEvent::InputAdmitted {
+                    id: "input-1".into(),
+                    input: "later".into(),
+                    mode: kcastle_agent::InputMode::Queue,
+                },
+                SessionEvent::InputConsumed {
+                    id: "input-1".into(),
+                },
+            ],
+        );
+        assert!(messages.is_empty());
     }
 }

@@ -125,15 +125,29 @@ impl AgentTool for ShellTool {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            #[cfg(unix)]
+            command.process_group(0);
+            #[cfg(windows)]
+            command.creation_flags(0x0000_0200);
             let child = match command.spawn() {
                 Ok(child) => child,
                 Err(error) => {
                     return ToolResult::error(format!("Failed to start command: {error}"));
                 }
             };
+            #[cfg(unix)]
+            let mut process_group = ProcessGroupGuard::new(child.id());
+            #[cfg(windows)]
+            let mut process_tree = ProcessTreeGuard::new(child.id());
             let duration = Duration::from_secs_f64(args.timeout);
             let output = match timeout(duration, child.wait_with_output()).await {
-                Ok(Ok(output)) => output,
+                Ok(Ok(output)) => {
+                    #[cfg(unix)]
+                    process_group.disarm();
+                    #[cfg(windows)]
+                    process_tree.disarm();
+                    output
+                }
                 Ok(Err(error)) => {
                     return ToolResult::error(format!("Failed to wait for command: {error}"));
                 }
@@ -156,6 +170,69 @@ impl AgentTool for ShellTool {
                 ToolResult::error(result)
             }
         })
+    }
+}
+
+#[cfg(unix)]
+struct ProcessGroupGuard {
+    process_group: Option<i32>,
+}
+
+#[cfg(unix)]
+impl ProcessGroupGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self {
+            process_group: pid.and_then(|pid| i32::try_from(pid).ok()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.process_group = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        let Some(process_group) = self.process_group else {
+            return;
+        };
+        // SAFETY: a negative, non-zero pid addresses exactly the process group created above.
+        unsafe {
+            libc::kill(-process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTreeGuard {
+    pid: Option<u32>,
+}
+
+#[cfg(windows)]
+impl ProcessTreeGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self { pid }
+    }
+
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid else {
+            return;
+        };
+        let pid = pid.to_string();
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -185,6 +262,7 @@ fn platform_shell(command: &str) -> Command {
 #[cfg(all(test, unix))]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use async_openai::types::responses::FunctionToolCall;
 
@@ -233,6 +311,57 @@ mod tests {
             .await;
         assert!(result.is_error);
         assert!(result.output.starts_with("exit_code=7\n"));
+    }
+
+    #[tokio::test]
+    async fn shell_timeout_kills_the_entire_process_group() {
+        let directory = std::env::temp_dir().join(format!(
+            "kcastle-process-group-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let call = FunctionToolCall {
+            arguments: r#"{"command":"sleep 30 & child=$!; echo $child > grandchild.pid; wait $child","timeout":0.1}"#.into(),
+            call_id: "timeout-tree".into(),
+            namespace: None,
+            name: "shell".into(),
+            id: None,
+            status: None,
+        };
+
+        let result = ShellTool
+            .execute(
+                &call,
+                &Env {
+                    cwd: directory.clone(),
+                },
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("timed out"));
+        let pid = std::fs::read_to_string(directory.join("grandchild.pid"))
+            .unwrap()
+            .trim()
+            .parse::<i32>()
+            .unwrap();
+        for _ in 0..40 {
+            if !process_exists(pid) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!process_exists(pid), "grandchild {pid} survived timeout");
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn process_exists(pid: i32) -> bool {
+        // SAFETY: signal zero performs a read-only existence check for the supplied pid.
+        unsafe { libc::kill(pid, 0) == 0 }
     }
 
     #[tokio::test]

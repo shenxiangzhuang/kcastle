@@ -23,31 +23,33 @@ reveal.
 Desktop preferences are stored in `~/.kcastle/settings.json`. The Models tab follows the DSH
 provider-card flow: it shows credential status, expands one provider editor at a time, and supports
 the OpenAI and DeepSeek providers with multiple editable models per provider. API keys saved there are never rendered
-back into the form, and the settings file is written with user-only permissions on Unix. Projects
-and their isolated JSONL session histories are stored below `~/.kcastle/projects`.
+back into the form, and the settings file is written with user-only permissions on Unix. Global
+model and permission choices are defaults for new sessions. Each session persists its own runtime
+configuration and append-only history below `~/.kcastle/sessions`; the built-in Default project
+uses `~/.kcastle/sessions/default`.
 
 In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 
 ## Architecture
 
-The desktop crate keeps state transitions, calculations, and platform effects separate:
+The desktop crate keeps view transitions, calculations, and session runtimes separate:
 
 ```text
-Input / AgentEvent / Measurement
-              -> Action
-              -> reduce(AppState, Action)
-              -> AppState + Effect[]
-              -> GPUI effect runner and views
+App -> ProjectStore -> Project -> SessionRuntime -> Agent
+                              \-> SessionRuntime -> Agent
 ```
 
 Key constraints:
 
 - `domain`, `layout`, and `application` are pure layers and do not depend on GPUI.
 - Views send actions instead of mutating domain state directly.
-- Session, run, and layout operations use typed identities so stale async results are ignored.
-- An idle `Agent` is owned by `DesktopApp`; an active run owns it until `finish` returns it.
-- Streaming deltas are coalesced at the display-frame boundary, while structural events flush
-  immediately.
+- `SessionId` is the stable identity and each `SessionRuntime` owns exactly one Agent, control
+  channel, event stream, approval state, queue, configuration, and writer lease. Agent events do
+  not pass through an app-global bus or the currently selected session.
+- Projects are directory namespaces, not scheduling boundaries. Sessions in the same or different
+  projects run concurrently and switching the selected runtime only changes the visible snapshot.
+- Visible run, stream, tool-result, and queued-input transitions are appended before their UI
+  events. A per-session writer lease rejects a second writer while still allowing read-only browse.
 - A collapsed live Think row shows the latest non-blank reasoning line and follows its horizontal
   tail at most once every three display frames; expanding it exposes the complete reasoning, and
   settlement restores the stable first line immediately.
@@ -74,7 +76,10 @@ For native UI changes, also exercise the signed release bundle manually:
   exit fullscreen and confirm their windowed position is restored.
 - Stream a response, scroll away from the tail, and confirm new output does not seize the scroll
   position; then use Back to bottom.
-- Create, open, rename, and delete sessions across projects, including actions attempted while a
-  session operation is pending.
+- Start at least two sessions in one project and two in different projects; switch among them while
+  they stream, approve, queue, stop, and finish independently.
+- Open a running session read-only, verify a second writer is rejected, and confirm a damaged log
+  keeps valid catalog entries visible and reports its recovery state.
+- Open a row's ellipsis menu without selecting it and confirm rename/delete targets that row.
 - Resize through compact, regular, split, and overlay layouts and confirm the composer never
   covers chat or trajectory content.

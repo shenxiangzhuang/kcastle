@@ -85,10 +85,6 @@ impl MessagePresentationStore {
             .get(&id)
             .expect("message presentation must be synchronized before rendering")
     }
-
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use gpui::{
     AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
@@ -14,8 +16,16 @@ use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile}
 use crate::ui_theme::{UiPalette, palette};
 
 pub(crate) enum Modal {
-    RenameSession(Entity<InputState>),
-    DeleteSession,
+    RenameSession {
+        project_index: usize,
+        path: PathBuf,
+        input: Entity<InputState>,
+    },
+    DeleteSession {
+        project_index: usize,
+        path: PathBuf,
+        title: String,
+    },
     RemoveProject(usize),
     Settings(Box<SettingsDialog>),
 }
@@ -156,7 +166,7 @@ fn models_settings_view(
     cx: &mut Context<DesktopApp>,
     colors: UiPalette,
 ) -> gpui::AnyElement {
-    let busy = app.control.is_some() || app.core.pending_session_operation.is_some();
+    let busy = app.task_active();
     let editor_provider = dialog
         .model_editor
         .as_ref()
@@ -621,31 +631,43 @@ struct ModelEditorRow {
 }
 
 impl DesktopApp {
-    pub(crate) fn open_rename_session_dialog(
+    pub(crate) fn open_target_rename_session_dialog(
         &mut self,
+        project_index: usize,
+        path: PathBuf,
+        title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.core.session.current.as_os_str().is_empty() || self.control.is_some() {
+        if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
             return;
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).default_value(self.core.conversation.title.clone())
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+        self.modal = Some(Modal::RenameSession {
+            project_index,
+            path,
+            input: input.clone(),
         });
-        self.modal = Some(Modal::RenameSession(input.clone()));
         input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
 
-    pub(crate) fn open_delete_session_dialog(
+    pub(crate) fn open_target_delete_session_dialog(
         &mut self,
+        project_index: usize,
+        path: PathBuf,
+        title: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.core.session.current.as_os_str().is_empty() || self.control.is_some() {
+        if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
             return;
         }
-        self.modal = Some(Modal::DeleteSession);
+        self.modal = Some(Modal::DeleteSession {
+            project_index,
+            path,
+            title,
+        });
         self.modal_focus.focus(window);
         cx.notify();
     }
@@ -763,7 +785,7 @@ impl DesktopApp {
         let Some(editor) = &dialog.model_editor else {
             return;
         };
-        if self.control.is_some() || self.core.pending_session_operation.is_some() {
+        if self.task_active() {
             return;
         }
         let provider_id = editor.provider_id;
@@ -923,9 +945,7 @@ impl DesktopApp {
             .unwrap_or(0);
         let selected = self.models[self.selected_model].clone();
         self.model = selected.label();
-        if let Some(agent) = &mut self.agent {
-            agent.set_model(selected.model);
-        }
+        self.refresh_idle_runtime_models(cx);
         if let Err(error) = self.settings.set_selected_model(&selected.id) {
             self.notice(format!("Could not save model selection: {error}"));
         }
@@ -943,15 +963,22 @@ impl DesktopApp {
     }
 
     pub(crate) fn confirm_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Modal::RenameSession(input)) = &self.modal else {
+        let Some(Modal::RenameSession {
+            project_index,
+            path,
+            input,
+        }) = &self.modal
+        else {
             return;
         };
+        let project_index = *project_index;
+        let path = path.clone();
         let title = input.read(cx).value().trim().to_owned();
         if title.is_empty() {
             return;
         }
         self.modal = None;
-        self.rename_current_session(title, window, cx);
+        self.rename_target_session(project_index, path, title, window, cx);
     }
 
     pub(crate) fn modal_view(
@@ -961,7 +988,7 @@ impl DesktopApp {
     ) -> Option<gpui::AnyElement> {
         let colors = palette(cx);
         let content = match &self.modal {
-            Some(Modal::RenameSession(input)) => modal_card("Rename session", colors)
+            Some(Modal::RenameSession { input, .. }) => modal_card("Rename session", colors)
                 .child(
                     div()
                         .text_sm()
@@ -984,37 +1011,47 @@ impl DesktopApp {
                         ),
                 )
                 .into_any_element(),
-            Some(Modal::DeleteSession) => modal_card("Delete session?", colors)
-                .child(format!(
-                    "“{}” will be permanently deleted.",
-                    self.core.conversation.title
-                ))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child("This cannot be undone."),
-                )
-                .child(
-                    modal_actions()
-                        .child(
-                            Button::new("cancel-delete-session")
-                                .label("Cancel")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.close_modal(window, cx)),
-                                ),
-                        )
-                        .child(
-                            Button::new("confirm-delete-session")
-                                .label("Delete")
-                                .danger()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.modal = None;
-                                    this.delete_current_session(window, cx)
-                                })),
-                        ),
-                )
-                .into_any_element(),
+            Some(Modal::DeleteSession {
+                project_index,
+                path,
+                title,
+            }) => {
+                let project_index = *project_index;
+                let path = path.clone();
+                modal_card("Delete session?", colors)
+                    .child(format!("“{title}” will be permanently deleted."))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("This cannot be undone."),
+                    )
+                    .child(
+                        modal_actions()
+                            .child(
+                                Button::new("cancel-delete-session")
+                                    .label("Cancel")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_modal(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("confirm-delete-session")
+                                    .label("Delete")
+                                    .danger()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.modal = None;
+                                        this.delete_target_session(
+                                            project_index,
+                                            path.clone(),
+                                            window,
+                                            cx,
+                                        )
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
             Some(Modal::RemoveProject(index)) => {
                 let index = *index;
                 let name = self
@@ -1072,7 +1109,7 @@ impl DesktopApp {
                 .tab_index(0)
                 .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                     if event.keystroke.key == "enter"
-                        && matches!(this.modal, Some(Modal::RenameSession(_)))
+                        && matches!(this.modal, Some(Modal::RenameSession { .. }))
                     {
                         this.confirm_rename(window, cx);
                     }
@@ -1191,15 +1228,19 @@ fn permission_settings_row(allow_all: bool, cx: &mut Context<DesktopApp>) -> imp
                     Button::new("settings-permission-ask")
                         .label("Ask")
                         .when(!allow_all, |button| button.primary())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.set_allow_all_tools(false, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_default_allow_all_tools(false, cx)
+                        })),
                 )
                 .child(
                     Button::new("settings-permission-allow")
                         .label("Allow all")
                         .when(allow_all, |button| button.primary())
-                        .on_click(cx.listener(|this, _, _, cx| this.set_allow_all_tools(true, cx))),
+                        .on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.set_default_allow_all_tools(true, cx)
+                            }),
+                        ),
                 ),
         )
 }

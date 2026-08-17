@@ -56,7 +56,7 @@ impl DesktopApp {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(conversation_view_model(&self.core).title.to_owned()),
                             )
-                            .children(self.control.is_some().then(|| {
+                            .children(self.session_running().then(|| {
                                 div()
                                     .flex()
                                     .items_center()

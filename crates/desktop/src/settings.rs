@@ -205,6 +205,7 @@ impl SettingsStore {
         self.save()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_effort(
         &mut self,
         model_id: &str,

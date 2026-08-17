@@ -38,7 +38,7 @@ use assets::DesktopAssets;
 use project::ProjectStore;
 use settings::{Appearance, ProviderModel, ProviderProfile, SettingsStore};
 
-const INSTRUCTIONS: &str = "You are kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
+pub(crate) const INSTRUCTIONS: &str = "You are kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 
 fn init_ui(cx: &mut App) {
     gpui_component::init(cx);
@@ -54,7 +54,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .enable_all()
         .build()?;
     let _runtime = runtime.enter();
-    let cwd = env::current_dir()?;
     let root = home_dir()?.join(".kcastle");
     let mut settings = SettingsStore::load(root.clone())?;
     let mut models = models_from_env(settings.provider_profiles())?;
@@ -75,7 +74,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     }
     let model = models[selected_model].model.clone();
     let appearance = settings.appearance();
-    let (projects, active_project) = ProjectStore::load(root, cwd)?;
+    let (projects, active_project) = ProjectStore::load(root, None)?;
     let project = projects
         .project(active_project)
         .expect("active project should exist");

@@ -1,7 +1,5 @@
 use kcastle_agent::AgentEvent;
 
-pub(crate) const MAX_EVENTS_PER_FRAME: usize = 128;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StreamTelemetry {
     pub(crate) batches: u64,

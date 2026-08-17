@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use kcastle_agent::SessionInfo;
 
-use crate::domain::{ConversationState, LayoutGeneration, MessageId, OperationId, RunId};
+use crate::domain::{ConversationState, LayoutGeneration, MessageId, RunId};
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,29 +79,13 @@ pub(crate) enum DetailsTab {
 pub(crate) enum RunState {
     #[default]
     Idle,
-    CreatingSession {
-        operation: OperationId,
-        input: String,
-    },
+    Preparing,
     Running {
         run: RunId,
     },
     Failed {
-        operation: Option<OperationId>,
         message: String,
     },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionOperationKind {
-    Open { path: PathBuf },
-    Rename { path: PathBuf, title: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PendingSessionOperation {
-    pub(crate) operation: OperationId,
-    pub(crate) kind: SessionOperationKind,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,10 +124,6 @@ pub(crate) struct AppState {
     pub(crate) follow_chat_tail: bool,
     pub(crate) unread_stream_updates: usize,
     pub(crate) run: RunState,
-    pub(crate) pending_session_operation: Option<PendingSessionOperation>,
-    pub(crate) last_error: Option<String>,
-    pub(crate) next_operation: OperationId,
-    pub(crate) next_run: RunId,
     pub(crate) layout_generation: LayoutGeneration,
     pub(crate) layout_input: LayoutInput,
     pub(crate) layout: LayoutPlan,
@@ -165,10 +145,6 @@ impl AppState {
             follow_chat_tail: true,
             unread_stream_updates: 0,
             run: RunState::Idle,
-            pending_session_operation: None,
-            last_error: None,
-            next_operation: OperationId::default(),
-            next_run: RunId::default(),
             layout_generation: LayoutGeneration::default(),
             layout: resolve_layout(layout_input),
             layout_input,
