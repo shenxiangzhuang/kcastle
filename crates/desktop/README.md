@@ -78,6 +78,8 @@ For native UI changes, also exercise the signed release bundle manually:
   position; then use Back to bottom.
 - Start at least two sessions in one project and two in different projects; switch among them while
   they stream, approve, queue, stop, and finish independently.
+- Confirm a background session uses a spinning ring while running, changes to a blue unread dot
+  after it finishes, and clears the dot when selected; the relative time label must remain visible.
 - Open a running session read-only, verify a second writer is rejected, and confirm a damaged log
   keeps valid catalog entries visible and reports its recovery state.
 - Open a row's ellipsis menu without selecting it and confirm rename/delete targets that row.

@@ -66,7 +66,7 @@ pub(crate) mod metrics {
     pub(crate) const SESSION_ROW_HEIGHT: f32 = 32.0;
     pub(crate) const SIDEBAR_ICON_SLOT: f32 = 16.0;
     pub(crate) const SESSION_ROW_INDENT: f32 = 28.0;
-    pub(crate) const SESSION_TRAILING_SLOT: f32 = 32.0;
+    pub(crate) const SESSION_TRAILING_SLOT: f32 = 52.0;
     pub(crate) const SIDEBAR_LABEL_UNITS: usize = 24;
     pub(crate) const TAB_HEIGHT: f32 = 42.0;
     pub(crate) const DETAILS_HEADER_HEIGHT: f32 = 54.0;

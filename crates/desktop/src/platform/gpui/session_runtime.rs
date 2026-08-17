@@ -33,6 +33,7 @@ pub(crate) struct SessionRuntimeSnapshot {
     pub(crate) allow_all_tools: bool,
     pub(crate) config: SessionConfig,
     pub(crate) active_run: Option<RunId>,
+    pub(crate) completed_runs: u64,
 }
 
 /// The complete GPUI-owned execution boundary for one session.
@@ -47,6 +48,7 @@ pub(crate) struct SessionRuntime {
     control: Option<RunControl>,
     active_run: Option<RunId>,
     next_run: RunId,
+    completed_runs: u64,
     conversation: ConversationState,
     approval: Option<ApprovalState>,
     status: SessionRuntimeStatus,
@@ -84,6 +86,7 @@ impl SessionRuntime {
             control: None,
             active_run: None,
             next_run: RunId::default(),
+            completed_runs: 0,
             conversation,
             approval: None,
             status: SessionRuntimeStatus::Idle,
@@ -104,6 +107,7 @@ impl SessionRuntime {
             allow_all_tools: self.allow_all_tools,
             config: self.config.clone(),
             active_run: self.active_run,
+            completed_runs: self.completed_runs,
         }
     }
 
@@ -447,6 +451,7 @@ impl SessionRuntime {
                         usage,
                     },
                 );
+                self.completed_runs = self.completed_runs.saturating_add(1);
                 self.status = SessionRuntimeStatus::Idle;
             }
             AgentEvent::RunFailed(error) => {
@@ -608,5 +613,20 @@ mod tests {
         assert_eq!(first.conversation.messages.len(), 1);
         assert!(second.conversation.messages.is_empty());
         assert_eq!(second.active_run, Some(RunId(1)));
+    }
+
+    #[test]
+    fn completion_generation_advances_only_for_a_finished_response() {
+        let mut runtime = runtime();
+
+        runtime.apply_event(AgentEvent::RunAborted);
+        assert_eq!(runtime.completed_runs, 0);
+
+        runtime.apply_event(AgentEvent::RunFinished(kcastle_agent::RunSummary {
+            output: "done".into(),
+            response_id: "response-1".into(),
+            usage: None,
+        }));
+        assert_eq!(runtime.completed_runs, 1);
     }
 }

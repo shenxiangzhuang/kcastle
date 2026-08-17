@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::app::{DesktopApp, same_path, session_age};
+use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, deferred, div,
@@ -9,6 +9,8 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::spinner::Spinner;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable};
 
 use crate::assets::DesktopIconName;
@@ -530,10 +532,7 @@ impl DesktopApp {
                                     .is_some_and(|target| same_path(target, &path));
                                 let target_active = self.session_is_active(index, &path, cx);
                                 let age = session_age(self.session_modified_at(&session));
-                                let status = self.session_status_label(index, &path, cx);
-                                let metadata = status
-                                    .map(|status| format!("{status} · {age}"))
-                                    .unwrap_or(age);
+                                let status = self.session_status_indicator(index, &path, cx);
                                 let action = Button::new(SharedString::from(format!("session-actions-{index}-{session_index}")))
                                     .icon(IconName::Ellipsis)
                                     .ghost()
@@ -565,7 +564,19 @@ impl DesktopApp {
                                     .into_any_element();
                                 let open_path = path.clone();
                                 Some(
-                                    session_row(group.clone(), group.clone(), display_title, metadata, selected, colors, Some(action))
+                                    session_row(
+                                        group.clone(),
+                                        group.clone(),
+                                        display_title,
+                                        SessionRowTrailing {
+                                            age,
+                                            status,
+                                            reduce_motion: self.settings.reduce_motion(),
+                                        },
+                                        selected,
+                                        colors,
+                                        Some(action),
+                                    )
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.dispatch(
                                                 Action::SetSessionActionTarget(None),
@@ -665,10 +676,7 @@ impl DesktopApp {
                         .is_some_and(|target| same_path(target, &path));
                     let target_active = self.session_is_active(project_index, &path, cx);
                     let age = session_age(modified);
-                    let status = self.session_status_label(project_index, &path, cx);
-                    let metadata = status
-                        .map(|status| format!("{status} · {age}"))
-                        .unwrap_or(age);
+                    let status = self.session_status_indicator(project_index, &path, cx);
                     let action = Button::new(SharedString::from(format!(
                         "flat-session-actions-{row_index}"
                     )))
@@ -701,7 +709,11 @@ impl DesktopApp {
                         ("flat-session", row_index),
                         SharedString::from(format!("flat-session-{row_index}")),
                         format!("{title} · {project_name}"),
-                        metadata,
+                        SessionRowTrailing {
+                            age,
+                            status,
+                            reduce_motion: self.settings.reduce_motion(),
+                        },
                         selected,
                         colors,
                         Some(action),
@@ -761,16 +773,27 @@ fn sidebar_option(
         .children(selected.then(|| Icon::new(IconName::Check).size_4()))
 }
 
+struct SessionRowTrailing {
+    age: String,
+    status: Option<SidebarSessionStatus>,
+    reduce_motion: bool,
+}
+
 fn session_row(
     id: impl Into<gpui::ElementId>,
     group: impl Into<SharedString>,
     title: String,
-    age: String,
+    trailing: SessionRowTrailing,
     selected: bool,
     colors: UiPalette,
     action: Option<gpui::AnyElement>,
 ) -> gpui::Stateful<gpui::Div> {
     let group = group.into();
+    let SessionRowTrailing {
+        age,
+        status,
+        reduce_motion,
+    } = trailing;
     div()
         .id(id)
         .group(group.clone())
@@ -806,12 +829,19 @@ fn session_row(
                 .child(
                     div()
                         .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap_1()
                         .text_right()
                         .text_xs()
                         .text_color(colors.muted_text)
                         .when(action.is_some(), |age| {
                             age.group_hover(group.clone(), |age| age.invisible())
                         })
+                        .children(status.map(|status| {
+                            session_status_icon(status, reduce_motion, colors, group.clone())
+                        }))
                         .child(age),
                 )
                 .children(action.map(|action| {
@@ -828,6 +858,59 @@ fn session_row(
                         .child(action)
                 })),
         )
+}
+
+fn session_status_icon(
+    status: SidebarSessionStatus,
+    reduce_motion: bool,
+    colors: UiPalette,
+    group: SharedString,
+) -> gpui::AnyElement {
+    let label = match status {
+        SidebarSessionStatus::Preparing => "Preparing",
+        SidebarSessionStatus::Running => "Running",
+        SidebarSessionStatus::ApprovalNeeded => "Needs approval",
+        SidebarSessionStatus::Failed => "Failed",
+        SidebarSessionStatus::Unread => "Unread response",
+    };
+    let icon = match status {
+        SidebarSessionStatus::Preparing | SidebarSessionStatus::Running if !reduce_motion => {
+            Spinner::new()
+                .small()
+                .icon(IconName::LoaderCircle)
+                .color(colors.primary)
+                .into_any_element()
+        }
+        SidebarSessionStatus::Preparing | SidebarSessionStatus::Running => {
+            Icon::new(IconName::LoaderCircle)
+                .size_4()
+                .text_color(colors.primary)
+                .into_any_element()
+        }
+        SidebarSessionStatus::ApprovalNeeded => Icon::new(IconName::TriangleAlert)
+            .size_4()
+            .text_color(colors.warning)
+            .into_any_element(),
+        SidebarSessionStatus::Failed => Icon::new(IconName::CircleX)
+            .size_4()
+            .text_color(colors.danger)
+            .into_any_element(),
+        SidebarSessionStatus::Unread => div()
+            .size(px(6.0))
+            .rounded_full()
+            .bg(colors.primary)
+            .into_any_element(),
+    };
+    div()
+        .id(SharedString::from(format!("session-status-{group}")))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(metrics::SIDEBAR_ICON_SLOT))
+        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+        .child(icon)
+        .into_any_element()
 }
 
 fn session_actions_popover(

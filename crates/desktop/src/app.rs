@@ -110,6 +110,15 @@ struct ProjectSessionRuntimes {
     sessions: HashMap<SessionId, Entity<SessionRuntime>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SidebarSessionStatus {
+    Preparing,
+    Running,
+    ApprovalNeeded,
+    Failed,
+    Unread,
+}
+
 pub(crate) struct DesktopApp {
     pub(crate) core: AppState,
     pub(crate) layout_runtime: GpuiLayoutRuntime,
@@ -137,6 +146,8 @@ pub(crate) struct DesktopApp {
     pub(crate) project_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
+    unread_sessions: HashSet<(ProjectId, SessionId)>,
+    runtime_completion_generations: HashMap<(ProjectId, SessionId), u64>,
     native_titlebar: NativeTitlebarController,
     view_states: HashMap<String, SessionViewState>,
     _subscriptions: Vec<Subscription>,
@@ -294,6 +305,8 @@ impl DesktopApp {
             project_session_issues,
             session_activity,
             session_search_documents,
+            unread_sessions: HashSet::new(),
+            runtime_completion_generations: HashMap::new(),
             native_titlebar,
             view_states: HashMap::new(),
             _subscriptions: vec![
@@ -309,8 +322,46 @@ impl DesktopApp {
 
     fn sync_runtime_snapshot(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
         let snapshot = runtime.read(cx).snapshot();
-        let location = self
-            .project_runtimes
+        let location = self.runtime_location(runtime);
+        let selected = runtime.entity_id() == self.selected_runtime.entity_id();
+        if let Some((project_id, session_id)) = &location {
+            let key = (project_id.clone(), session_id.clone());
+            let previous = self
+                .runtime_completion_generations
+                .entry(key.clone())
+                .or_default();
+            if has_new_unread_completion(*previous, snapshot.completed_runs, selected) {
+                self.unread_sessions.insert(key.clone());
+            }
+            *previous = snapshot.completed_runs;
+            if selected {
+                self.unread_sessions.remove(&key);
+            }
+        }
+        if let Some((project_id, _)) = &location
+            && !snapshot.session.path.as_os_str().is_empty()
+            && !self
+                .project_store
+                .projects()
+                .iter()
+                .find(|project| &project.id == project_id)
+                .and_then(|project| self.project_sessions.get(&project.sessions_dir))
+                .is_some_and(|sessions| sessions.iter().any(|info| info.id == snapshot.session.id))
+        {
+            self.refresh_project_session_cache();
+            self.refresh_session_search_documents();
+        }
+        if !selected {
+            cx.notify();
+            return;
+        }
+        self.apply_selected_runtime_snapshot(snapshot);
+        self.sync_message_presentations();
+        cx.notify();
+    }
+
+    fn runtime_location(&self, runtime: &Entity<SessionRuntime>) -> Option<(ProjectId, SessionId)> {
+        self.project_runtimes
             .iter()
             .find_map(|(project_id, runtimes)| {
                 runtimes
@@ -318,27 +369,7 @@ impl DesktopApp {
                     .iter()
                     .find(|(_, candidate)| candidate.entity_id() == runtime.entity_id())
                     .map(|(session_id, _)| (project_id.clone(), session_id.clone()))
-            });
-        if let Some((project_id, _)) = location
-            && !snapshot.session.path.as_os_str().is_empty()
-            && !self
-                .project_store
-                .projects()
-                .iter()
-                .find(|project| project.id == project_id)
-                .and_then(|project| self.project_sessions.get(&project.sessions_dir))
-                .is_some_and(|sessions| sessions.iter().any(|info| info.id == snapshot.session.id))
-        {
-            self.refresh_project_session_cache();
-            self.refresh_session_search_documents();
-        }
-        if runtime.entity_id() != self.selected_runtime.entity_id() {
-            cx.notify();
-            return;
-        }
-        self.apply_selected_runtime_snapshot(snapshot);
-        self.sync_message_presentations();
-        cx.notify();
+            })
     }
 
     fn apply_selected_runtime_snapshot(&mut self, snapshot: SessionRuntimeSnapshot) {
@@ -488,25 +519,21 @@ impl DesktopApp {
             .is_some_and(|runtime| runtime.read(cx).is_active())
     }
 
-    pub(crate) fn session_status_label(
+    pub(crate) fn session_status_indicator(
         &self,
         project_index: usize,
         path: &Path,
         cx: &Context<Self>,
-    ) -> Option<&'static str> {
+    ) -> Option<SidebarSessionStatus> {
+        let project_id = self.project_store.project(project_index)?.id.clone();
         let snapshot = self
             .project_runtime(project_index, path)?
             .read(cx)
             .snapshot();
-        if snapshot.approval.is_some() {
-            return Some("Approval needed");
-        }
-        match snapshot.status {
-            SessionRuntimeStatus::Creating | SessionRuntimeStatus::Configuring => Some("Preparing"),
-            SessionRuntimeStatus::Running => Some("Running"),
-            SessionRuntimeStatus::Failed(_) => Some("Failed"),
-            SessionRuntimeStatus::Idle => None,
-        }
+        let unread = self
+            .unread_sessions
+            .contains(&(project_id, snapshot.session.id));
+        resolve_sidebar_session_status(&snapshot.status, snapshot.approval.is_some(), unread)
     }
 
     pub(crate) fn project_has_active_sessions(
@@ -537,6 +564,9 @@ impl DesktopApp {
     }
 
     fn select_runtime(&mut self, runtime: Entity<SessionRuntime>, cx: &mut Context<Self>) {
+        if let Some(key) = self.runtime_location(&runtime) {
+            self.unread_sessions.remove(&key);
+        }
         self.selected_runtime = runtime.clone();
         let snapshot = runtime.read(cx).snapshot();
         if let Some(project) = self
@@ -1380,6 +1410,10 @@ impl DesktopApp {
             return;
         }
         self.project_runtimes.remove(&project.id);
+        self.unread_sessions
+            .retain(|(project_id, _)| project_id != &project.id);
+        self.runtime_completion_generations
+            .retain(|(project_id, _), _| project_id != &project.id);
         self.refresh_project_session_cache();
         let next = if index < self.core.workspace.active_project {
             self.core.workspace.active_project - 1
@@ -1509,10 +1543,13 @@ impl DesktopApp {
         };
         match Session::delete(&session) {
             Ok(()) => {
-                if let Some(project) = self.project_store.project(project_index)
-                    && let Some(runtimes) = self.project_runtimes.get_mut(&project.id)
-                {
-                    runtimes.sessions.remove(&session.id);
+                if let Some(project) = self.project_store.project(project_index) {
+                    let key = (project.id.clone(), session.id.clone());
+                    if let Some(runtimes) = self.project_runtimes.get_mut(&project.id) {
+                        runtimes.sessions.remove(&session.id);
+                    }
+                    self.unread_sessions.remove(&key);
+                    self.runtime_completion_generations.remove(&key);
                 }
                 let sessions_dir = self
                     .project_store
@@ -2084,6 +2121,29 @@ pub(crate) fn session_age(created_at: u64) -> String {
     }
 }
 
+fn resolve_sidebar_session_status(
+    status: &SessionRuntimeStatus,
+    approval_needed: bool,
+    unread: bool,
+) -> Option<SidebarSessionStatus> {
+    if approval_needed {
+        return Some(SidebarSessionStatus::ApprovalNeeded);
+    }
+    match status {
+        SessionRuntimeStatus::Creating | SessionRuntimeStatus::Configuring => {
+            Some(SidebarSessionStatus::Preparing)
+        }
+        SessionRuntimeStatus::Running => Some(SidebarSessionStatus::Running),
+        SessionRuntimeStatus::Failed(_) => Some(SidebarSessionStatus::Failed),
+        SessionRuntimeStatus::Idle if unread => Some(SidebarSessionStatus::Unread),
+        SessionRuntimeStatus::Idle => None,
+    }
+}
+
+fn has_new_unread_completion(previous: u64, current: u64, selected: bool) -> bool {
+    !selected && current > previous
+}
+
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     left == right
 }
@@ -2608,6 +2668,33 @@ mod tests {
     fn exported_session_names_are_safe() {
         assert_eq!(safe_file_name("Fix: auth/login?"), "Fix- auth-login");
         assert_eq!(safe_file_name("\u{4f1a}\u{8bdd}"), "\u{4f1a}\u{8bdd}");
+    }
+
+    #[test]
+    fn sidebar_status_prioritizes_actionable_and_live_states_over_unread() {
+        assert_eq!(
+            resolve_sidebar_session_status(&SessionRuntimeStatus::Running, true, true),
+            Some(SidebarSessionStatus::ApprovalNeeded)
+        );
+        assert_eq!(
+            resolve_sidebar_session_status(&SessionRuntimeStatus::Running, false, true),
+            Some(SidebarSessionStatus::Running)
+        );
+        assert_eq!(
+            resolve_sidebar_session_status(&SessionRuntimeStatus::Idle, false, true),
+            Some(SidebarSessionStatus::Unread)
+        );
+        assert_eq!(
+            resolve_sidebar_session_status(&SessionRuntimeStatus::Idle, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn only_new_background_completions_become_unread() {
+        assert!(has_new_unread_completion(0, 1, false));
+        assert!(!has_new_unread_completion(0, 1, true));
+        assert!(!has_new_unread_completion(1, 1, false));
     }
 
     #[test]
