@@ -55,6 +55,26 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .build()?;
     let _runtime = runtime.enter();
     let root = home_dir()?.join(".kcastle");
+    let (startup, appearance) = desktop_startup(root.clone())?;
+    let application = Application::new().with_assets(DesktopAssets);
+    application.on_reopen(move |cx| {
+        if cx.windows().is_empty()
+            && let Err(error) = desktop_startup(root.clone())
+                .and_then(|(startup, appearance)| open_desktop_window(startup, appearance, cx))
+        {
+            eprintln!("failed to reopen desktop window: {error}");
+        }
+        cx.activate(true);
+    });
+    application.run(move |cx| {
+        init_ui(cx);
+        open_desktop_window(startup, appearance, cx).expect("failed to open desktop window");
+        cx.activate(true);
+    });
+    Ok(())
+}
+
+fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dyn Error>> {
     let mut settings = SettingsStore::load(root.clone())?;
     let mut models = models_from_profiles(settings.provider_profiles());
     for configured in &mut models {
@@ -79,51 +99,48 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .project(active_project)
         .expect("active project should exist");
     let agent = Agent::new(model, INSTRUCTIONS, Session::memory(), project.path.clone());
+    Ok((
+        DesktopStartup {
+            agent,
+            models,
+            selected_model,
+            project_store: projects,
+            active_project,
+            settings,
+        },
+        appearance,
+    ))
+}
 
-    Application::new()
-        .with_assets(DesktopAssets)
-        .run(move |cx| {
-            init_ui(cx);
-            match appearance {
-                Appearance::System => Theme::sync_system_appearance(None, cx),
-                Appearance::Light => Theme::change(ThemeMode::Light, None, cx),
-                Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
-            }
-            let bounds = Bounds::centered(None, size(px(1180.0), px(720.0)), cx);
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(900.0), px(620.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("kcastle".into()),
-                        appears_transparent: true,
-                        traffic_light_position: None,
-                    }),
-                    window_background: WindowBackgroundAppearance::Blurred,
-                    app_id: Some("dev.kcastle.desktop".into()),
-                    ..Default::default()
-                },
-                |window, cx| {
-                    let view = cx.new(|cx| {
-                        DesktopApp::new(
-                            DesktopStartup {
-                                agent,
-                                models,
-                                selected_model,
-                                project_store: projects,
-                                active_project,
-                                settings,
-                            },
-                            window,
-                            cx,
-                        )
-                    });
-                    cx.new(|cx| Root::new(view, window, cx))
-                },
-            )
-            .expect("failed to open desktop window");
-            cx.activate(true);
-        });
+fn open_desktop_window(
+    startup: DesktopStartup,
+    appearance: Appearance,
+    cx: &mut App,
+) -> Result<(), Box<dyn Error>> {
+    match appearance {
+        Appearance::System => Theme::sync_system_appearance(None, cx),
+        Appearance::Light => Theme::change(ThemeMode::Light, None, cx),
+        Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
+    }
+    let bounds = Bounds::centered(None, size(px(1180.0), px(720.0)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(900.0), px(620.0))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("kcastle".into()),
+                appears_transparent: true,
+                traffic_light_position: None,
+            }),
+            window_background: WindowBackgroundAppearance::Blurred,
+            app_id: Some("dev.kcastle.desktop".into()),
+            ..Default::default()
+        },
+        move |window, cx| {
+            let view = cx.new(|cx| DesktopApp::new(startup, window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        },
+    )?;
     Ok(())
 }
 
@@ -202,7 +219,9 @@ fn home_dir() -> Result<PathBuf, Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use gpui::{
         AppContext, Context, Entity, IntoElement, Render, Subscription, TestAppContext, Window,
@@ -211,7 +230,26 @@ mod tests {
     use gpui_component::input::{Input, InputEvent, InputState};
     use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-    use super::{init_ui, models_from_profiles};
+    use super::{desktop_startup, init_ui, models_from_profiles};
+
+    #[test]
+    fn desktop_startup_can_be_rebuilt_after_last_window_closes() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kcastle-reopen-test-{suffix}"));
+        let (first, first_appearance) = desktop_startup(root.clone()).unwrap();
+        let model_count = first.models.len();
+        drop(first);
+
+        let (second, second_appearance) = desktop_startup(root.clone()).unwrap();
+
+        assert_eq!(second.models.len(), model_count);
+        assert_eq!(second_appearance, first_appearance);
+        drop(second);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn models_are_available_only_from_desktop_configuration() {
