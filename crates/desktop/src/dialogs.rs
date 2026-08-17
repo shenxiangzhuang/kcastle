@@ -590,7 +590,7 @@ fn parse_optional_output_tokens(value: &str) -> Option<Option<u32>> {
 fn provider_configured(app: &DesktopApp, provider_id: &str) -> bool {
     app.models
         .iter()
-        .any(|model| model.provider_id == provider_id)
+        .any(|model| model.provider_id == provider_id && model.model.has_api_key())
 }
 
 fn provider_profile(app: &DesktopApp, provider_id: &'static str) -> ProviderProfile {

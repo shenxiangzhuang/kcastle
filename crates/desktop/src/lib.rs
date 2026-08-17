@@ -56,7 +56,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let _runtime = runtime.enter();
     let root = home_dir()?.join(".kcastle");
     let mut settings = SettingsStore::load(root.clone())?;
-    let mut models = models_from_env(settings.provider_profiles())?;
+    let mut models = models_from_profiles(settings.provider_profiles());
     for configured in &mut models {
         settings.apply(&configured.id, &mut configured.model);
     }
@@ -127,7 +127,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn models_from_env(profiles: &[ProviderProfile]) -> Result<Vec<ConfiguredModel>, Box<dyn Error>> {
+fn models_from_profiles(profiles: &[ProviderProfile]) -> Vec<ConfiguredModel> {
     let mut models = Vec::new();
     for provider_id in [DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID] {
         let profile = profiles
@@ -135,26 +135,17 @@ fn models_from_env(profiles: &[ProviderProfile]) -> Result<Vec<ConfiguredModel>,
             .find(|profile| profile.provider_id == provider_id)
             .cloned()
             .unwrap_or_else(|| default_provider_profile(provider_id));
-        if let Some(key) = profile
+        let key = profile
             .api_key()
             .map(str::to_owned)
-            .or_else(|| provider_env_key(provider_id))
             .filter(|key| !key.trim().is_empty())
-        {
-            models.extend(profile.models.iter().cloned().map(|model_profile| {
-                let model = build_model(&profile, &model_profile, key.clone());
-                ConfiguredModel::new(provider_id, model_profile, model)
-            }));
-        }
+            .unwrap_or_default();
+        models.extend(profile.models.iter().cloned().map(|model_profile| {
+            let model = build_model(&profile, &model_profile, key.clone());
+            ConfiguredModel::new(provider_id, model_profile, model)
+        }));
     }
-    if models.is_empty() {
-        Err(
-            "set DEEPSEEK_API_KEY or OPENAI_API_KEY, or configure a provider in settings.json"
-                .into(),
-        )
-    } else {
-        Ok(models)
-    }
+    models
 }
 
 pub(crate) fn default_provider_profile(provider_id: &str) -> ProviderProfile {
@@ -201,15 +192,6 @@ pub(crate) fn build_model(
     .with_provider_reasoning(&provider.provider_id)
 }
 
-fn provider_env_key(provider_id: &str) -> Option<String> {
-    let name = match provider_id {
-        DEEPSEEK_PROVIDER_ID => "DEEPSEEK_API_KEY",
-        OPENAI_PROVIDER_ID => "OPENAI_API_KEY",
-        _ => return None,
-    };
-    env::var(name).ok().filter(|key| !key.trim().is_empty())
-}
-
 fn home_dir() -> Result<PathBuf, Box<dyn Error>> {
     env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
@@ -227,8 +209,25 @@ mod tests {
     };
     use gpui_component::Root;
     use gpui_component::input::{Input, InputEvent, InputState};
+    use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-    use super::init_ui;
+    use super::{init_ui, models_from_profiles};
+
+    #[test]
+    fn models_are_available_only_from_desktop_configuration() {
+        let models = models_from_profiles(&[]);
+
+        assert!(
+            models.iter().any(
+                |model| model.provider_id == DEEPSEEK_PROVIDER_ID && !model.model.has_api_key()
+            )
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model.provider_id == OPENAI_PROVIDER_ID && !model.model.has_api_key())
+        );
+    }
 
     struct InputHarness {
         input: Entity<InputState>,
