@@ -325,7 +325,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         let call = FunctionToolCall {
-            arguments: r#"{"command":"sleep 30 & child=$!; echo $child > grandchild.pid; wait $child","timeout":0.1}"#.into(),
+            arguments: r#"{"command":"sleep 30 & child=$!; echo $child > grandchild.pid; wait $child","timeout":1.0}"#.into(),
             call_id: "timeout-tree".into(),
             namespace: None,
             name: "shell".into(),
@@ -344,7 +344,9 @@ mod tests {
         assert!(result.is_error);
         assert!(result.output.contains("timed out"));
         let pid = std::fs::read_to_string(directory.join("grandchild.pid"))
-            .unwrap()
+            .unwrap_or_else(|error| {
+                panic!("grandchild PID was not written before the timeout: {error}")
+            })
             .trim()
             .parse::<i32>()
             .unwrap();
