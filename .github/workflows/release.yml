@@ -3,6 +3,14 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild desktop assets for
+        required: true
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 concurrency:
   group: release
@@ -13,6 +21,7 @@ permissions:
 
 jobs:
   publish-crates:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -65,6 +74,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
+      - name: Verify release tag
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle") | .version')
+          test "v${version}" = "$RELEASE_TAG"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y dpkg-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
@@ -99,6 +112,6 @@ jobs:
         run: Copy-Item target/${{ matrix.target }}/release/kcastle-desktop.exe ${{ matrix.asset }}
       - name: Upload desktop app
         shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }} --clobber
+        run: gh release upload "$RELEASE_TAG" ${{ matrix.asset }} --clobber
         env:
           GH_TOKEN: ${{ github.token }}
