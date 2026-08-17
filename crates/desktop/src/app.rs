@@ -436,7 +436,7 @@ impl DesktopApp {
             {
                 runtimes.selected = snapshot.session.id.clone();
             }
-            self.reload_active_sessions();
+            self.core.session.sessions = self.reload_active_sessions();
             self.refresh_project_session_cache();
             self.refresh_session_search_documents();
         }
@@ -2542,6 +2542,73 @@ mod tests {
             (f32::from(max_offset.height + offset.y) - tail_inset).abs() <= 1.0,
             "overflowing conversation did not follow the tail: offset={offset:?}, max={max_offset:?}"
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn created_session_path_refreshes_the_sidebar_list(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-new-session-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let test_view = view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                DesktopApp::new(
+                    DesktopStartup {
+                        agent,
+                        models: vec![configured],
+                        selected_model: 0,
+                        project_store,
+                        active_project,
+                        settings,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            test_view.replace(Some(view.clone()));
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = view.borrow().clone().unwrap();
+
+        cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let mut snapshot = this.selected_runtime.read(cx).snapshot();
+                let path = this.core.workspace.sessions_dir.join("created.jsonl");
+                std::fs::create_dir_all(&this.core.workspace.sessions_dir).unwrap();
+                std::fs::write(
+                    &path,
+                    format!(
+                        "{{\"record\":\"session\",\"title\":\"Untitled session\",\"created_at\":{}}}\n",
+                        snapshot.session.created_at
+                    ),
+                )
+                .unwrap();
+                snapshot.session.path = path;
+                this.apply_selected_runtime_snapshot(snapshot);
+            });
+        });
+
+        cx.read_entity(&view, |app, _| {
+            assert!(!app.core.session.current.as_os_str().is_empty());
+            assert_eq!(app.core.session.sessions.len(), 1);
+            assert_eq!(app.core.session.sessions[0].path, app.core.session.current);
+        });
 
         std::fs::remove_dir_all(root).unwrap();
     }
