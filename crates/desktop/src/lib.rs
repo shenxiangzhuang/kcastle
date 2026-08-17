@@ -32,6 +32,7 @@ mod streaming_markdown;
 mod trajectory;
 mod ui;
 mod ui_theme;
+mod updater;
 
 use app::{ConfiguredModel, DesktopApp, DesktopStartup};
 use assets::DesktopAssets;

@@ -29,41 +29,58 @@ impl DesktopApp {
         if self.core.layout.sidebar == SidebarMode::Rail {
             return self.sidebar_rail(toggle_leading, cx).into_any_element();
         }
-        let panel =
-            div()
-                .flex()
-                .flex_col()
-                .relative()
-                .w(px(metrics::SIDEBAR_WIDTH))
-                .h_full()
-                .flex_none()
-                .bg(colors.sidebar)
-                .border_r_1()
-                .border_color(colors.border)
-                .child(self.sidebar_titlebar(toggle_leading, cx))
-                .child(self.sidebar_primary_navigation(cx))
-                .child(self.workspace_header(cx))
-                .child(self.workspace_tree(cx))
-                .children(
-                    self.core
-                        .sidebar
-                        .options_open
-                        .then(|| self.sidebar_options(cx)),
-                )
-                .child(
-                    div().flex_none().p_3().child(
-                        Button::new("settings")
-                            .icon(IconName::Settings)
-                            .label("Settings")
-                            .ghost()
-                            .w_full()
-                            .justify_start()
-                            .px_2()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_settings_dialog(window, cx)
-                            })),
-                    ),
-                );
+        let panel = div()
+            .flex()
+            .flex_col()
+            .relative()
+            .w(px(metrics::SIDEBAR_WIDTH))
+            .h_full()
+            .flex_none()
+            .bg(colors.sidebar)
+            .border_r_1()
+            .border_color(colors.border)
+            .child(self.sidebar_titlebar(toggle_leading, cx))
+            .child(self.sidebar_primary_navigation(cx))
+            .child(self.workspace_header(cx))
+            .child(self.workspace_tree(cx))
+            .children(
+                self.core
+                    .sidebar
+                    .options_open
+                    .then(|| self.sidebar_options(cx)),
+            )
+            .child(
+                div().flex_none().p_3().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new("settings")
+                                .icon(IconName::Settings)
+                                .label("Settings")
+                                .ghost()
+                                .flex_1()
+                                .justify_start()
+                                .px_2()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_settings_dialog(window, cx)
+                                })),
+                        )
+                        .children(self.available_update.as_ref().map(|update| {
+                            Button::new("update")
+                                .icon(IconName::ArrowUp)
+                                .label("Update")
+                                .ghost()
+                                .flex_none()
+                                .px_2()
+                                .tooltip(format!("Update to v{}", update.version))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.open_available_update(cx)),
+                                )
+                        })),
+                ),
+            );
         panel.into_any_element()
     }
 
