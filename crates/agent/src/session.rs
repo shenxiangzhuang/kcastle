@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fs::{self, File as StdFile, OpenOptions as StdOpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_openai::types::responses::{FunctionCallOutputItemParam, InputItem, Item};
@@ -670,28 +672,68 @@ fn lock_path(path: &Path) -> PathBuf {
 }
 
 #[derive(Debug)]
-struct WriterLease(StdFile);
+struct WriterLease {
+    file: StdFile,
+    key: PathBuf,
+}
 
 impl Drop for WriterLease {
     fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.0);
+        let _ = FileExt::unlock(&self.file);
+        writer_leases()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
     }
+}
+
+fn writer_leases() -> &'static Mutex<HashSet<PathBuf>> {
+    static LEASES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    LEASES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn writer_lease_key(path: &Path) -> PathBuf {
+    path.parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 fn acquire_writer_lock(path: &Path) -> Result<WriterLease, SessionError> {
     let lock_path = lock_path(path);
-    let file = StdOpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)?;
-    file.try_lock_exclusive()
-        .map_err(|error| match error.kind() {
-            ErrorKind::WouldBlock => SessionError::Busy(path.to_path_buf()),
-            _ => SessionError::Io(error),
-        })?;
-    Ok(WriterLease(file))
+    let key = writer_lease_key(&lock_path);
+    if !writer_leases()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key.clone())
+    {
+        return Err(SessionError::Busy(path.to_path_buf()));
+    }
+
+    let result = (|| {
+        let file = StdOpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.try_lock_exclusive()
+            .map_err(|error| match error.kind() {
+                ErrorKind::WouldBlock => SessionError::Busy(path.to_path_buf()),
+                _ => SessionError::Io(error),
+            })?;
+        Ok(WriterLease {
+            file,
+            key: key.clone(),
+        })
+    })();
+    if result.is_err() {
+        writer_leases()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&key);
+    }
+    result
 }
 
 struct ParsedSession {
