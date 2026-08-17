@@ -45,40 +45,56 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
+            targets: x86_64-unknown-linux-gnu
+            asset: kcastle-desktop-linux-amd64.deb
           - os: macos-14
-            target: aarch64-apple-darwin
-            archive: tar.gz
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            archive: tar.gz
+            target: universal-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            asset: kcastle-desktop-macos-universal.dmg
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
+            targets: x86_64-pc-windows-msvc
+            asset: kcastle-desktop-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.targets }}
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
-      - run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - name: Build Linux or Windows desktop app
+        if: runner.os != 'macOS'
+        run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
+      - name: Build universal macOS desktop app
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked -p kcastle-desktop --target aarch64-apple-darwin
+          cargo build --release --locked -p kcastle-desktop --target x86_64-apple-darwin
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/kcastle-desktop \
+            target/x86_64-apple-darwin/release/kcastle-desktop \
+            -output target/universal-apple-darwin/release/kcastle-desktop
       - name: Package Linux desktop app
         if: runner.os == 'Linux'
-        run: tar -C target/${{ matrix.target }}/release -czf kcastle-desktop-${{ matrix.target }}.tar.gz kcastle-desktop
+        run: scripts/package-deb target/${{ matrix.target }}/release/kcastle-desktop ${{ matrix.asset }}
       - name: Package macOS desktop app
         if: runner.os == 'macOS'
         run: |
           scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
-          tar -C target -czf kcastle-desktop-${{ matrix.target }}.tar.gz kcastle.app
+          staging=$(mktemp -d)
+          trap 'rm -rf "$staging"' EXIT
+          ditto target/kcastle.app "$staging/kcastle.app"
+          ln -s /Applications "$staging/Applications"
+          hdiutil create -volname kcastle -srcfolder "$staging" -ov -format UDZO ${{ matrix.asset }}
       - name: Package Windows desktop app
-        if: matrix.archive == 'zip'
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive target/${{ matrix.target }}/release/kcastle-desktop.exe kcastle-desktop-${{ matrix.target }}.zip
+        run: Copy-Item target/${{ matrix.target }}/release/kcastle-desktop.exe ${{ matrix.asset }}
       - name: Upload desktop app
         shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" kcastle-desktop-${{ matrix.target }}.${{ matrix.archive }} --clobber
+        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.asset }} --clobber
         env:
           GH_TOKEN: ${{ github.token }}

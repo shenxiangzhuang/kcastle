@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=kcastle
+Comment=Native agent harness
+Exec=kcastle-desktop
+Icon=kcastle
+Terminal=false
+Categories=Development;Utility;
