@@ -3566,7 +3566,7 @@ dependencies = [
 
 [[package]]
 name = "kcastle"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 dependencies = [
  "codewandler-markdown-ratatui",
  "codewandler-markdown-stream",
@@ -3584,7 +3584,7 @@ dependencies = [
 
 [[package]]
 name = "kcastle-agent"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 dependencies = [
  "async-openai",
  "fs2",
@@ -3600,7 +3600,7 @@ dependencies = [
 
 [[package]]
 name = "kcastle-desktop"
-version = "0.2.0-alpha.4"
+version = "0.2.0-alpha.5"
 dependencies = [
  "block2",
  "gpui",
