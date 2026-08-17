@@ -54,6 +54,13 @@ fn settings_dialog_view(
                 app.settings.enter_behavior(),
                 cx,
             ))
+            .child(
+                div()
+                    .pt_6()
+                    .text_xs()
+                    .text_color(colors.muted_text)
+                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+            )
             .into_any_element(),
         SettingsTab::Models => models_settings_view(app, dialog, cx, colors),
     };

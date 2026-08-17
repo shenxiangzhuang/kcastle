@@ -34,6 +34,7 @@ use crate::platform::gpui::{
 };
 use crate::project::{ProjectId, ProjectStore};
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
+use crate::updater::AvailableUpdate;
 
 #[derive(Clone)]
 pub(crate) struct ConfiguredModel {
@@ -152,6 +153,7 @@ pub(crate) struct DesktopApp {
     pub(crate) project_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
+    pub(crate) available_update: Option<AvailableUpdate>,
     unread_sessions: HashSet<(ProjectId, SessionId)>,
     runtime_observations: HashMap<(ProjectId, SessionId), RuntimeObservation>,
     native_titlebar: NativeTitlebarController,
@@ -284,7 +286,7 @@ impl DesktopApp {
             this.native_titlebar.sync(window);
             this.sync_window_layout(window, cx);
         });
-        Self {
+        let app = Self {
             core,
             layout_runtime: GpuiLayoutRuntime::default(),
             message_presentations: MessagePresentationStore::default(),
@@ -311,6 +313,7 @@ impl DesktopApp {
             project_session_issues,
             session_activity,
             session_search_documents,
+            available_update: None,
             unread_sessions: HashSet::new(),
             runtime_observations: HashMap::new(),
             native_titlebar,
@@ -323,7 +326,10 @@ impl DesktopApp {
                 bounds_subscription,
                 runtime_subscription,
             ],
-        }
+        };
+        #[cfg(not(test))]
+        app.check_for_updates(window, cx);
+        app
     }
 
     fn sync_runtime_snapshot(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {

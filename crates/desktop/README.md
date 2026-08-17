@@ -30,6 +30,10 @@ uses `~/.kcastle/sessions/default`.
 
 In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 
+On launch, the desktop app checks the repository's published GitHub Releases. When a newer
+semantic version is available, an Update button appears to the right of Settings and opens that
+release in the system browser.
+
 ## Architecture
 
 The desktop crate keeps view transitions, calculations, and session runtimes separate:
