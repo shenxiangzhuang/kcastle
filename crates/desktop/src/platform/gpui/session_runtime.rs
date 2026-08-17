@@ -127,7 +127,19 @@ impl SessionRuntime {
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
-        if allow == self.allow_all_tools {
+        if allow == self.allow_all_tools && allow == self.config.allow_all_tools {
+            return true;
+        }
+        if self.is_active() {
+            self.allow_all_tools = allow;
+            if allow
+                && let Some(approval) = self.approval.take()
+                && let Some(control) = &self.control
+                && let Err(error) = control.approve(approval.call_id, true)
+            {
+                self.notice(error.to_string());
+            }
+            cx.notify();
             return true;
         }
         let mut config = self.config.clone();
@@ -190,27 +202,38 @@ impl SessionRuntime {
         let Some(mut agent) = self.agent.take() else {
             return false;
         };
+        let previous_allow_all_tools = self.allow_all_tools;
+        self.allow_all_tools = config.allow_all_tools;
+        let settled_status = self.status.clone();
         self.status = SessionRuntimeStatus::Configuring;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = agent.persist_session_config(&config).await;
             let _ = this.update(cx, |runtime, cx| {
-                match result {
+                let persisted = match result {
                     Ok(()) => {
                         if let Some(model) = model {
                             agent.set_model(model);
                         }
-                        runtime.allow_all_tools = config.allow_all_tools;
                         runtime.config = config;
-                        runtime.status = SessionRuntimeStatus::Idle;
+                        runtime.status = settled_status;
+                        true
                     }
                     Err(error) => {
+                        if runtime.allow_all_tools == config.allow_all_tools {
+                            runtime.allow_all_tools = previous_allow_all_tools;
+                        }
                         runtime.status = SessionRuntimeStatus::Failed(error.to_string());
                         runtime.notice(format!("Could not save session configuration: {error}"));
+                        false
                     }
-                }
+                };
                 agent.release_session_writer();
                 runtime.agent = Some(agent);
+                let allow_all_tools = runtime.allow_all_tools;
+                if persisted && runtime.config.allow_all_tools != allow_all_tools {
+                    runtime.set_allow_all_tools(allow_all_tools, cx);
+                }
                 cx.notify();
             });
         })
@@ -402,6 +425,11 @@ impl SessionRuntime {
                             runtime.status = SessionRuntimeStatus::Failed(error.to_string());
                             runtime.notice(error.to_string());
                         }
+                    }
+                    let allow_all_tools = runtime.allow_all_tools;
+                    if runtime.agent.is_some() && runtime.config.allow_all_tools != allow_all_tools
+                    {
+                        runtime.set_allow_all_tools(allow_all_tools, cx);
                     }
                     cx.notify();
                 })
@@ -637,6 +665,8 @@ fn reasoning_key(effort: &ReasoningEffort) -> String {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext;
+
     use super::*;
 
     fn runtime() -> SessionRuntime {
@@ -703,5 +733,39 @@ mod tests {
         }));
         assert_eq!(runtime.completed_runs, 1);
         assert_eq!(runtime.transcript_updates, 2);
+    }
+
+    #[gpui::test]
+    fn allow_all_applies_during_a_run_and_clears_pending_approval(cx: &mut gpui::TestAppContext) {
+        let runtime = cx.new(|_| {
+            let mut runtime = runtime();
+            runtime.status = SessionRuntimeStatus::Running;
+            runtime.approval = Some(ApprovalState {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                arguments: "{}".into(),
+            });
+            runtime
+        });
+
+        runtime.update(cx, |runtime, cx| {
+            assert!(runtime.set_allow_all_tools(true, cx));
+        });
+
+        let snapshot = cx.read_entity(&runtime, |runtime, _| runtime.snapshot());
+        assert!(snapshot.allow_all_tools);
+        assert!(snapshot.approval.is_none());
+
+        runtime.update(cx, |runtime, _| {
+            runtime.apply_event(AgentEvent::ApprovalRequired(
+                serde_json::from_value(serde_json::json!({
+                    "arguments": "{}",
+                    "call_id": "call-2",
+                    "name": "shell"
+                }))
+                .unwrap(),
+            ));
+        });
+        assert!(cx.read_entity(&runtime, |runtime, _| runtime.approval.is_none()));
     }
 }
