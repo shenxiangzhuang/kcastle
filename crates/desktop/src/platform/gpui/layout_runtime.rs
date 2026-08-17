@@ -125,6 +125,7 @@ impl GpuiLayoutRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn bounds(y: f32, height: f32) -> MeasuredBounds {
         MeasuredBounds {
@@ -188,5 +189,47 @@ mod tests {
         assert!(runtime.observe_message(generation, MessageId(1), bounds(100.0, 20.0)));
         assert!(!runtime.observe_message(generation, MessageId(1), bounds(80.0, 20.0)));
         assert!(runtime.observe_message(generation, MessageId(1), bounds(80.0, 200.0)));
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_message_reflows_schedule_exactly_one_tail_alignment(
+            observations in prop::collection::vec(
+                (0u64..8, -2_000i16..2_000, 1u16..2_000, 1u16..2_000),
+                1..100,
+            )
+        ) {
+            let mut runtime = GpuiLayoutRuntime::default();
+            let mut previous = None;
+
+            for (generation, y, width, height) in observations {
+                let generation = LayoutGeneration(generation);
+                let measured = MeasuredBounds {
+                    x: 0.0,
+                    y: f32::from(y),
+                    width: f32::from(width),
+                    height: f32::from(height),
+                };
+                let expected_change = previous.is_none_or(
+                    |(old_generation, old_width, old_height)| {
+                        old_generation != generation
+                            || old_width != width
+                            || old_height != height
+                    },
+                );
+
+                let changed = runtime.observe_message(generation, MessageId(1), measured);
+                prop_assert_eq!(changed, expected_change);
+                if changed {
+                    runtime.request_tail_realign();
+                }
+                prop_assert_eq!(runtime.schedule_tail_realign(), expected_change);
+                prop_assert!(!runtime.schedule_tail_realign());
+                prop_assert_eq!(runtime.take_tail_realign(), expected_change);
+                prop_assert!(!runtime.take_tail_realign());
+
+                previous = Some((generation, width, height));
+            }
+        }
     }
 }

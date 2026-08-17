@@ -74,6 +74,24 @@ impl StreamBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    fn event(tag: u8, value: String) -> AgentEvent {
+        match tag {
+            0 => AgentEvent::ReasoningDelta(value),
+            1 => AgentEvent::TextDelta(value),
+            _ => AgentEvent::ModelStarted(value.parse().unwrap()),
+        }
+    }
+
+    fn encoded(event: AgentEvent) -> (u8, String) {
+        match event {
+            AgentEvent::ReasoningDelta(value) => (0, value),
+            AgentEvent::TextDelta(value) => (1, value),
+            AgentEvent::ModelStarted(value) => (2, value.to_string()),
+            _ => unreachable!("property strategy only generates stream and boundary events"),
+        }
+    }
 
     #[test]
     fn adjacent_text_deltas_are_coalesced_without_losing_unread_count() {
@@ -106,5 +124,49 @@ mod tests {
         assert_eq!(telemetry.raw_deltas, 3);
         assert_eq!(telemetry.delivered_events, 1);
         assert_eq!(telemetry.largest_batch, 1);
+    }
+
+    proptest! {
+        #[test]
+        fn batching_preserves_arbitrary_delta_chunks_and_boundaries(
+            inputs in prop::collection::vec((0u8..3, "[^\\PC]{0,24}", 0usize..10_000), 1..100)
+        ) {
+            let normalized = inputs
+                .into_iter()
+                .map(|(tag, text, boundary)| {
+                    let value = if tag < 2 { text } else { boundary.to_string() };
+                    (tag, value)
+                })
+                .collect::<Vec<_>>();
+            let expected_raw_delta_count = normalized
+                .iter()
+                .filter(|(tag, _)| *tag < 2)
+                .count();
+            let mut expected = Vec::<(u8, String)>::new();
+            for (tag, value) in &normalized {
+                match expected.last_mut() {
+                    Some((previous_tag, previous)) if *previous_tag == *tag && *tag < 2 => {
+                        previous.push_str(value);
+                    }
+                    _ => expected.push((*tag, value.clone())),
+                }
+            }
+
+            let mut inputs = normalized.into_iter();
+            let (first_tag, first_value) = inputs.next().unwrap();
+            let mut batch = StreamBatch::new(event(first_tag, first_value));
+            for (tag, value) in inputs {
+                batch.push(event(tag, value));
+            }
+
+            let actual_raw_delta_count = batch.raw_delta_count();
+            let actual = batch
+                .into_events()
+                .into_iter()
+                .map(encoded)
+                .collect::<Vec<_>>();
+            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(actual_raw_delta_count, expected_raw_delta_count);
+        }
     }
 }
