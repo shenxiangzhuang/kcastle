@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,11 +17,14 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::compaction::{
     CompactionConfig, SUMMARY_INSTRUCTIONS, context_tokens, prepare_compaction,
 };
-use crate::session::{Session, SessionError, SessionInfo, StateCommit};
+use crate::session::{
+    InputMode, Session, SessionConfig, SessionError, SessionEvent, SessionInfo, StateCommit,
+};
 use crate::state::{ResponseMetadata, State, StateEntry, TranscriptItem};
 use crate::tool::{AgentTool, Env, ShellTool, ToolResult};
 
@@ -260,6 +264,11 @@ pub enum AgentEvent {
     RunFinished(RunSummary),
     RunAborted,
     RunFailed(String),
+    InputAdmitted {
+        id: String,
+        input: String,
+        mode: InputMode,
+    },
 }
 
 pub struct Agent {
@@ -271,6 +280,8 @@ pub struct Agent {
     tools: Vec<Arc<dyn AgentTool>>,
     compaction: Option<CompactionConfig>,
     max_turns: usize,
+    pending_steer: VecDeque<PendingInput>,
+    pending_queue: VecDeque<PendingInput>,
 }
 
 impl Agent {
@@ -281,7 +292,22 @@ impl Agent {
         cwd: impl Into<PathBuf>,
     ) -> Self {
         let context_window = model.context_window();
-        let (state, commit) = session.into_parts();
+        let pending = session.pending_inputs();
+        let (state, mut commit) = session.into_parts();
+        commit.release_writer();
+        let pending_steer = pending
+            .iter()
+            .filter(|(_, _, mode)| *mode == InputMode::Steer)
+            .map(|(id, input, _)| PendingInput {
+                id: id.clone(),
+                input: input.clone(),
+            })
+            .collect();
+        let pending_queue = pending
+            .into_iter()
+            .filter(|(_, _, mode)| *mode == InputMode::Queue)
+            .map(|(id, input, _)| PendingInput { id, input })
+            .collect();
         Self {
             model,
             instructions: instructions.into(),
@@ -291,6 +317,8 @@ impl Agent {
             tools: vec![Arc::new(ShellTool)],
             compaction: Some(CompactionConfig::new(context_window)),
             max_turns: DEFAULT_MAX_TURNS,
+            pending_steer,
+            pending_queue,
         }
     }
 
@@ -317,6 +345,8 @@ impl Agent {
             tools,
             compaction,
             max_turns,
+            pending_steer: VecDeque::new(),
+            pending_queue: VecDeque::new(),
         })
     }
 
@@ -355,7 +385,22 @@ impl Agent {
     }
 
     pub fn set_session(&mut self, session: Session) {
+        let pending = session.pending_inputs();
+        self.pending_steer = pending
+            .iter()
+            .filter(|(_, _, mode)| *mode == InputMode::Steer)
+            .map(|(id, input, _)| PendingInput {
+                id: id.clone(),
+                input: input.clone(),
+            })
+            .collect();
+        self.pending_queue = pending
+            .into_iter()
+            .filter(|(_, _, mode)| *mode == InputMode::Queue)
+            .map(|(id, input, _)| PendingInput { id, input })
+            .collect();
         (self.state, self.commit) = session.into_parts();
+        self.commit.release_writer();
     }
 
     pub fn set_cwd(&mut self, cwd: impl Into<PathBuf>) {
@@ -363,8 +408,32 @@ impl Agent {
     }
 
     pub async fn rename_session(&mut self, title: &str) -> Result<(), AgentError> {
-        self.commit.rename(title).await?;
-        Ok(())
+        let result = async {
+            self.commit.prepare(&self.state).await?;
+            self.commit.rename(title).await?;
+            Ok(())
+        }
+        .await;
+        self.commit.release_writer();
+        result
+    }
+
+    pub async fn persist_session_config(
+        &mut self,
+        config: &SessionConfig,
+    ) -> Result<(), AgentError> {
+        let result = async {
+            self.commit.prepare(&self.state).await?;
+            self.commit.set_config(config).await?;
+            Ok(())
+        }
+        .await;
+        self.commit.release_writer();
+        result
+    }
+
+    pub fn release_session_writer(&mut self) {
+        self.commit.release_writer();
     }
 
     pub fn tool_schemas(&self) -> Vec<Tool> {
@@ -380,6 +449,9 @@ impl Agent {
 
     pub fn start_compaction(self, instructions: Option<String>) -> ActiveAgent {
         self.spawn(move |mut agent, channels, events| async move {
+            if let Err(error) = agent.commit.prepare(&agent.state).await {
+                return Err((agent, error.into()));
+            }
             match agent
                 .compact_once(true, instructions.as_deref(), &channels.cancel, &events)
                 .await
@@ -413,30 +485,35 @@ impl Agent {
             cancel,
         };
         let task = tokio::spawn(async move {
-            match operation(self, channels, events_tx.clone()).await {
+            let mut agent = match operation(self, channels, events_tx.clone()).await {
                 Ok(agent) => agent,
                 Err((mut agent, error)) => {
                     if matches!(error, AgentError::Aborted) {
                         match agent.close_unresolved_tools().await {
                             Ok(()) => {
-                                let _ = events_tx.send(AgentEvent::RunAborted).await;
+                                let _ = agent.emit(&events_tx, AgentEvent::RunAborted).await;
                             }
                             Err(cleanup_error) => {
-                                let _ = events_tx
-                                    .send(AgentEvent::RunFailed(format!(
-                                        "abort cleanup failed: {cleanup_error}"
-                                    )))
+                                let _ = agent
+                                    .emit(
+                                        &events_tx,
+                                        AgentEvent::RunFailed(format!(
+                                            "abort cleanup failed: {cleanup_error}"
+                                        )),
+                                    )
                                     .await;
                             }
                         }
                     } else {
-                        let _ = events_tx
-                            .send(AgentEvent::RunFailed(error.to_string()))
+                        let _ = agent
+                            .emit(&events_tx, AgentEvent::RunFailed(error.to_string()))
                             .await;
                     }
                     agent
                 }
-            }
+            };
+            agent.release_session_writer();
+            agent
         });
         ActiveAgent {
             control,
@@ -454,7 +531,16 @@ impl Agent {
         if input.trim().is_empty() {
             return Err((self, AgentError::EmptyInput));
         }
-        if let Err(error) = events.send(AgentEvent::RunStarted(input.clone())).await {
+        if let Err(error) = self.commit.prepare(&self.state).await {
+            return Err((self, error.into()));
+        }
+        if let Err(error) = self.close_unresolved_tools().await {
+            return Err((self, error));
+        }
+        if let Err(error) = self
+            .emit(&events, AgentEvent::RunStarted(input.clone()))
+            .await
+        {
             return Err((self, AgentError::Task(error.to_string())));
         }
         if let Err(error) = self.append_user(input).await {
@@ -464,11 +550,49 @@ impl Agent {
         let result = self.run_loop(&mut channels, &events).await;
         match result {
             Ok(summary) => {
-                let _ = events.send(AgentEvent::RunFinished(summary)).await;
+                if let Err(error) = self.emit(&events, AgentEvent::RunFinished(summary)).await {
+                    return Err((self, error));
+                }
                 Ok(self)
             }
             Err(error) => Err((self, error)),
         }
+    }
+
+    async fn emit(
+        &mut self,
+        events: &mpsc::Sender<AgentEvent>,
+        event: AgentEvent,
+    ) -> Result<(), AgentError> {
+        let durable = match &event {
+            AgentEvent::RunStarted(input) => Some(SessionEvent::RunStarted {
+                input: input.clone(),
+            }),
+            AgentEvent::ReasoningDelta(delta) => Some(SessionEvent::ReasoningDelta {
+                delta: delta.clone(),
+            }),
+            AgentEvent::TextDelta(delta) => Some(SessionEvent::TextDelta {
+                delta: delta.clone(),
+            }),
+            AgentEvent::RunFinished(_) => Some(SessionEvent::RunFinished),
+            AgentEvent::RunAborted => Some(SessionEvent::RunAborted),
+            AgentEvent::RunFailed(message) => Some(SessionEvent::RunFailed {
+                message: message.clone(),
+            }),
+            AgentEvent::InputAdmitted { id, input, mode } => Some(SessionEvent::InputAdmitted {
+                id: id.clone(),
+                input: input.clone(),
+                mode: *mode,
+            }),
+            _ => None,
+        };
+        if let Some(durable) = durable {
+            self.commit.event(&durable).await?;
+        }
+        events
+            .send(event)
+            .await
+            .map_err(|error| AgentError::Task(error.to_string()))
     }
 
     async fn run_loop(
@@ -509,6 +633,18 @@ impl Agent {
                 loop {
                     let event = tokio::select! {
                         _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
+                        message = channels.steer.recv() => {
+                            if let Some(message) = message {
+                                self.admit_input(&message, InputMode::Steer, events).await?;
+                            }
+                            continue;
+                        }
+                        message = channels.queue.recv() => {
+                            if let Some(message) = message {
+                                self.admit_input(&message, InputMode::Queue, events).await?;
+                            }
+                            continue;
+                        }
                         event = stream.next() => event,
                     };
                     let Some(event) = event else {
@@ -516,16 +652,12 @@ impl Agent {
                     };
                     match event? {
                         ResponseStreamEvent::ResponseOutputTextDelta(delta) => {
-                            events
-                                .send(AgentEvent::TextDelta(delta.delta))
-                                .await
-                                .map_err(|error| AgentError::Task(error.to_string()))?;
+                            self.emit(events, AgentEvent::TextDelta(delta.delta))
+                                .await?;
                         }
                         ResponseStreamEvent::ResponseReasoningTextDelta(delta) => {
-                            events
-                                .send(AgentEvent::ReasoningDelta(delta.delta))
-                                .await
-                                .map_err(|error| AgentError::Task(error.to_string()))?;
+                            self.emit(events, AgentEvent::ReasoningDelta(delta.delta))
+                                .await?;
                         }
                         ResponseStreamEvent::ResponseCompleted(event) => {
                             completed = Some(event.response);
@@ -572,22 +704,32 @@ impl Agent {
                     }),
                 )
                 .await?;
+                self.commit.event(&SessionEvent::ResponseCommitted).await?;
 
                 let outcomes = self.execute_tools(&calls, channels, events).await?;
                 for (call, result) in calls.iter().zip(outcomes) {
+                    self.append_items(vec![function_output(call, result.output.clone())], None)
+                        .await?;
                     events
                         .send(AgentEvent::ToolFinished {
                             call: call.clone(),
-                            result: result.clone(),
+                            result,
                         })
                         .await
                         .map_err(|error| AgentError::Task(error.to_string()))?;
-                    self.append_items(vec![function_output(call, result.output)], None)
-                        .await?;
                 }
 
-                if let Ok(message) = channels.steer.try_recv() {
-                    self.append_user(message).await?;
+                while let Ok(message) = channels.steer.try_recv() {
+                    self.admit_input(&message, InputMode::Steer, events).await?;
+                }
+                while let Ok(message) = channels.queue.try_recv() {
+                    self.admit_input(&message, InputMode::Queue, events).await?;
+                }
+                if let Some(message) = self.pending_steer.pop_front() {
+                    self.append_user(message.input).await?;
+                    self.commit
+                        .event(&SessionEvent::InputConsumed { id: message.id })
+                        .await?;
                     continue;
                 }
                 if !calls.is_empty() {
@@ -596,8 +738,11 @@ impl Agent {
                 break response;
             };
 
-            if let Ok(message) = channels.queue.try_recv() {
-                self.append_user(message).await?;
+            if let Some(message) = self.pending_queue.pop_front() {
+                self.append_user(message.input).await?;
+                self.commit
+                    .event(&SessionEvent::InputConsumed { id: message.id })
+                    .await?;
                 continue;
             }
             break settled_response;
@@ -610,8 +755,36 @@ impl Agent {
         })
     }
 
+    async fn admit_input(
+        &mut self,
+        message: &PendingInput,
+        mode: InputMode,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<(), AgentError> {
+        self.emit(
+            events,
+            AgentEvent::InputAdmitted {
+                id: message.id.clone(),
+                input: message.input.clone(),
+                mode,
+            },
+        )
+        .await?;
+        match mode {
+            InputMode::Steer => self.pending_steer.push_back(PendingInput {
+                id: message.id.clone(),
+                input: message.input.clone(),
+            }),
+            InputMode::Queue => self.pending_queue.push_back(PendingInput {
+                id: message.id.clone(),
+                input: message.input.clone(),
+            }),
+        }
+        Ok(())
+    }
+
     async fn execute_tools(
-        &self,
+        &mut self,
         calls: &[FunctionToolCall],
         channels: &mut RunChannels,
         events: &mpsc::Sender<AgentEvent>,
@@ -633,6 +806,18 @@ impl Agent {
             let decision = loop {
                 let approval = tokio::select! {
                     _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
+                    message = channels.steer.recv() => {
+                        if let Some(message) = message {
+                            self.admit_input(&message, InputMode::Steer, events).await?;
+                        }
+                        continue;
+                    }
+                    message = channels.queue.recv() => {
+                        if let Some(message) = message {
+                            self.admit_input(&message, InputMode::Queue, events).await?;
+                        }
+                        continue;
+                    }
                     approval = channels.approvals.recv() => approval,
                 };
                 let Some((call_id, allow)) = approval else {
@@ -651,16 +836,38 @@ impl Agent {
                 .await
                 .map_err(|error| AgentError::Task(error.to_string()))?;
         }
-        let futures = calls.iter().zip(allowed).map(|(call, allow)| async move {
-            match self.tools.iter().find(|tool| tool.name() == call.name) {
-                None => ToolResult::error(format!("Tool not found: {}", call.name)),
-                Some(_) if !allow => ToolResult::error("Tool call denied by user"),
-                Some(tool) => tool.execute(call, &self.env).await,
+        let futures = calls.iter().cloned().zip(allowed).map(|(call, allow)| {
+            let tool = self
+                .tools
+                .iter()
+                .find(|tool| tool.name() == call.name)
+                .cloned();
+            let env = self.env.clone();
+            async move {
+                match tool {
+                    None => ToolResult::error(format!("Tool not found: {}", call.name)),
+                    Some(_) if !allow => ToolResult::error("Tool call denied by user"),
+                    Some(tool) => tool.execute(&call, &env).await,
+                }
             }
         });
-        tokio::select! {
-            _ = channels.cancel.cancelled() => Err(AgentError::Aborted),
-            outcomes = join_all(futures) => Ok(outcomes),
+        let tools = join_all(futures);
+        tokio::pin!(tools);
+        loop {
+            tokio::select! {
+                _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
+                message = channels.steer.recv() => {
+                    if let Some(message) = message {
+                        self.admit_input(&message, InputMode::Steer, events).await?;
+                    }
+                }
+                message = channels.queue.recv() => {
+                    if let Some(message) = message {
+                        self.admit_input(&message, InputMode::Queue, events).await?;
+                    }
+                }
+                outcomes = &mut tools => return Ok(outcomes),
+            }
         }
     }
 
@@ -807,16 +1014,21 @@ impl Agent {
 }
 
 struct RunChannels {
-    steer: mpsc::UnboundedReceiver<String>,
-    queue: mpsc::UnboundedReceiver<String>,
+    steer: mpsc::UnboundedReceiver<PendingInput>,
+    queue: mpsc::UnboundedReceiver<PendingInput>,
     approvals: mpsc::UnboundedReceiver<(String, bool)>,
     cancel: CancellationToken,
 }
 
+struct PendingInput {
+    id: String,
+    input: String,
+}
+
 #[derive(Clone)]
 pub struct RunControl {
-    steer: mpsc::UnboundedSender<String>,
-    queue: mpsc::UnboundedSender<String>,
+    steer: mpsc::UnboundedSender<PendingInput>,
+    queue: mpsc::UnboundedSender<PendingInput>,
     approvals: mpsc::UnboundedSender<(String, bool)>,
     cancel: CancellationToken,
 }
@@ -824,13 +1036,19 @@ pub struct RunControl {
 impl RunControl {
     pub fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
         self.steer
-            .send(message.into())
+            .send(PendingInput {
+                id: Uuid::new_v4().to_string(),
+                input: message.into(),
+            })
             .map_err(|error| AgentError::Task(error.to_string()))
     }
 
     pub fn queue(&self, message: impl Into<String>) -> Result<(), AgentError> {
         self.queue
-            .send(message.into())
+            .send(PendingInput {
+                id: Uuid::new_v4().to_string(),
+                input: message.into(),
+            })
             .map_err(|error| AgentError::Task(error.to_string()))
     }
 
@@ -899,12 +1117,169 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::Barrier;
 
     use super::{ActiveAgent, Agent, AgentEvent, Model, ReasoningEffort, RunControl};
     use crate::{
-        AgentTool, Env, Session, SessionError, SessionInfo, State, StateCommit, StateEntry,
-        ToolResult,
+        AgentTool, Env, InputMode, Session, SessionConfig, SessionError, SessionEvent, SessionInfo,
+        State, StateCommit, StateEntry, ToolResult,
     };
+
+    async fn barrier_model(
+        output: &'static str,
+        barrier: Arc<Barrier>,
+    ) -> (Model, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (body_start, content_length) = loop {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..bytes]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                break (header_end + 4, content_length);
+            };
+            while request.len() < body_start + content_length {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..bytes]);
+            }
+            barrier.wait().await;
+            let body = format!(
+                "data: {{\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"{output}\"}}\n\ndata: {{\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{{\"created_at\":0,\"id\":\"resp_1\",\"model\":\"test-model\",\"object\":\"response\",\"output\":[{{\"type\":\"message\",\"content\":[{{\"type\":\"output_text\",\"annotations\":[],\"text\":\"{output}\"}}],\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\"}}],\"status\":\"completed\"}}}}\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (
+            Model::new(
+                "test",
+                "test-key",
+                format!("http://{address}"),
+                "test-model",
+                128_000,
+            ),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn sessions_run_concurrently_within_and_across_projects() {
+        let directory = std::env::temp_dir().join(format!(
+            "kcastle-concurrent-sessions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first_dir = directory.join("project-a");
+        let second_dir = directory.join("project-b");
+        let first = Session::create_in_project(&first_dir, "project-a")
+            .await
+            .unwrap();
+        let second = Session::create_in_project(&first_dir, "project-a")
+            .await
+            .unwrap();
+        let third = Session::create_in_project(&second_dir, "project-b")
+            .await
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(4));
+        let (first_model, first_server) = barrier_model("first", barrier.clone()).await;
+        let (second_model, second_server) = barrier_model("second", barrier.clone()).await;
+        let (third_model, third_server) = barrier_model("third", barrier.clone()).await;
+
+        let first_active = Agent::new(first_model, "test", first, ".").start("one");
+        let second_active = Agent::new(second_model, "test", second, ".").start("two");
+        let third_active = Agent::new(third_model, "test", third, ".").start("three");
+        tokio::time::timeout(std::time::Duration::from_secs(2), barrier.wait())
+            .await
+            .expect("all independent sessions should reach the provider concurrently");
+        let (first, second, third) = tokio::join!(
+            first_active.finish(),
+            second_active.finish(),
+            third_active.finish()
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        let third = third.unwrap();
+        assert_eq!(first.session_info().project_id, "project-a");
+        assert_eq!(second.session_info().project_id, "project-a");
+        assert_eq!(third.session_info().project_id, "project-b");
+        assert_ne!(first.session_info().id, second.session_info().id);
+        assert!(format!("{:?}", first.transcript()).contains("first"));
+        assert!(format!("{:?}", second.transcript()).contains("second"));
+        assert!(format!("{:?}", third.transcript()).contains("third"));
+        let first_info = first.session_info().clone();
+        let second_info = second.session_info().clone();
+        let third_info = third.session_info().clone();
+        Session::delete(&first_info).expect("an idle agent must release its writer lease");
+        Session::delete(&second_info).expect("sessions in the same project have separate leases");
+        Session::delete(&third_info).expect("projects do not share writer leases");
+        first_server.await.unwrap();
+        second_server.await.unwrap();
+        third_server.await.unwrap();
+        drop((first, second, third));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_queue_is_recovered_into_the_owning_agent_only() {
+        let directory = std::env::temp_dir().join(format!(
+            "kcastle-recovered-queue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session = Session::create_in_project(&directory, "project-a")
+            .await
+            .unwrap();
+        let path = session.info().path.clone();
+        let (state, mut commit) = session.into_parts();
+        commit.prepare(&state).await.unwrap();
+        commit
+            .event(&SessionEvent::InputAdmitted {
+                id: "queued-1".into(),
+                input: "continue later".into(),
+                mode: InputMode::Queue,
+            })
+            .await
+            .unwrap();
+        drop(commit);
+
+        let recovered = Session::open_readonly_in_project(&path, "project-a").unwrap();
+        let agent = Agent::new(
+            Model::new("test", "key", "http://localhost", "model", 10_000),
+            "test",
+            recovered,
+            ".",
+        );
+        assert!(agent.pending_steer.is_empty());
+        assert_eq!(agent.pending_queue.len(), 1);
+        assert_eq!(agent.pending_queue[0].input, "continue later");
+        drop(agent);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn streams_a_response_into_state() {
@@ -1091,6 +1466,24 @@ mod tests {
             &self.info
         }
 
+        fn prepare<'a>(&'a mut self, _state: &'a State) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn event<'a>(
+            &'a mut self,
+            _event: &'a SessionEvent,
+        ) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn set_config<'a>(
+            &'a mut self,
+            _config: &'a SessionConfig,
+        ) -> BoxFuture<'a, Result<(), SessionError>> {
+            Box::pin(async { Ok(()) })
+        }
+
         fn set_initial_title<'a>(
             &'a mut self,
             _message: &'a str,
@@ -1108,6 +1501,8 @@ mod tests {
         ) -> BoxFuture<'a, Result<(), SessionError>> {
             Box::pin(async { Err(SessionError::Invalid("commit failed".into())) })
         }
+
+        fn release_writer(&mut self) {}
     }
 
     #[tokio::test]
@@ -1117,11 +1512,7 @@ mod tests {
             "test",
             State::default(),
             Box::new(FailingCommit {
-                info: SessionInfo {
-                    path: PathBuf::new(),
-                    title: "test".into(),
-                    created_at: 0,
-                },
+                info: SessionInfo::legacy(PathBuf::new(), "test", 0),
             }),
             ".",
             Vec::new(),

@@ -1449,7 +1449,7 @@ mod tests {
 
     fn record(role: Role, text: &str) -> Message {
         Message {
-            key: crate::app::next_message_render_key(),
+            key: crate::domain::next_message_id(),
             revision: 0,
             role,
             tool_call_id: None,

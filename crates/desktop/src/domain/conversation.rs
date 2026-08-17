@@ -9,7 +9,7 @@ pub(crate) enum Role {
     Notice,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Message {
     pub(crate) key: MessageId,
     pub(crate) revision: u64,
@@ -31,7 +31,7 @@ pub(crate) struct Message {
     pub(crate) search_text: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ConversationState {
     pub(crate) messages: Vec<Message>,
     pub(crate) title: String,
@@ -49,6 +49,7 @@ pub(crate) struct UsageSnapshot {
     pub(crate) cached_tokens: u32,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum ConversationAction {
     SubmitUser(Message),

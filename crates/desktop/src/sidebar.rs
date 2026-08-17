@@ -1,4 +1,6 @@
-use crate::app::{DesktopApp, same_path, session_age};
+use std::path::PathBuf;
+
+use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, deferred, div,
@@ -7,6 +9,8 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::spinner::Spinner;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable};
 
 use crate::assets::DesktopIconName;
@@ -351,6 +355,11 @@ impl DesktopApp {
                 }
                 let project_name =
                     sidebar_label(&project.name, metrics::SIDEBAR_LABEL_UNITS);
+                let issue_count = self
+                    .project_session_issues
+                    .get(&project.sessions_dir)
+                    .map_or(0, Vec::len);
+                let project_missing = project.missing;
                 let project_group = SharedString::from(format!("workspace-{index}"));
                 div()
                     .flex()
@@ -421,7 +430,16 @@ impl DesktopApp {
                                             .truncate()
                                             .text_sm()
                                             .child(project_name),
-                                    ),
+                                    )
+                                    .children(project_missing.then(|| {
+                                        div().text_xs().text_color(colors.danger).child("Missing")
+                                    }))
+                                    .children((issue_count > 0).then(|| {
+                                        div()
+                                            .text_xs()
+                                            .text_color(colors.danger)
+                                            .child(format!("{issue_count} unreadable"))
+                                    })),
                             )
                             .child(
                                 div()
@@ -430,7 +448,18 @@ impl DesktopApp {
                                     .flex_none()
                                     .invisible()
                                     .group_hover(project_group, |element| element.visible())
-                                    .children((active && self.project_store.projects().len() > 1 && self.control.is_none()).then(|| {
+                                    .children(project_missing.then(|| {
+                                        Button::new(("relocate-workspace", index))
+                                            .icon(IconName::FolderOpen)
+                                            .ghost()
+                                            .compact()
+                                            .tooltip("Relocate workspace")
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.relocate_project(index, window, cx)
+                                            }))
+                                    }))
+                                    .children((!project.is_default() && !self.project_has_active_sessions(index, cx)).then(|| {
                                         Button::new(("remove-workspace", index))
                                             .icon(IconName::Ellipsis)
                                             .ghost()
@@ -458,6 +487,14 @@ impl DesktopApp {
                         div()
                             .flex()
                             .flex_col()
+                            .children((issue_count > 0).then(|| {
+                                div()
+                                    .px_7()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(colors.danger)
+                                    .child("Some session files could not be read; valid sessions remain available.")
+                            }))
                             .children(sessions.into_iter().enumerate().filter_map(|(session_index, session)| {
                                 let path = session.path.clone();
                                 let keyboard_path = path.clone();
@@ -480,10 +517,11 @@ impl DesktopApp {
                                 let display_title = if !query.is_empty() && !title_matches {
                                     self.session_document_summary(&path, &query)
                                         .map(|summary| format!("{title} · {summary}"))
-                                        .unwrap_or(title)
+                                        .unwrap_or_else(|| title.clone())
                                 } else {
-                                    title
+                                    title.clone()
                                 };
+                                let action_title = title;
                                 let group = SharedString::from(format!("session-{index}-{session_index}"));
                                 let action_path = path.clone();
                                 let action_open = self
@@ -492,6 +530,9 @@ impl DesktopApp {
                                     .session_action_target
                                     .as_ref()
                                     .is_some_and(|target| same_path(target, &path));
+                                let target_active = self.session_is_active(index, &path, cx);
+                                let age = session_age(self.session_modified_at(&session));
+                                let status = self.session_status_indicator(index, &path, cx);
                                 let action = Button::new(SharedString::from(format!("session-actions-{index}-{session_index}")))
                                     .icon(IconName::Ellipsis)
                                     .ghost()
@@ -517,31 +558,44 @@ impl DesktopApp {
                                                 window,
                                                 cx,
                                             );
-                                            if !selected {
-                                                this.open_project_session(index, action_path.clone(), window, cx);
-                                            }
                                         }
                                         cx.notify();
                                     }))
                                     .into_any_element();
+                                let open_path = path.clone();
                                 Some(
-                                    session_row(group.clone(), group.clone(), display_title, session_age(self.session_modified_at(&session)), selected, colors, Some(action))
+                                    session_row(
+                                        group.clone(),
+                                        group.clone(),
+                                        display_title,
+                                        SessionRowTrailing {
+                                            age,
+                                            status,
+                                            reduce_motion: self.settings.reduce_motion(),
+                                        },
+                                        selected,
+                                        colors,
+                                        Some(action),
+                                    )
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.dispatch(
                                                 Action::SetSessionActionTarget(None),
                                                 window,
                                                 cx,
                                             );
-                                            this.open_project_session(index, path.clone(), window, cx)
+                                            this.open_project_session(index, open_path.clone(), window, cx)
                                         }))
                                         .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
                                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                 this.open_project_session(index, keyboard_path.clone(), window, cx);
                                             }
                                         }))
-                                        .children((action_open && self.control.is_none()).then(|| {
+                                        .children((action_open && !target_active).then(|| {
                                             session_actions_popover(
                                                 SharedString::from(format!("{index}-{session_index}")),
+                                                index,
+                                                path.clone(),
+                                                action_title,
                                                 colors,
                                                 cx,
                                             )
@@ -613,12 +667,16 @@ impl DesktopApp {
                 |(row_index, (project_index, project_name, modified, path, title, selected))| {
                     let keyboard_path = path.clone();
                     let action_path = path.clone();
+                    let action_title = title.clone();
                     let action_open = self
                         .core
                         .sidebar
                         .session_action_target
                         .as_ref()
                         .is_some_and(|target| same_path(target, &path));
+                    let target_active = self.session_is_active(project_index, &path, cx);
+                    let age = session_age(modified);
+                    let status = self.session_status_indicator(project_index, &path, cx);
                     let action = Button::new(SharedString::from(format!(
                         "flat-session-actions-{row_index}"
                     )))
@@ -642,30 +700,27 @@ impl DesktopApp {
                                 window,
                                 cx,
                             );
-                            if !selected {
-                                this.open_project_session(
-                                    project_index,
-                                    action_path.clone(),
-                                    window,
-                                    cx,
-                                );
-                            }
                         }
                         cx.notify();
                     }))
                     .into_any_element();
+                    let open_path = path.clone();
                     session_row(
                         ("flat-session", row_index),
                         SharedString::from(format!("flat-session-{row_index}")),
                         format!("{title} · {project_name}"),
-                        session_age(modified),
+                        SessionRowTrailing {
+                            age,
+                            status,
+                            reduce_motion: self.settings.reduce_motion(),
+                        },
                         selected,
                         colors,
                         Some(action),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.dispatch(Action::SetSessionActionTarget(None), window, cx);
-                        this.open_project_session(project_index, path.clone(), window, cx)
+                        this.open_project_session(project_index, open_path.clone(), window, cx)
                     }))
                     .on_key_down(cx.listener(
                         move |this, event: &gpui::KeyDownEvent, window, cx| {
@@ -679,9 +734,12 @@ impl DesktopApp {
                             }
                         },
                     ))
-                    .children(action_open.then(|| {
+                    .children((action_open && !target_active).then(|| {
                         session_actions_popover(
                             SharedString::from(format!("flat-{row_index}")),
+                            project_index,
+                            path.clone(),
+                            action_title,
                             colors,
                             cx,
                         )
@@ -715,16 +773,27 @@ fn sidebar_option(
         .children(selected.then(|| Icon::new(IconName::Check).size_4()))
 }
 
+struct SessionRowTrailing {
+    age: String,
+    status: Option<SidebarSessionStatus>,
+    reduce_motion: bool,
+}
+
 fn session_row(
     id: impl Into<gpui::ElementId>,
     group: impl Into<SharedString>,
     title: String,
-    age: String,
+    trailing: SessionRowTrailing,
     selected: bool,
     colors: UiPalette,
     action: Option<gpui::AnyElement>,
 ) -> gpui::Stateful<gpui::Div> {
     let group = group.into();
+    let SessionRowTrailing {
+        age,
+        status,
+        reduce_motion,
+    } = trailing;
     div()
         .id(id)
         .group(group.clone())
@@ -760,12 +829,19 @@ fn session_row(
                 .child(
                     div()
                         .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap_1()
                         .text_right()
                         .text_xs()
                         .text_color(colors.muted_text)
                         .when(action.is_some(), |age| {
                             age.group_hover(group.clone(), |age| age.invisible())
                         })
+                        .children(status.map(|status| {
+                            session_status_icon(status, reduce_motion, colors, group.clone())
+                        }))
                         .child(age),
                 )
                 .children(action.map(|action| {
@@ -784,8 +860,64 @@ fn session_row(
         )
 }
 
+fn session_status_icon(
+    status: SidebarSessionStatus,
+    reduce_motion: bool,
+    colors: UiPalette,
+    group: SharedString,
+) -> gpui::AnyElement {
+    let label = match status {
+        SidebarSessionStatus::Preparing => "Preparing",
+        SidebarSessionStatus::Running => "Running",
+        SidebarSessionStatus::ApprovalNeeded => "Needs approval",
+        SidebarSessionStatus::Failed => "Failed",
+        SidebarSessionStatus::Unread => "Unread response",
+    };
+    let icon = match status {
+        SidebarSessionStatus::Preparing | SidebarSessionStatus::Running if !reduce_motion => {
+            Spinner::new()
+                .small()
+                .icon(IconName::LoaderCircle)
+                .color(colors.primary)
+                .into_any_element()
+        }
+        SidebarSessionStatus::Preparing | SidebarSessionStatus::Running => {
+            Icon::new(IconName::LoaderCircle)
+                .size_4()
+                .text_color(colors.primary)
+                .into_any_element()
+        }
+        SidebarSessionStatus::ApprovalNeeded => Icon::new(IconName::TriangleAlert)
+            .size_4()
+            .text_color(colors.warning)
+            .into_any_element(),
+        SidebarSessionStatus::Failed => Icon::new(IconName::CircleX)
+            .size_4()
+            .text_color(colors.danger)
+            .into_any_element(),
+        SidebarSessionStatus::Unread => div()
+            .size(px(6.0))
+            .rounded_full()
+            .bg(colors.primary)
+            .into_any_element(),
+    };
+    div()
+        .id(SharedString::from(format!("session-status-{group}")))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(metrics::SIDEBAR_ICON_SLOT))
+        .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+        .child(icon)
+        .into_any_element()
+}
+
 fn session_actions_popover(
     key: SharedString,
+    project_index: usize,
+    path: PathBuf,
+    title: String,
     colors: UiPalette,
     cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
@@ -814,10 +946,20 @@ fn session_actions_popover(
                     .rounded(px(8.0))
                     .justify_start()
                     .text_sm()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.dispatch(Action::SetSessionActionTarget(None), window, cx);
-                        this.open_rename_session_dialog(window, cx)
+                    .on_click(cx.listener({
+                        let path = path.clone();
+                        let title = title.clone();
+                        move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.dispatch(Action::SetSessionActionTarget(None), window, cx);
+                            this.open_target_rename_session_dialog(
+                                project_index,
+                                path.clone(),
+                                title.clone(),
+                                window,
+                                cx,
+                            )
+                        }
                     })),
             )
             .child(
@@ -831,10 +973,16 @@ fn session_actions_popover(
                     .justify_start()
                     .text_sm()
                     .text_color(colors.danger)
-                    .on_click(cx.listener(|this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.dispatch(Action::SetSessionActionTarget(None), window, cx);
-                        this.open_delete_session_dialog(window, cx)
+                        this.open_target_delete_session_dialog(
+                            project_index,
+                            path.clone(),
+                            title.clone(),
+                            window,
+                            cx,
+                        )
                     })),
             ),
     )

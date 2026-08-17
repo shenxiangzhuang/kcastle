@@ -29,11 +29,15 @@ This recipe builds the release binary, places it in `target/kcastle.app`, applie
 debug build. A direct `cargo run -p kcastle-desktop` launches an unbundled executable and does not
 reproduce macOS AppKit behavior such as fullscreen titlebar reveal.
 
-The desktop app treats folders as projects. Each project keeps an isolated session history under
-`~/.kcastle/projects`, while removing a project from the sidebar never deletes its folder or saved
-history. Sessions can be created, reopened, renamed, and deleted from the sidebar. Provider
-credentials can come from environment variables or the desktop Models settings page; desktop
-preferences such as reasoning effort are saved in `~/.kcastle/settings.json`. The desktop shell includes workspace-grouped session browsing,
+The desktop app uses a strict App → Projects → Sessions hierarchy. Every project is bound to one
+folder and owns an isolated session namespace below `~/.kcastle/sessions`; when no folder is
+selected, the built-in Default project uses `~/.kcastle/sessions/default` as both its project and
+session directory. Any number of sessions may run concurrently within one project or across
+projects, and switching or creating sessions never stops background work. Removing a project from
+the sidebar never deletes its folder or saved history. Sessions can be created, reopened, renamed,
+and deleted from the sidebar. Provider credentials can come from environment variables or the
+desktop Models settings page. Global settings are new-session defaults; each session persists its
+own model, reasoning effort, and tool permission in its JSONL log. The desktop shell includes workspace-grouped session browsing,
 session search and ordering, a searchable trajectory view, expandable tool output, message copy
 actions, and native session-log export. The desktop Models settings page supports the OpenAI and
 DeepSeek providers. Each provider owns an editable model catalog shared with the TUI defaults;

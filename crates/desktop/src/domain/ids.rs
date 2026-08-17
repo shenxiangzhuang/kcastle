@@ -20,6 +20,12 @@ impl std::fmt::Display for MessageId {
     }
 }
 
-numeric_id!(OperationId);
+pub(crate) fn next_message_id() -> MessageId {
+    MessageId(NEXT_MESSAGE_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 numeric_id!(RunId);
 numeric_id!(LayoutGeneration);
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);

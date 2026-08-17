@@ -9,9 +9,6 @@ pub(crate) use conversation::{
     ConversationAction, ConversationState, Message, Role, UsageSnapshot, reduce_conversation,
     reindex_messages,
 };
-pub(crate) use ids::{LayoutGeneration, MessageId, OperationId, RunId};
+pub(crate) use ids::{LayoutGeneration, MessageId, RunId, next_message_id};
 pub(crate) use reducer::reduce;
-pub(crate) use state::{
-    AppState, ApprovalState, ComposerMenu, DetailsTab, PendingSessionOperation, RunState,
-    SessionOperationKind, Surface,
-};
+pub(crate) use state::{AppState, ApprovalState, ComposerMenu, DetailsTab, RunState, Surface};

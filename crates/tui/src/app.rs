@@ -412,7 +412,8 @@ impl App {
 
     pub fn apply_event(&mut self, event: AgentEvent) -> Option<(String, bool)> {
         match event {
-            AgentEvent::RunStarted(_) => {}
+            AgentEvent::RunStarted(input) => self.push_user(input),
+            AgentEvent::InputAdmitted { input, .. } => self.push_user(input),
             AgentEvent::ModelStarted(_) => {}
             AgentEvent::ReasoningDelta(delta) => {
                 if let Some(Entry::Assistant { text, .. }) = self
@@ -730,10 +731,6 @@ impl App {
 
     pub fn set_permission_mode(&mut self, allow_all: bool) {
         self.allow_all = allow_all;
-    }
-
-    pub fn permission_mode(&self) -> bool {
-        self.allow_all
     }
 
     pub fn prefill(&mut self, value: &str) {
@@ -2387,16 +2384,8 @@ mod tests {
     #[test]
     fn session_manager_navigates_and_confirms_before_delete() {
         let mut app = app();
-        let current = SessionInfo {
-            path: PathBuf::from("current.jsonl"),
-            title: "Current".into(),
-            created_at: 2,
-        };
-        let saved = SessionInfo {
-            path: PathBuf::from("saved.jsonl"),
-            title: "Saved".into(),
-            created_at: 1,
-        };
+        let current = SessionInfo::legacy(PathBuf::from("current.jsonl"), "Current", 2);
+        let saved = SessionInfo::legacy(PathBuf::from("saved.jsonl"), "Saved", 1);
         app.show_sessions(
             vec![saved.clone(), current.clone()],
             &current.path,
@@ -2461,11 +2450,7 @@ mod tests {
     #[test]
     fn resume_session_list_does_not_delete() {
         let mut app = app();
-        let saved = SessionInfo {
-            path: PathBuf::from("saved.jsonl"),
-            title: "Saved".into(),
-            created_at: 1,
-        };
+        let saved = SessionInfo::legacy(PathBuf::from("saved.jsonl"), "Saved", 1);
         app.show_sessions(
             vec![saved],
             &PathBuf::from("current.jsonl"),
@@ -2983,11 +2968,7 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(
-            session_label(&SessionInfo {
-                path: PathBuf::new(),
-                title: "saved".into(),
-                created_at: 0,
-            }),
+            session_label(&SessionInfo::legacy(PathBuf::new(), "saved", 0)),
             format!("saved · {created_at}")
         );
     }

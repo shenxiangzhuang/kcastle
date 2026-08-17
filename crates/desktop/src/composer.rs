@@ -115,17 +115,16 @@ impl DesktopApp {
 
     fn composer_card(&self, hero: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
-        let running = self.control.is_some();
-        let preparing = matches!(self.core.run, RunState::CreatingSession { .. })
-            || self.core.pending_session_operation.is_some();
+        let running = self.session_running();
+        let preparing = matches!(self.core.run, RunState::Preparing);
         let empty = self.input.read(cx).value().trim().is_empty();
         let elapsed = self
-            .started_at
+            .selected_started_at
             .map(|started_at| started_at.elapsed())
             .unwrap_or_default();
-        let model = self.models[self.selected_model]
-            .model
-            .reasoning_effort()
+        let model = self
+            .selected_reasoning_effort
+            .as_ref()
             .map(|effort| format!("{}  {}", self.model, effort_label(effort)))
             .unwrap_or_else(|| self.model.clone());
         let measurement_owner = cx.entity().downgrade();
@@ -192,16 +191,20 @@ impl DesktopApp {
                                 } else {
                                     "access-settings"
                                 })
-                                .icon(if self.settings.allow_all_tools() {
-                                    IconName::CircleCheck
-                                } else {
-                                    IconName::TriangleAlert
-                                })
-                                .label(if self.settings.allow_all_tools() {
-                                    "Allow all tools"
-                                } else {
-                                    "Ask before tools"
-                                })
+                                .icon(
+                                    if self.selected_runtime.read(cx).snapshot().allow_all_tools {
+                                        IconName::CircleCheck
+                                    } else {
+                                        IconName::TriangleAlert
+                                    },
+                                )
+                                .label(
+                                    if self.selected_runtime.read(cx).snapshot().allow_all_tools {
+                                        "Allow all tools"
+                                    } else {
+                                        "Ask before tools"
+                                    },
+                                )
                                 .ghost()
                                 .compact()
                                 .tooltip("Select tool approval behavior")
@@ -326,7 +329,7 @@ impl DesktopApp {
                     "permission-ask",
                     "Ask before tools",
                     "Show an approval card before every shell call",
-                    !self.settings.allow_all_tools(),
+                    !self.selected_runtime.read(cx).snapshot().allow_all_tools,
                     self.core.composer.highlighted_item == 0,
                     colors,
                     cx.listener(|this, _, _, cx| this.set_allow_all_tools(false, cx)),
@@ -335,7 +338,7 @@ impl DesktopApp {
                     "permission-allow",
                     "Allow all tools",
                     "Automatically approve tool calls in this app",
-                    self.settings.allow_all_tools(),
+                    self.selected_runtime.read(cx).snapshot().allow_all_tools,
                     self.core.composer.highlighted_item == 1,
                     colors,
                     cx.listener(|this, _, _, cx| this.set_allow_all_tools(true, cx)),
@@ -343,9 +346,9 @@ impl DesktopApp {
                 .into_any_element(),
             ComposerMenu::Model => {
                 let selected_model = self.models[self.selected_model].label();
-                let effort = self.models[self.selected_model]
-                    .model
-                    .reasoning_effort()
+                let effort = self
+                    .selected_reasoning_effort
+                    .as_ref()
                     .map(effort_label)
                     .unwrap_or("Default");
                 div()
@@ -405,10 +408,7 @@ impl DesktopApp {
                     .model
                     .reasoning_efforts()
                     .to_vec();
-                let selected = self.models[self.selected_model]
-                    .model
-                    .reasoning_effort()
-                    .cloned();
+                let selected = self.selected_reasoning_effort.clone();
                 div()
                     .flex()
                     .flex_col()
