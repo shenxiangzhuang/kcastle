@@ -38,7 +38,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-  binaries:
+  desktop-apps:
     strategy:
       fail-fast: false
       matrix:
@@ -61,16 +61,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --release --locked -p kcastle --target ${{ matrix.target }}
-      - name: Package Unix binary
-        if: matrix.archive == 'tar.gz'
-        run: tar -C target/${{ matrix.target }}/release -czf kcastle-${{ matrix.target }}.tar.gz kcastle
-      - name: Package Windows binary
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+      - run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
+      - name: Package Linux desktop app
+        if: runner.os == 'Linux'
+        run: tar -C target/${{ matrix.target }}/release -czf kcastle-desktop-${{ matrix.target }}.tar.gz kcastle-desktop
+      - name: Package macOS desktop app
+        if: runner.os == 'macOS'
+        run: |
+          scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
+          tar -C target -czf kcastle-desktop-${{ matrix.target }}.tar.gz kcastle.app
+      - name: Package Windows desktop app
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive target/${{ matrix.target }}/release/kcastle.exe kcastle-${{ matrix.target }}.zip
-      - name: Upload release asset
+        run: Compress-Archive target/${{ matrix.target }}/release/kcastle-desktop.exe kcastle-desktop-${{ matrix.target }}.zip
+      - name: Upload desktop app
         shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" kcastle-${{ matrix.target }}.${{ matrix.archive }} --clobber
+        run: gh release upload "$GITHUB_REF_NAME" kcastle-desktop-${{ matrix.target }}.${{ matrix.archive }} --clobber
         env:
           GH_TOKEN: ${{ github.token }}
