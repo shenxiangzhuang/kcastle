@@ -1,5 +1,8 @@
 use kcastle_agent::AgentEvent;
 
+pub(crate) const MAX_EVENTS_PER_FRAME: usize = 128;
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct StreamTelemetry {
     pub(crate) batches: u64,
@@ -8,6 +11,7 @@ pub(crate) struct StreamTelemetry {
     pub(crate) largest_batch: usize,
 }
 
+#[cfg(test)]
 impl StreamTelemetry {
     pub(crate) fn record(&mut self, batch: &StreamBatch) {
         self.batches = self.batches.saturating_add(1);
@@ -53,6 +57,7 @@ impl StreamBatch {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn raw_delta_count(&self) -> usize {
         self.delta_count
     }

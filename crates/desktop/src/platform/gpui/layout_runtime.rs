@@ -58,9 +58,15 @@ impl GpuiLayoutRuntime {
         generation: LayoutGeneration,
         id: MessageId,
         bounds: MeasuredBounds,
-    ) {
+    ) -> bool {
+        let layout_changed = self.messages.get(&id).is_none_or(|previous| {
+            previous.generation != generation
+                || (previous.bounds.width - bounds.width).abs() >= 0.5
+                || (previous.bounds.height - bounds.height).abs() >= 0.5
+        });
         self.messages
             .insert(id, GenerationBounds { generation, bounds });
+        layout_changed
     }
 
     pub(crate) fn capture_chat_anchor(
@@ -172,5 +178,15 @@ mod tests {
         assert!(!runtime.schedule_tail_realign());
         assert!(runtime.take_tail_realign());
         assert!(!runtime.take_tail_realign());
+    }
+
+    #[test]
+    fn message_height_changes_request_a_new_layout_alignment() {
+        let generation = LayoutGeneration(1);
+        let mut runtime = GpuiLayoutRuntime::default();
+
+        assert!(runtime.observe_message(generation, MessageId(1), bounds(100.0, 20.0)));
+        assert!(!runtime.observe_message(generation, MessageId(1), bounds(80.0, 20.0)));
+        assert!(runtime.observe_message(generation, MessageId(1), bounds(80.0, 200.0)));
     }
 }

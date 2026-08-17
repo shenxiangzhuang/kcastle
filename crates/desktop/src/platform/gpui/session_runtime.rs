@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::Context;
+use gpui::{Context, Window};
 use kcastle_agent::{
     Agent, AgentEvent, Model, ReasoningEffort, RunControl, Session, SessionConfig, SessionInfo,
     ToolResult,
 };
 
+use crate::application::{MAX_EVENTS_PER_FRAME, StreamBatch, is_frame_stream_event};
 use crate::domain::{
     ApprovalState, ConversationAction, ConversationState, Message, Role, RunId, UsageSnapshot,
     next_message_id, reduce_conversation, reindex_messages,
 };
+use crate::platform::gpui::arm_next_frame;
 use crate::settings::EnterBehavior;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub(crate) struct SessionRuntimeSnapshot {
     pub(crate) config: SessionConfig,
     pub(crate) active_run: Option<RunId>,
     pub(crate) completed_runs: u64,
+    pub(crate) transcript_updates: u64,
 }
 
 /// The complete GPUI-owned execution boundary for one session.
@@ -49,6 +52,7 @@ pub(crate) struct SessionRuntime {
     active_run: Option<RunId>,
     next_run: RunId,
     completed_runs: u64,
+    transcript_updates: u64,
     conversation: ConversationState,
     approval: Option<ApprovalState>,
     status: SessionRuntimeStatus,
@@ -87,6 +91,7 @@ impl SessionRuntime {
             active_run: None,
             next_run: RunId::default(),
             completed_runs: 0,
+            transcript_updates: 0,
             conversation,
             approval: None,
             status: SessionRuntimeStatus::Idle,
@@ -108,6 +113,7 @@ impl SessionRuntime {
             config: self.config.clone(),
             active_run: self.active_run,
             completed_runs: self.completed_runs,
+            transcript_updates: self.transcript_updates,
         }
     }
 
@@ -246,6 +252,7 @@ impl SessionRuntime {
         &mut self,
         input: String,
         behavior: EnterBehavior,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if input.trim().is_empty() || matches!(self.status, SessionRuntimeStatus::Creating) {
@@ -264,20 +271,20 @@ impl SessionRuntime {
         }
 
         if self.session.path.as_os_str().is_empty() {
-            self.create_and_start(input, cx);
+            self.create_and_start(input, window, cx);
         } else {
-            self.start(input, cx);
+            self.start(input, window, cx);
         }
     }
 
-    fn create_and_start(&mut self, input: String, cx: &mut Context<Self>) {
+    fn create_and_start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
         self.status = SessionRuntimeStatus::Creating;
         let sessions_dir = self.sessions_dir.clone();
         let project_id = self.project_id.clone();
         let runtime_config = self.config.clone();
         let session_id = self.session.id.clone();
         cx.notify();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = Session::create_in_project_with_id(
                 sessions_dir,
                 project_id,
@@ -285,25 +292,27 @@ impl SessionRuntime {
                 session_id,
             )
             .await;
-            let _ = this.update(cx, |runtime, cx| match result {
-                Ok(session) => {
-                    runtime.session = session.info().clone();
-                    if let Some(agent) = &mut runtime.agent {
-                        agent.set_session(session);
+            let _ = cx.update(|window, app| {
+                this.update(app, |runtime, cx| match result {
+                    Ok(session) => {
+                        runtime.session = session.info().clone();
+                        if let Some(agent) = &mut runtime.agent {
+                            agent.set_session(session);
+                        }
+                        runtime.start(input, window, cx);
                     }
-                    runtime.start(input, cx);
-                }
-                Err(error) => {
-                    runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                    runtime.notice(format!("Could not create session: {error}"));
-                    cx.notify();
-                }
+                    Err(error) => {
+                        runtime.status = SessionRuntimeStatus::Failed(error.to_string());
+                        runtime.notice(format!("Could not create session: {error}"));
+                        cx.notify();
+                    }
+                })
             });
         })
         .detach();
     }
 
-    fn start(&mut self, input: String, cx: &mut Context<Self>) {
+    fn start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent) = self.agent.take() else {
             self.status = SessionRuntimeStatus::Failed("Agent is unavailable".into());
             self.notice("Agent is unavailable");
@@ -319,39 +328,83 @@ impl SessionRuntime {
         self.started_at = Some(Instant::now());
         cx.notify();
 
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = active.next_event().await {
-                let _ = this.update(cx, |runtime, cx| {
-                    if runtime.active_run != Some(run) {
-                        return;
+        cx.spawn_in(window, async move |this, cx| {
+            let mut stream_ended = false;
+            while !stream_ended {
+                let Some(first) = active.next_event().await else {
+                    break;
+                };
+                let collect_frame = is_frame_stream_event(&first);
+                let mut batch = StreamBatch::new(first);
+                if collect_frame {
+                    let (frame_tx, mut frame_rx) = tokio::sync::oneshot::channel();
+                    cx.update(|window, _| arm_next_frame(window, frame_tx)).ok();
+                    let mut reached_frame = false;
+                    let mut reached_structure = false;
+                    while batch.len() < MAX_EVENTS_PER_FRAME {
+                        tokio::select! {
+                            biased;
+                            _ = &mut frame_rx => {
+                                reached_frame = true;
+                                break;
+                            }
+                            event = active.next_event() => match event {
+                                Some(event) => {
+                                    let structural = !is_frame_stream_event(&event);
+                                    batch.push(event);
+                                    if structural {
+                                        reached_structure = true;
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    stream_ended = true;
+                                    break;
+                                }
+                            },
+                        }
                     }
-                    runtime.apply_event(event);
-                    cx.notify();
+                    if !reached_frame && !reached_structure && !stream_ended {
+                        let _ = frame_rx.await;
+                    }
+                }
+                let _ = cx.update(|_, app| {
+                    this.update(app, |runtime, cx| {
+                        if runtime.active_run != Some(run) {
+                            return;
+                        }
+                        for event in batch.into_events() {
+                            runtime.apply_event(event);
+                        }
+                        cx.notify();
+                    })
                 });
             }
             let result = active.finish().await;
-            let _ = this.update(cx, |runtime, cx| {
-                if runtime.active_run != Some(run) {
-                    return;
-                }
-                runtime.active_run = None;
-                runtime.control = None;
-                runtime.started_at = None;
-                match result {
-                    Ok(mut agent) => {
-                        runtime.session = agent.session_info().clone();
-                        agent.release_session_writer();
-                        runtime.agent = Some(agent);
-                        if matches!(runtime.status, SessionRuntimeStatus::Running) {
-                            runtime.status = SessionRuntimeStatus::Idle;
+            let _ = cx.update(|_, app| {
+                this.update(app, |runtime, cx| {
+                    if runtime.active_run != Some(run) {
+                        return;
+                    }
+                    runtime.active_run = None;
+                    runtime.control = None;
+                    runtime.started_at = None;
+                    match result {
+                        Ok(mut agent) => {
+                            runtime.session = agent.session_info().clone();
+                            agent.release_session_writer();
+                            runtime.agent = Some(agent);
+                            if matches!(runtime.status, SessionRuntimeStatus::Running) {
+                                runtime.status = SessionRuntimeStatus::Idle;
+                            }
+                        }
+                        Err(error) => {
+                            runtime.status = SessionRuntimeStatus::Failed(error.to_string());
+                            runtime.notice(error.to_string());
                         }
                     }
-                    Err(error) => {
-                        runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                        runtime.notice(error.to_string());
-                    }
-                }
-                cx.notify();
+                    cx.notify();
+                })
             });
         })
         .detach();
@@ -377,6 +430,16 @@ impl SessionRuntime {
     }
 
     fn apply_event(&mut self, event: AgentEvent) {
+        let changes_transcript = matches!(
+            &event,
+            AgentEvent::ReasoningDelta(_)
+                | AgentEvent::TextDelta(_)
+                | AgentEvent::ToolStarted(_)
+                | AgentEvent::ToolFinished { .. }
+                | AgentEvent::RunFinished(_)
+                | AgentEvent::RunStarted(_)
+                | AgentEvent::InputAdmitted { .. }
+        );
         match event {
             AgentEvent::ReasoningDelta(delta) => {
                 reduce_conversation(
@@ -480,7 +543,16 @@ impl SessionRuntime {
             }
             AgentEvent::ModelStarted(_) => {}
         }
+        if changes_transcript {
+            self.transcript_updates = self.transcript_updates.saturating_add(1);
+        }
         reindex_messages(&mut self.conversation.messages);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_test_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+        self.apply_event(event);
+        cx.notify();
     }
 
     fn finish_reasoning(&mut self) {
@@ -515,6 +587,7 @@ impl SessionRuntime {
             &mut self.conversation,
             ConversationAction::AppendNotice(message(Role::Notice, text.into())),
         );
+        self.transcript_updates = self.transcript_updates.saturating_add(1);
     }
 }
 
@@ -621,6 +694,7 @@ mod tests {
 
         runtime.apply_event(AgentEvent::RunAborted);
         assert_eq!(runtime.completed_runs, 0);
+        assert_eq!(runtime.transcript_updates, 1);
 
         runtime.apply_event(AgentEvent::RunFinished(kcastle_agent::RunSummary {
             output: "done".into(),
@@ -628,5 +702,6 @@ mod tests {
             usage: None,
         }));
         assert_eq!(runtime.completed_runs, 1);
+        assert_eq!(runtime.transcript_updates, 2);
     }
 }

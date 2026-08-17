@@ -110,6 +110,12 @@ struct ProjectSessionRuntimes {
     sessions: HashMap<SessionId, Entity<SessionRuntime>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RuntimeObservation {
+    completed_runs: u64,
+    transcript_updates: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SidebarSessionStatus {
     Preparing,
@@ -147,7 +153,7 @@ pub(crate) struct DesktopApp {
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     unread_sessions: HashSet<(ProjectId, SessionId)>,
-    runtime_completion_generations: HashMap<(ProjectId, SessionId), u64>,
+    runtime_observations: HashMap<(ProjectId, SessionId), RuntimeObservation>,
     native_titlebar: NativeTitlebarController,
     view_states: HashMap<String, SessionViewState>,
     _subscriptions: Vec<Subscription>,
@@ -306,7 +312,7 @@ impl DesktopApp {
             session_activity,
             session_search_documents,
             unread_sessions: HashSet::new(),
-            runtime_completion_generations: HashMap::new(),
+            runtime_observations: HashMap::new(),
             native_titlebar,
             view_states: HashMap::new(),
             _subscriptions: vec![
@@ -324,16 +330,27 @@ impl DesktopApp {
         let snapshot = runtime.read(cx).snapshot();
         let location = self.runtime_location(runtime);
         let selected = runtime.entity_id() == self.selected_runtime.entity_id();
+        let mut selected_transcript_updates = 0;
         if let Some((project_id, session_id)) = &location {
             let key = (project_id.clone(), session_id.clone());
-            let previous = self
-                .runtime_completion_generations
-                .entry(key.clone())
-                .or_default();
-            if has_new_unread_completion(*previous, snapshot.completed_runs, selected) {
+            let previous = self.runtime_observations.entry(key.clone()).or_default();
+            let unread_completion = has_new_unread_completion(
+                previous.completed_runs,
+                snapshot.completed_runs,
+                selected,
+            );
+            selected_transcript_updates = visible_transcript_update_count(
+                previous.transcript_updates,
+                snapshot.transcript_updates,
+                selected,
+            );
+            *previous = RuntimeObservation {
+                completed_runs: snapshot.completed_runs,
+                transcript_updates: snapshot.transcript_updates,
+            };
+            if unread_completion {
                 self.unread_sessions.insert(key.clone());
             }
-            *previous = snapshot.completed_runs;
             if selected {
                 self.unread_sessions.remove(&key);
             }
@@ -357,6 +374,12 @@ impl DesktopApp {
         }
         self.apply_selected_runtime_snapshot(snapshot);
         self.sync_message_presentations();
+        if selected_transcript_updates > 0 {
+            self.dispatch_local(
+                Action::StreamDeltasReceived(selected_transcript_updates),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -731,9 +754,16 @@ impl DesktopApp {
         bounds: MeasuredBounds,
         _cx: &mut Context<Self>,
     ) -> bool {
-        self.layout_runtime
-            .observe_message(self.core.layout_generation, id, bounds);
-        self.can_restore_pending_chat_anchor()
+        let layout_changed =
+            self.layout_runtime
+                .observe_message(self.core.layout_generation, id, bounds);
+        if self.core.follow_chat_tail && layout_changed {
+            self.layout_runtime.request_tail_realign();
+        }
+        let restore_anchor = self.can_restore_pending_chat_anchor();
+        let realign_tail =
+            self.core.follow_chat_tail && self.layout_runtime.schedule_tail_realign();
+        restore_anchor || realign_tail
     }
 
     fn can_restore_pending_chat_anchor(&mut self) -> bool {
@@ -799,8 +829,9 @@ impl DesktopApp {
             input.set_placeholder("Message the agent", window, cx)
         });
         let behavior = self.settings.enter_behavior();
-        self.selected_runtime
-            .update(cx, |runtime, cx| runtime.submit(value, behavior, cx));
+        self.selected_runtime.update(cx, |runtime, cx| {
+            runtime.submit(value, behavior, window, cx)
+        });
         self.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
     }
 
@@ -1412,7 +1443,7 @@ impl DesktopApp {
         self.project_runtimes.remove(&project.id);
         self.unread_sessions
             .retain(|(project_id, _)| project_id != &project.id);
-        self.runtime_completion_generations
+        self.runtime_observations
             .retain(|(project_id, _), _| project_id != &project.id);
         self.refresh_project_session_cache();
         let next = if index < self.core.workspace.active_project {
@@ -1549,7 +1580,7 @@ impl DesktopApp {
                         runtimes.sessions.remove(&session.id);
                     }
                     self.unread_sessions.remove(&key);
-                    self.runtime_completion_generations.remove(&key);
+                    self.runtime_observations.remove(&key);
                 }
                 let sessions_dir = self
                     .project_store
@@ -2144,6 +2175,13 @@ fn has_new_unread_completion(previous: u64, current: u64, selected: bool) -> boo
     !selected && current > previous
 }
 
+fn visible_transcript_update_count(previous: u64, current: u64, selected: bool) -> usize {
+    if !selected {
+        return 0;
+    }
+    usize::try_from(current.saturating_sub(previous)).unwrap_or(usize::MAX)
+}
+
 pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
     left == right
 }
@@ -2553,23 +2591,11 @@ mod tests {
 
         cx.update(|window, app| {
             view.update(app, |this, cx| {
-                this.dispatch(
-                    Action::Conversation(Box::new(ConversationAction::SubmitUser(message(
-                        Role::User,
-                        "line\n".repeat(12),
-                    )))),
-                    window,
-                    cx,
-                );
-                this.dispatch(
-                    Action::Conversation(Box::new(ConversationAction::ReasoningDelta {
-                        delta: "thinking".into(),
-                        new_message: message(Role::Reasoning, "thinking".into()),
-                    })),
-                    window,
-                    cx,
-                );
-                this.sync_message_presentations();
+                let runtime = this.selected_runtime.clone();
+                runtime.update(cx, |runtime, cx| {
+                    runtime.apply_test_event(AgentEvent::RunStarted("line\n".repeat(12)), cx);
+                    runtime.apply_test_event(AgentEvent::ReasoningDelta("thinking".into()), cx);
+                });
                 this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
             });
         });
@@ -2582,18 +2608,16 @@ mod tests {
             "test transcript already overflowed before the answer: max={max_offset_before:?}"
         );
 
-        cx.update(|window, app| {
+        cx.update(|_, app| {
             view.update(app, |this, cx| {
-                this.dispatch(
-                    Action::Conversation(Box::new(ConversationAction::TextDelta {
-                        delta: "answer\nline\nline\nline".into(),
-                        new_message: message(Role::Assistant, "answer\nline\nline\nline".into()),
-                    })),
-                    window,
-                    cx,
-                );
-                this.sync_message_presentations();
-                this.dispatch(Action::StreamDeltasReceived(1), window, cx);
+                let runtime = this.selected_runtime.clone();
+                runtime.update(cx, |runtime, cx| {
+                    let answer = (1..=100)
+                        .map(|line| format!("auto scroll test {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    runtime.apply_test_event(AgentEvent::TextDelta(answer), cx);
+                });
             });
         });
         cx.refresh().unwrap();
@@ -2695,6 +2719,13 @@ mod tests {
         assert!(has_new_unread_completion(0, 1, false));
         assert!(!has_new_unread_completion(0, 1, true));
         assert!(!has_new_unread_completion(1, 1, false));
+    }
+
+    #[test]
+    fn only_selected_runtime_updates_drive_the_visible_transcript() {
+        assert_eq!(visible_transcript_update_count(2, 5, true), 3);
+        assert_eq!(visible_transcript_update_count(2, 5, false), 0);
+        assert_eq!(visible_transcript_update_count(5, 5, true), 0);
     }
 
     #[test]
