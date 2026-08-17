@@ -75,6 +75,7 @@ jobs:
         with:
           targets: ${{ matrix.targets }}
       - name: Verify release tag
+        shell: bash
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle") | .version')
           test "v${version}" = "$RELEASE_TAG"
