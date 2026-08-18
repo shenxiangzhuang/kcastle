@@ -604,6 +604,16 @@ impl DesktopApp {
             })
     }
 
+    #[cfg(not(test))]
+    pub(crate) fn has_active_sessions(&self, cx: &Context<Self>) -> bool {
+        self.project_runtimes.values().any(|runtimes| {
+            runtimes
+                .sessions
+                .values()
+                .any(|runtime| runtime.read(cx).is_active())
+        })
+    }
+
     fn target_session_info(&self, project_index: usize, path: &Path) -> Option<SessionInfo> {
         let project = self.project_store.project(project_index)?;
         self.project_sessions
