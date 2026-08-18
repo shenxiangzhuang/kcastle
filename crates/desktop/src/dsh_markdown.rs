@@ -501,7 +501,7 @@ fn inline_block(
     let mut body = div()
         .flex()
         .flex_wrap()
-        .items_center()
+        .items_baseline()
         .w_full()
         .min_w(px(0.0))
         .whitespace_normal()
@@ -544,6 +544,7 @@ struct RenderedMath {
     asset: SharedString,
     width: f32,
     height: f32,
+    baseline_offset: f32,
 }
 
 type MathCache = HashMap<(String, bool), Result<RenderedMath, String>>;
@@ -557,7 +558,10 @@ fn render_math(source: &str, display: bool, context: &BlockContext<'_>) -> Optio
         .flex_none()
         .w(px(width))
         .h(px(rendered.height))
-        .text_color(context.colors.markdown_text);
+        .text_color(context.colors.markdown_text)
+        .when(!display, |formula| {
+            formula.relative().top(px(rendered.baseline_offset))
+        });
     if display {
         Some(
             div()
@@ -611,16 +615,17 @@ fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
         MathStyle::Text
     };
     let layout = layout(&ast, &LayoutOptions::default().with_style(style));
+    let display_list = to_display_list(&layout);
     let font_size = if display { 20.0 } else { 16.0 };
     let padding = if display { 2.0 } else { 1.0 };
-    let width = (layout.width * font_size + padding * 2.0) as f32;
-    let height = ((layout.height + layout.depth) * font_size + padding * 2.0) as f32;
+    let width = (display_list.width * font_size + padding * 2.0) as f32;
+    let height = ((display_list.height + display_list.depth) * font_size + padding * 2.0) as f32;
     if width <= 0.0 || height <= 0.0 {
         return Err("formula has no visible bounds".to_owned());
     }
 
     let svg = render_to_svg(
-        &to_display_list(&layout),
+        &display_list,
         &SvgOptions {
             font_size,
             padding,
@@ -634,6 +639,7 @@ fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
         asset,
         width,
         height,
+        baseline_offset: (display_list.depth * font_size + padding) as f32,
     })
 }
 
@@ -1059,5 +1065,15 @@ mod tests {
         assert!(rendered.width > 0.0 && rendered.height > 0.0);
         assert!(asset.starts_with(b"<svg "));
         assert!(build_math(r"\frac{", true).is_err());
+    }
+
+    #[test]
+    fn inline_math_tracks_its_svg_baseline() {
+        let capitals = build_math("K,V", false).unwrap();
+        let fraction = build_math(r"\frac{1}{2}", false).unwrap();
+
+        assert!(capitals.baseline_offset > 1.0);
+        assert!(fraction.baseline_offset > capitals.baseline_offset);
+        assert!(fraction.baseline_offset < fraction.height);
     }
 }
