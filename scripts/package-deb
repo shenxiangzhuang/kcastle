@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo=$(cd "$(dirname "$0")/.." && pwd)
+binary=$(realpath "$1")
+output="$repo/$2"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+root="$work/root"
+
+version=$(cargo metadata --no-deps --format-version 1 --manifest-path "$repo/Cargo.toml" \
+    | jq -r '.packages[] | select(.name == "kcastle-desktop") | .version')
+debian_version=$(printf '%s\n' "$version" | sed 's/-/~/')
+architecture=$(dpkg --print-architecture)
+
+mkdir -p "$work/debian" "$root/DEBIAN" "$root/usr/bin" \
+    "$root/usr/share/applications" "$root/usr/share/doc/kcastle-desktop" \
+    "$root/usr/share/icons/hicolor/scalable/apps"
+printf 'Source: kcastle-desktop\nSection: utils\nPriority: optional\nMaintainer: kcastle contributors <shenxiangzhuang@users.noreply.github.com>\n\nPackage: kcastle-desktop\nArchitecture: any\nDescription: Native desktop interface for kcastle-agent\n' \
+    > "$work/debian/control"
+depends=$(cd "$work" && dpkg-shlibdeps -O -e"$binary" | sed -n 's/^shlibs:Depends=//p')
+
+install -m 755 "$binary" "$root/usr/bin/kcastle-desktop"
+install -m 644 "$repo/crates/desktop/resources/kcastle.desktop" \
+    "$root/usr/share/applications/kcastle.desktop"
+install -m 644 "$repo/crates/desktop/assets/app-icon.svg" \
+    "$root/usr/share/icons/hicolor/scalable/apps/kcastle.svg"
+install -m 644 "$repo/LICENSE" "$root/usr/share/doc/kcastle-desktop/copyright"
+printf 'Package: kcastle-desktop\nVersion: %s\nArchitecture: %s\nMaintainer: kcastle contributors <shenxiangzhuang@users.noreply.github.com>\nDepends: %s\nSection: utils\nPriority: optional\nDescription: Native desktop interface for kcastle-agent\n' \
+    "$debian_version" "$architecture" "$depends" > "$root/DEBIAN/control"
+
+dpkg-deb --root-owner-group --build "$root" "$output"
