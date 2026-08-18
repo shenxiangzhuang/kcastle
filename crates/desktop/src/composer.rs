@@ -9,7 +9,7 @@ use gpui_component::input::Input;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
-use crate::app::DesktopApp;
+use crate::app::{DesktopApp, composer_model_indices};
 use crate::application::{composer_status, empty_conversation_view_model};
 use crate::domain::{Action, ComposerMenu, RunState};
 use crate::platform::gpui::measured_container;
@@ -118,15 +118,19 @@ impl DesktopApp {
         let running = self.session_running();
         let preparing = matches!(self.core.run, RunState::Preparing);
         let empty = self.input.read(cx).value().trim().is_empty();
+        let model_configured = self.models[self.selected_model].model.has_api_key();
         let elapsed = self
             .selected_started_at
             .map(|started_at| started_at.elapsed())
             .unwrap_or_default();
-        let model = self
-            .selected_reasoning_effort
-            .as_ref()
-            .map(|effort| format!("{}  {}", self.model, effort_label(effort)))
-            .unwrap_or_else(|| self.model.clone());
+        let model = if model_configured {
+            self.selected_reasoning_effort
+                .as_ref()
+                .map(|effort| format!("{}  {}", self.model, effort_label(effort)))
+                .unwrap_or_else(|| self.model.clone())
+        } else {
+            "Configure model".into()
+        };
         let measurement_owner = cx.entity().downgrade();
         div()
             .relative()
@@ -237,14 +241,26 @@ impl DesktopApp {
                                 .label(model)
                                 .ghost()
                                 .compact()
-                                .tooltip("Select model and reasoning effort")
+                                .tooltip(if model_configured {
+                                    "Select model and reasoning effort"
+                                } else {
+                                    "Configure an OpenAI or DeepSeek provider"
+                                })
                                 .disabled(running)
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
                                 }))
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
-                                        this.open_composer_menu(ComposerMenu::Model, window, cx)
+                                        if this.models[this.selected_model].model.has_api_key() {
+                                            this.open_composer_menu(
+                                                ComposerMenu::Model,
+                                                window,
+                                                cx,
+                                            );
+                                        } else {
+                                            this.open_model_settings_dialog(window, cx);
+                                        }
                                     },
                                 )),
                             )
@@ -266,7 +282,7 @@ impl DesktopApp {
                                     .icon(IconName::ArrowUp)
                                     .primary()
                                     .loading(preparing)
-                                    .disabled(empty || preparing)
+                                    .disabled(empty || preparing || !model_configured)
                                     .rounded(px(999.0))
                                     .tooltip("Send message")
                                     .on_click(
@@ -316,8 +332,12 @@ impl DesktopApp {
                     "Choose model reasoning effort",
                     self.core.composer.highlighted_item == 2,
                     colors,
-                    cx.listener(|this, _, _, cx| {
-                        this.set_composer_menu(Some(ComposerMenu::Model), cx)
+                    cx.listener(|this, _, window, cx| {
+                        if composer_model_indices(&this.models).next().is_some() {
+                            this.set_composer_menu(Some(ComposerMenu::Model), cx);
+                        } else {
+                            this.open_model_settings_dialog(window, cx);
+                        }
                     }),
                 ))
                 .into_any_element(),
@@ -380,27 +400,37 @@ impl DesktopApp {
                     .into_any_element()
             }
             ComposerMenu::Models => {
-                let models = self
-                    .models
-                    .iter()
+                let models = &self.models;
+                let models = composer_model_indices(models)
                     .enumerate()
-                    .map(|(index, model)| (index, model.label(), index == self.selected_model))
+                    .map(|(position, index)| {
+                        (
+                            position,
+                            index,
+                            models[index].label(),
+                            index == self.selected_model,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 div()
                     .flex()
                     .flex_col()
                     .child(menu_title("Select model", cx))
-                    .children(models.into_iter().map(|(index, label, selected)| {
-                        menu_choice(
-                            ("composer-model", index),
-                            &label,
-                            "Use for future responses",
-                            selected,
-                            self.core.composer.highlighted_item == index,
-                            colors,
-                            cx.listener(move |this, _, _, cx| this.select_model(index, cx)),
-                        )
-                    }))
+                    .children(
+                        models
+                            .into_iter()
+                            .map(|(position, index, label, selected)| {
+                                menu_choice(
+                                    ("composer-model", index),
+                                    &label,
+                                    "Use for future responses",
+                                    selected,
+                                    self.core.composer.highlighted_item == position,
+                                    colors,
+                                    cx.listener(move |this, _, _, cx| this.select_model(index, cx)),
+                                )
+                            }),
+                    )
                     .into_any_element()
             }
             ComposerMenu::Effort => {

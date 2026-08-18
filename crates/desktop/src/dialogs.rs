@@ -10,7 +10,7 @@ use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
 use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-use crate::app::DesktopApp;
+use crate::app::{DesktopApp, active_model_index};
 use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
 use crate::ui_theme::{UiPalette, palette};
@@ -244,9 +244,10 @@ fn models_settings_view(
             row.into_any_element()
         })
         .collect::<Vec<_>>();
-    let missing_known = [DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID]
+    let missing_known = [OPENAI_PROVIDER_ID, DEEPSEEK_PROVIDER_ID]
         .into_iter()
-        .find(|provider_id| !provider_configured(app, provider_id));
+        .filter(|provider_id| !provider_configured(app, provider_id))
+        .collect::<Vec<_>>();
     let standalone_editor = dialog
         .model_editor
         .as_ref()
@@ -261,7 +262,7 @@ fn models_settings_view(
             div()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .child("Enter your API keys to use models from the following providers."),
+                .child("Choose a provider, then enter its API key."),
         )
         .children(dialog.saved_provider.as_ref().map(|provider| {
             div()
@@ -275,19 +276,22 @@ fn models_settings_view(
             div()
                 .flex()
                 .gap_2()
-                .child(
-                    Button::new("add-known-provider")
-                        .icon(IconName::Plus)
-                        .label("Add provider")
-                        .w_full()
-                        .disabled(busy || missing_known.is_none())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            if let Some(provider_id) = missing_known {
-                                this.edit_provider(provider_id, window, cx);
-                            }
-                        })),
-                )
-                .child(div().w_full()),
+                .children(
+                    missing_known
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, provider_id)| {
+                            let label = crate::default_provider_profile(provider_id).display_name;
+                            Button::new(("add-known-provider", index))
+                                .icon(IconName::Plus)
+                                .label(label)
+                                .w_full()
+                                .disabled(busy)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.edit_provider(provider_id, window, cx);
+                                }))
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -703,6 +707,15 @@ impl DesktopApp {
         cx.notify();
     }
 
+    pub(crate) fn open_model_settings_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_dialog(window, cx);
+        self.set_settings_tab(SettingsTab::Models, cx);
+    }
+
     pub(crate) fn set_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
         self.dispatch_local(Action::CloseTransientOverlays, cx);
         if let Some(Modal::Settings(dialog)) = &mut self.modal {
@@ -941,15 +954,8 @@ impl DesktopApp {
                 }
             })
             .collect();
-        self.selected_model = previous_selected_id
-            .as_ref()
-            .and_then(|selected| self.models.iter().position(|model| &model.id == selected))
-            .or_else(|| {
-                self.models
-                    .iter()
-                    .position(|model| model.provider_id == provider_id)
-            })
-            .unwrap_or(0);
+        self.selected_model =
+            active_model_index(&self.models, previous_selected_id.as_deref()).unwrap_or(0);
         let selected = self.models[self.selected_model].clone();
         self.model = selected.label();
         self.refresh_idle_runtime_models(cx);

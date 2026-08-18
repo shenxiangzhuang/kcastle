@@ -34,7 +34,7 @@ mod ui;
 mod ui_theme;
 mod updater;
 
-use app::{ConfiguredModel, DesktopApp, DesktopStartup};
+use app::{ConfiguredModel, DesktopApp, DesktopStartup, active_model_index};
 use assets::DesktopAssets;
 use project::ProjectStore;
 use settings::{Appearance, ProviderModel, ProviderProfile, SettingsStore};
@@ -82,16 +82,19 @@ fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dy
     for configured in &mut models {
         settings.apply(&configured.id, &mut configured.model);
     }
-    let selected_model = settings
-        .selected_model()
-        .and_then(|selected| {
-            models.iter().position(|model| {
+    let preferred_model = settings.selected_model().and_then(|selected| {
+        models
+            .iter()
+            .find(|model| {
                 model.id == selected
                     || format!("{}/{}", model.model.name(), model.model.model()) == selected
             })
-        })
-        .unwrap_or(0);
-    if settings.selected_model() != Some(models[selected_model].id.as_str()) {
+            .map(|model| model.id.clone())
+    });
+    let selected_model = active_model_index(&models, preferred_model.as_deref()).unwrap_or(0);
+    if models[selected_model].model.has_api_key()
+        && settings.selected_model() != Some(models[selected_model].id.as_str())
+    {
         settings.set_selected_model(&models[selected_model].id)?;
     }
     let model = models[selected_model].model.clone();
