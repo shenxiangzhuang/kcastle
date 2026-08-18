@@ -126,6 +126,26 @@ impl SessionRuntime {
         )
     }
 
+    pub(crate) fn set_message_expanded(
+        &mut self,
+        index: usize,
+        role: Role,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(message) = self.conversation.messages.get(index) else {
+            return;
+        };
+        if message.role != role || message.expanded == expanded {
+            return;
+        }
+        reduce_conversation(
+            &mut self.conversation,
+            ConversationAction::ToggleExpanded { index, role },
+        );
+        cx.notify();
+    }
+
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
         if allow == self.allow_all_tools && allow == self.config.allow_all_tools {
             return true;
