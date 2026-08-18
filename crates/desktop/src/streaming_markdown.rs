@@ -1,7 +1,8 @@
 use gpui::SharedString;
 use markdown::{
     ParseOptions,
-    mdast::{Math, Node},
+    mdast::{Math, Node, Paragraph},
+    unist::Position,
 };
 
 const UNSTABLE_TAIL_BLOCKS: usize = 2;
@@ -224,25 +225,103 @@ fn preceding_backslashes(source: &str, index: usize) -> usize {
 }
 
 fn promote_display_math(node: &mut Node, source: &str) {
-    if let Node::Paragraph(paragraph) = node
-        && let [Node::InlineMath(math)] = paragraph.children.as_slice()
-        && let Some(position) = math.position.as_ref()
-        && let original = &source[position.start.offset..position.end.offset]
-        && (original.starts_with("$$") || original.starts_with("\\["))
+    if let Some(children) = node.children_mut() {
+        let mut promoted = Vec::with_capacity(children.len());
+        for mut child in std::mem::take(children) {
+            if let Node::Paragraph(paragraph) = child {
+                promoted.extend(split_display_math_paragraph(paragraph, source));
+            } else {
+                promote_display_math(&mut child, source);
+                promoted.push(child);
+            }
+        }
+        *children = promoted;
+    }
+}
+
+fn split_display_math_paragraph(paragraph: Paragraph, source: &str) -> Vec<Node> {
+    let fallback_position = paragraph.position;
+    let mut output = Vec::new();
+    let mut inline = Vec::new();
+    for child in paragraph.children {
+        match child {
+            Node::InlineMath(math)
+                if math.position.as_ref().is_some_and(|position| {
+                    is_display_delimiter(source, position) && starts_new_line(&inline)
+                }) =>
+            {
+                push_paragraph(&mut output, &mut inline, fallback_position.as_ref());
+                output.push(Node::Math(Math {
+                    value: math.value.trim().to_owned(),
+                    position: math.position,
+                    meta: None,
+                }));
+            }
+            child => inline.push(child),
+        }
+    }
+    if output.is_empty() {
+        return vec![Node::Paragraph(Paragraph {
+            children: inline,
+            position: fallback_position,
+        })];
+    }
+    push_paragraph(&mut output, &mut inline, fallback_position.as_ref());
+    output
+}
+
+fn starts_new_line(inline: &[Node]) -> bool {
+    let Some(last) = inline.last() else {
+        return true;
+    };
+    if inline
+        .iter()
+        .all(|node| matches!(node, Node::Text(text) if text.value.trim().is_empty()))
     {
-        *node = Node::Math(Math {
-            value: math.value.trim().to_owned(),
-            position: paragraph.position.clone(),
-            meta: None,
-        });
+        return true;
+    }
+    match last {
+        Node::Break(_) => true,
+        Node::Text(text) => text
+            .value
+            .rsplit_once('\n')
+            .is_some_and(|(_, suffix)| suffix.trim().is_empty()),
+        _ => false,
+    }
+}
+
+fn is_display_delimiter(source: &str, position: &Position) -> bool {
+    source
+        .get(position.start.offset..position.end.offset)
+        .is_some_and(|original| original.starts_with("$$") || original.starts_with("\\["))
+}
+
+fn push_paragraph(
+    output: &mut Vec<Node>,
+    children: &mut Vec<Node>,
+    fallback_position: Option<&Position>,
+) {
+    if children
+        .iter()
+        .all(|child| matches!(child, Node::Text(text) if text.value.trim().is_empty()))
+    {
+        children.clear();
         return;
     }
 
-    if let Some(children) = node.children_mut() {
-        for child in children {
-            promote_display_math(child, source);
-        }
-    }
+    let position = children
+        .first()
+        .and_then(Node::position)
+        .zip(children.last().and_then(Node::position))
+        .map(|(first, last)| Position {
+            start: first.start.clone(),
+            end: last.end.clone(),
+        })
+        .or_else(|| fallback_position.cloned());
+    output.push(Node::Paragraph(Paragraph {
+        children: std::mem::take(children),
+        position,
+    }));
 }
 
 #[cfg(test)]
@@ -311,6 +390,62 @@ mod tests {
             assert_eq!(second.value, r"q_{t+1} = x_{t+1} W_Q");
             assert!(matches!(&blocks[4], Node::Paragraph(_)));
         }
+    }
+
+    #[test]
+    fn text_followed_by_display_math_without_blank_line_is_split() {
+        let source = "强度：\n$$\n\\boxed{I = \\frac{2s}{3}}\n$$";
+        let mut state = StreamingMarkdownState::default();
+        state.update(source);
+        let blocks = state
+            .frozen()
+            .iter()
+            .chain(state.tail_blocks())
+            .map(|block| &block.node)
+            .collect::<Vec<_>>();
+
+        assert_eq!(blocks.len(), 2, "{blocks:#?}");
+        assert!(matches!(&blocks[0], Node::Paragraph(_)));
+        let Node::Math(math) = &blocks[1] else {
+            panic!("expected display formula, got {:?}", blocks[1]);
+        };
+        assert_eq!(math.value, r"\boxed{I = \frac{2s}{3}}");
+    }
+
+    #[test]
+    fn line_delimited_display_math_splits_surrounding_text() {
+        let source = "before\n$$x^2$$\nafter";
+        let mut state = StreamingMarkdownState::default();
+        state.update(source);
+        let blocks = state
+            .frozen()
+            .iter()
+            .chain(state.tail_blocks())
+            .map(|block| &block.node)
+            .collect::<Vec<_>>();
+
+        assert_eq!(blocks.len(), 3, "{blocks:#?}");
+        assert!(matches!(&blocks[0], Node::Paragraph(_)));
+        assert!(matches!(&blocks[1], Node::Math(_)));
+        assert!(matches!(&blocks[2], Node::Paragraph(_)));
+    }
+
+    #[test]
+    fn double_dollar_math_embedded_in_prose_stays_inline() {
+        let source = "before $$x^2$$ after";
+        let mut state = StreamingMarkdownState::default();
+        state.update(source);
+        let blocks = state
+            .frozen()
+            .iter()
+            .chain(state.tail_blocks())
+            .map(|block| &block.node)
+            .collect::<Vec<_>>();
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], Node::Paragraph(_)));
+        assert!(contains_math(blocks[0], false));
+        assert!(!contains_math(blocks[0], true));
     }
 
     #[test]
