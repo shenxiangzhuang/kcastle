@@ -519,14 +519,7 @@ fn inline_block(
         .text_size(px(size))
         .line_height(px(line_height))
         .font_weight(weight);
-    let mut text_style = window.text_style();
-    text_style.font_weight = weight;
-    let font_id = window.text_system().resolve_font(&text_style.font());
-    let text_baseline = f32::from(window.text_system().baseline_offset(
-        font_id,
-        px(size),
-        px(line_height),
-    ));
+    let text_baseline = shaped_text_baseline(nodes, size, line_height, weight, context, window);
     let mut text_start = 0;
     for (index, node) in nodes.iter().enumerate() {
         let Node::InlineMath(math) = node else {
@@ -617,6 +610,28 @@ fn render_math(
 
 fn inline_math_offset(rendered: &RenderedMath, text_baseline: f32, line_height: f32) -> f32 {
     text_baseline - line_height / 2.0 - (rendered.baseline - rendered.height / 2.0)
+}
+
+fn shaped_text_baseline(
+    nodes: &[Node],
+    size: f32,
+    line_height: f32,
+    weight: FontWeight,
+    context: &BlockContext<'_>,
+    window: &Window,
+) -> f32 {
+    let mut output = InlineOutput::default();
+    append_inlines(nodes, InlineStyle::default(), context.colors, &mut output);
+    let text: SharedString = output.text.replace('\n', " ").into();
+    let mut style = window.text_style();
+    style.font_weight = weight;
+    let shaped =
+        window
+            .text_system()
+            .shape_line(text.clone(), px(size), &[style.to_run(text.len())], None);
+    let ascent = f32::from(shaped.ascent);
+    let descent = f32::from(shaped.descent);
+    (line_height - ascent - descent) / 2.0 + ascent
 }
 
 fn inline_math_margins(offset: f32) -> (f32, f32) {
