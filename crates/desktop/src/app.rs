@@ -1090,6 +1090,7 @@ impl DesktopApp {
             })),
             cx,
         );
+        self.sync_runtime_message_expansion(index, Role::Tool, cx);
     }
 
     pub(crate) fn toggle_reasoning(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -1100,6 +1101,23 @@ impl DesktopApp {
             })),
             cx,
         );
+        self.sync_runtime_message_expansion(index, Role::Reasoning, cx);
+    }
+
+    fn sync_runtime_message_expansion(&mut self, index: usize, role: Role, cx: &mut Context<Self>) {
+        let Some(expanded) = self
+            .core
+            .conversation
+            .messages
+            .get(index)
+            .filter(|message| message.role == role)
+            .map(|message| message.expanded)
+        else {
+            return;
+        };
+        self.selected_runtime.update(cx, |runtime, cx| {
+            runtime.set_message_expanded(index, role, expanded, cx)
+        });
     }
 
     pub(crate) fn inspect_tool(
@@ -2683,6 +2701,103 @@ mod tests {
             assert!(!app.core.session.current.as_os_str().is_empty());
             assert_eq!(app.core.session.sessions.len(), 1);
             assert_eq!(app.core.session.sessions[0].path, app.core.session.current);
+        });
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn expanded_streaming_reasoning_stays_open_and_follows_the_tail(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-expanded-reasoning-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let test_view = view.clone();
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                DesktopApp::new(
+                    DesktopStartup {
+                        agent,
+                        models: vec![configured],
+                        selected_model: 0,
+                        project_store,
+                        active_project,
+                        settings,
+                    },
+                    window,
+                    cx,
+                )
+            });
+            test_view.replace(Some(view.clone()));
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = view.borrow().clone().unwrap();
+        cx.simulate_resize(gpui::size(px(1180.0), px(420.0)));
+
+        let first_chunk = (1..=40)
+            .map(|line| format!("reasoning line {line}\n"))
+            .collect::<String>();
+
+        cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let runtime = this.selected_runtime.clone();
+                runtime.update(cx, |runtime, cx| {
+                    runtime.apply_test_event(AgentEvent::ReasoningDelta(first_chunk), cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, app| {
+            view.update(app, |this, cx| this.toggle_reasoning(0, cx));
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.read_entity(&view, |app, _| {
+            assert!(app.core.conversation.messages[0].expanded);
+        });
+
+        let second_chunk = (41..=80)
+            .map(|line| format!("reasoning line {line}\n"))
+            .collect::<String>();
+        cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let runtime = this.selected_runtime.clone();
+                runtime.update(cx, |runtime, cx| {
+                    runtime.apply_test_event(AgentEvent::ReasoningDelta(second_chunk), cx);
+                });
+            });
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |app, _| {
+            let reasoning = &app.core.conversation.messages[0];
+            assert!(reasoning.text.ends_with("reasoning line 80\n"));
+            assert!(reasoning.expanded);
+            assert!(
+                app.scroll.max_offset().height > px(40.5),
+                "expanded reasoning did not overflow the transcript"
+            );
+            assert!(
+                app.chat_at_bottom(),
+                "expanded reasoning did not follow the tail: offset={:?}, max={:?}",
+                app.scroll.offset(),
+                app.scroll.max_offset()
+            );
         });
 
         std::fs::remove_dir_all(root).unwrap();
