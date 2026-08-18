@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=kcastle
+Name=Kcastle
 Comment=Native agent harness
 Exec=kcastle-desktop
 Icon=kcastle

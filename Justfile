@@ -1,6 +1,6 @@
 set shell := ["zsh", "-cu"]
 
-app_bundle := "target/kcastle.app"
+app_bundle := "target/Kcastle.app"
 
 # List available recipes.
 default:

@@ -1067,7 +1067,7 @@ impl DesktopApp {
                     .map(|project| project.name.clone())
                     .unwrap_or_default();
                 modal_card("Remove project?", colors)
-                    .child(format!("Remove “{name}” from kcastle?"))
+                    .child(format!("Remove “{name}” from {}?", crate::APP_NAME))
                     .child(
                         div()
                             .text_sm()

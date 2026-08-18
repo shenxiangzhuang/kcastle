@@ -158,7 +158,7 @@ impl DesktopApp {
                     .h(px(40.0))
                     .px_2()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("kcastle")
+                    .child(crate::APP_NAME)
                     .child(
                         Button::new("search-sessions")
                             .icon(if self.core.sidebar.search_sessions {

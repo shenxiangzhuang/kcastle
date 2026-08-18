@@ -1,4 +1,4 @@
-# kcastle
+# Kcastle
 
 [![Crates.io](https://img.shields.io/crates/v/kcastle.svg)](https://crates.io/crates/kcastle)
 

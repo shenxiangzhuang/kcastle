@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo=${0:A:h:h}
 binary=${1:A}
-app="$repo/target/kcastle.app"
+app="$repo/target/Kcastle.app"
 plist="$repo/crates/desktop/resources/Info.plist"
 icon="$repo/crates/desktop/assets/app-icon.svg"
 icon_work=$(mktemp -d /tmp/kcastle-app-icon.XXXXXX)

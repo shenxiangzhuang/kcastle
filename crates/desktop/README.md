@@ -1,4 +1,4 @@
-# kcastle desktop
+# Kcastle desktop
 
 `kcastle-desktop` is the native GPUI interface for `kcastle-agent`. It provides project-scoped
 session history, streaming chat, approvals, trajectory inspection, responsive layout, and native
@@ -16,7 +16,7 @@ just macos-run
 ```
 
 Use `just macos-run-debug` for a debug build. These recipes create and sign
-`target/kcastle.app` before launching it. A bare `cargo run -p kcastle-desktop` starts an
+`target/Kcastle.app` before launching it. A bare `cargo run -p kcastle-desktop` starts an
 unbundled executable and does not reproduce all AppKit behavior, especially fullscreen titlebar
 reveal.
 
