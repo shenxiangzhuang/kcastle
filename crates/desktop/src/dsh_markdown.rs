@@ -113,10 +113,18 @@ fn render_node(
             metrics::MESSAGE_LINE_HEIGHT,
             FontWeight::NORMAL,
             context,
+            window,
         ),
         Node::Heading(heading) => {
             let (size, line_height, weight) = heading_style(heading.depth);
-            inline_block(&heading.children, size, line_height, weight, context)
+            inline_block(
+                &heading.children,
+                size,
+                line_height,
+                weight,
+                context,
+                window,
+            )
         }
         Node::List(list) => render_list(list, context, path, window, cx),
         Node::Blockquote(quote) => {
@@ -154,7 +162,7 @@ fn render_node(
             window,
             cx,
         ),
-        Node::Math(math) => render_math(&math.value, true, context)
+        Node::Math(math) => render_math(&math.value, None, context)
             .unwrap_or_else(|| render_code_block("math", &math.value, context, path, window, cx)),
         Node::Table(table) => render_table(table, context, path, window, cx),
         Node::ThematicBreak(_) => div()
@@ -193,6 +201,7 @@ fn render_node(
             metrics::MESSAGE_LINE_HEIGHT,
             FontWeight::NORMAL,
             context,
+            window,
         ),
     }
 }
@@ -270,7 +279,7 @@ fn render_table(
     table: &markdown::mdast::Table,
     context: &BlockContext<'_>,
     _path: &str,
-    _window: &mut Window,
+    window: &mut Window,
     _cx: &mut Context<DesktopApp>,
 ) -> AnyElement {
     let columns = table
@@ -348,6 +357,7 @@ fn render_table(
                             FontWeight::NORMAL
                         },
                         context,
+                        window,
                     )),
             );
         }
@@ -485,6 +495,7 @@ fn inline_block(
     line_height: f32,
     weight: FontWeight,
     context: &BlockContext<'_>,
+    window: &Window,
 ) -> AnyElement {
     if !nodes.iter().any(|node| matches!(node, Node::InlineMath(_))) {
         return div()
@@ -501,13 +512,21 @@ fn inline_block(
     let mut body = div()
         .flex()
         .flex_wrap()
-        .items_baseline()
+        .items_center()
         .w_full()
         .min_w(px(0.0))
         .whitespace_normal()
         .text_size(px(size))
         .line_height(px(line_height))
         .font_weight(weight);
+    let mut text_style = window.text_style();
+    text_style.font_weight = weight;
+    let font_id = window.text_system().resolve_font(&text_style.font());
+    let text_baseline = f32::from(window.text_system().baseline_offset(
+        font_id,
+        px(size),
+        px(line_height),
+    ));
     let mut text_start = 0;
     for (index, node) in nodes.iter().enumerate() {
         let Node::InlineMath(math) = node else {
@@ -521,11 +540,15 @@ fn inline_block(
                     .child(inline_text(&nodes[text_start..index], context.colors)),
             );
         }
-        body = body.child(render_math(&math.value, false, context).unwrap_or_else(|| {
-            div()
-                .child(inline_text(std::slice::from_ref(node), context.colors))
-                .into_any_element()
-        }));
+        body = body.child(
+            render_math(&math.value, Some((text_baseline, line_height)), context).unwrap_or_else(
+                || {
+                    div()
+                        .child(inline_text(std::slice::from_ref(node), context.colors))
+                        .into_any_element()
+                },
+            ),
+        );
         text_start = index + 1;
     }
     if text_start < nodes.len() {
@@ -544,24 +567,34 @@ struct RenderedMath {
     asset: SharedString,
     width: f32,
     height: f32,
-    baseline_offset: f32,
+    baseline: f32,
 }
 
 type MathCache = HashMap<(String, bool), Result<RenderedMath, String>>;
 static MATH_CACHE: OnceLock<Mutex<MathCache>> = OnceLock::new();
 
-fn render_math(source: &str, display: bool, context: &BlockContext<'_>) -> Option<AnyElement> {
+fn render_math(
+    source: &str,
+    inline_text_metrics: Option<(f32, f32)>,
+    context: &BlockContext<'_>,
+) -> Option<AnyElement> {
+    let display = inline_text_metrics.is_none();
     let rendered = cached_math(source, display).ok()?;
     let width = rendered.width;
+    let inline_offset = inline_text_metrics.map(|(text_baseline, line_height)| {
+        inline_math_offset(&rendered, text_baseline, line_height)
+    });
+    // GPUI exposes no baseline for these flex items; asymmetric margins move the
+    // centered SVG by half their difference while preserving the line's bounds.
+    let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
     let formula = svg()
         .path(rendered.asset)
         .flex_none()
         .w(px(width))
         .h(px(rendered.height))
-        .text_color(context.colors.markdown_text)
-        .when(!display, |formula| {
-            formula.relative().top(px(rendered.baseline_offset))
-        });
+        .mt(px(margin_top))
+        .mb(px(margin_bottom))
+        .text_color(context.colors.markdown_text);
     if display {
         Some(
             div()
@@ -580,6 +613,14 @@ fn render_math(source: &str, display: bool, context: &BlockContext<'_>) -> Optio
     } else {
         Some(formula.into_any_element())
     }
+}
+
+fn inline_math_offset(rendered: &RenderedMath, text_baseline: f32, line_height: f32) -> f32 {
+    text_baseline - line_height / 2.0 - (rendered.baseline - rendered.height / 2.0)
+}
+
+fn inline_math_margins(offset: f32) -> (f32, f32) {
+    (offset.max(0.0) * 2.0, (-offset).max(0.0) * 2.0)
 }
 
 fn cached_math(source: &str, display: bool) -> Result<RenderedMath, String> {
@@ -639,7 +680,7 @@ fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
         asset,
         width,
         height,
-        baseline_offset: (display_list.depth * font_size + padding) as f32,
+        baseline: (display_list.height * font_size + padding) as f32,
     })
 }
 
@@ -1068,12 +1109,19 @@ mod tests {
     }
 
     #[test]
-    fn inline_math_tracks_its_svg_baseline() {
-        let capitals = build_math("K,V", false).unwrap();
-        let fraction = build_math(r"\frac{1}{2}", false).unwrap();
+    fn inline_math_aligns_svg_and_text_baselines() {
+        let line_height = 28.0;
+        let text_baseline = 20.0;
+        for source in ["q_t", "K,V", r"\frac{1}{2}"] {
+            let rendered = build_math(source, false).unwrap();
+            let offset = super::inline_math_offset(&rendered, text_baseline, line_height);
+            let (margin_top, margin_bottom) = super::inline_math_margins(offset);
+            let aligned_baseline = -(rendered.height + margin_top + margin_bottom) / 2.0
+                + margin_top
+                + rendered.baseline;
+            let expected_baseline = text_baseline - line_height / 2.0;
 
-        assert!(capitals.baseline_offset > 1.0);
-        assert!(fraction.baseline_offset > capitals.baseline_offset);
-        assert!(fraction.baseline_offset < fraction.height);
+            assert!((aligned_baseline - expected_baseline).abs() < f32::EPSILON);
+        }
     }
 }
