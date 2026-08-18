@@ -70,14 +70,12 @@ impl DesktopApp {
                         .children(self.available_update.as_ref().map(|update| {
                             Button::new("update")
                                 .icon(IconName::ArrowUp)
-                                .label("Update")
+                                .label("Restart")
                                 .ghost()
                                 .flex_none()
                                 .px_2()
-                                .tooltip(format!("Update to v{}", update.version))
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.open_available_update(cx)),
-                                )
+                                .tooltip(format!("Restart to update to v{}", update.version))
+                                .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx)))
                         })),
                 ),
             );

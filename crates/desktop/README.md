@@ -33,9 +33,11 @@ In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
 
-On launch, the desktop app checks the repository's published GitHub Releases. When a newer
-semantic version is available, an Update button appears to the right of Settings and opens that
-release in the system browser.
+Velopack-installed builds check `updates.kcastle.mathewshen.me` hourly and download a newer release
+in the background. After the complete package passes its checksum, a Restart button appears next
+to Settings. Restart is blocked while any session is active; otherwise the updater waits for the
+old process to exit, installs the downloaded package, and launches the new version. Source and
+unbundled development builds do not auto-update.
 
 ## Architecture
 

@@ -55,25 +55,49 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             targets: x86_64-unknown-linux-gnu
-            asset: kcastle-desktop-linux-amd64.deb
+            velopack_runtime: linux-x64
+            update_target: linux-x64
+            pack_dir: target/velopack-input
+            main_exe: kcastle-desktop
+            installer_glob: "*.AppImage"
+            asset: kcastle-desktop-linux-amd64.AppImage
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             targets: aarch64-unknown-linux-gnu
-            asset: kcastle-desktop-linux-arm64.deb
+            velopack_runtime: linux-arm64
+            update_target: linux-arm64
+            pack_dir: target/velopack-input
+            main_exe: kcastle-desktop
+            installer_glob: "*.AppImage"
+            asset: kcastle-desktop-linux-arm64.AppImage
           - os: macos-14
             target: universal-apple-darwin
             targets: aarch64-apple-darwin,x86_64-apple-darwin
-            asset: kcastle-desktop-macos-universal.dmg
+            update_target: osx-universal
+            pack_dir: target/Kcastle.app
+            main_exe: kcastle
+            installer_glob: "*.pkg"
+            asset: kcastle-desktop-macos-universal.pkg
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             targets: x86_64-pc-windows-msvc
-            asset: kcastle-desktop-windows-x86_64.exe
+            velopack_runtime: win-x64
+            update_target: win-x64
+            pack_dir: target/velopack-input
+            main_exe: kcastle-desktop.exe
+            installer_glob: "*-Setup.exe"
+            asset: kcastle-desktop-windows-x86_64-setup.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 8.0.x
+      - name: Install Velopack CLI
+        run: dotnet tool install --global vpk --version 1.2.110-ge826545
       - name: Verify release tag
         shell: bash
         run: |
@@ -81,7 +105,7 @@ jobs:
           test "v${version}" = "$RELEASE_TAG"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
+        run: sudo apt-get update && sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev librsvg2-bin
       - name: Build Linux or Windows desktop app
         if: runner.os != 'macOS'
         run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
@@ -95,24 +119,80 @@ jobs:
             target/aarch64-apple-darwin/release/kcastle-desktop \
             target/x86_64-apple-darwin/release/kcastle-desktop \
             -output target/universal-apple-darwin/release/kcastle-desktop
-      - name: Package Linux desktop app
-        if: runner.os == 'Linux'
-        run: scripts/package-deb target/${{ matrix.target }}/release/kcastle-desktop ${{ matrix.asset }}
-      - name: Package macOS desktop app
-        if: runner.os == 'macOS'
-        run: |
-          scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
-          staging=$(mktemp -d)
-          trap 'rm -rf "$staging"' EXIT
-          ditto target/Kcastle.app "$staging/Kcastle.app"
-          ln -s /Applications "$staging/Applications"
-          hdiutil create -volname Kcastle -srcfolder "$staging" -ov -format UDZO ${{ matrix.asset }}
-      - name: Package Windows desktop app
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Copy-Item target/${{ matrix.target }}/release/kcastle-desktop.exe ${{ matrix.asset }}
-      - name: Upload desktop app
+      - name: Stage Linux or Windows desktop app
+        if: runner.os != 'macOS'
         shell: bash
-        run: gh release upload "$RELEASE_TAG" ${{ matrix.asset }} --clobber
+        run: |
+          mkdir -p target/velopack-input
+          cp target/${{ matrix.target }}/release/${{ matrix.main_exe }} target/velopack-input/
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            rsvg-convert -w 512 -h 512 crates/desktop/assets/app-icon.svg > target/velopack-icon.png
+          fi
+      - name: Bundle macOS desktop app
+        if: runner.os == 'macOS'
+        run: scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
+      - name: Build Velopack release
+        shell: bash
+        run: |
+          version=${RELEASE_TAG#v}
+          if [[ "$version" == *-* ]]; then
+            channel=${version#*-}
+            channel=${channel%%.*}
+          else
+            channel=stable
+          fi
+          echo "UPDATE_CHANNEL=$channel" >> "$GITHUB_ENV"
+
+          args=(
+            --packId Kcastle
+            --packVersion "$version"
+            --packDir "${{ matrix.pack_dir }}"
+            --mainExe "${{ matrix.main_exe }}"
+            --packTitle Kcastle
+            --packAuthors "kcastle contributors"
+            --channel "$channel"
+            --outputDir target/velopack
+            --delta None
+          )
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            args+=(--runtime "${{ matrix.velopack_runtime }}" --icon target/velopack-icon.png --categories Development)
+          elif [[ "$RUNNER_OS" == macOS ]]; then
+            args+=(--signAppIdentity=-)
+          else
+            args+=(--runtime "${{ matrix.velopack_runtime }}")
+          fi
+          vpk pack "${args[@]}"
+      - name: Upload update feed and packages to R2
+        shell: bash
+        run: |
+          vpk upload s3 \
+            --outputDir target/velopack \
+            --channel "$UPDATE_CHANNEL" \
+            --endpoint "$R2_S3_ENDPOINT" \
+            --region auto \
+            --bucket "$R2_BUCKET" \
+            --prefix "$UPDATE_CHANNEL/${{ matrix.update_target }}" \
+            --keyId "$R2_ACCESS_KEY_ID" \
+            --secret "$R2_SECRET_ACCESS_KEY"
+        env:
+          R2_S3_ENDPOINT: ${{ vars.R2_S3_ENDPOINT }}
+          R2_BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      - name: Verify public update feed
+        shell: bash
+        run: |
+          version=${RELEASE_TAG#v}
+          feed="${{ vars.R2_PUBLIC_BASE_URL }}/${UPDATE_CHANNEL}/${{ matrix.update_target }}/releases.${UPDATE_CHANNEL}.json?version=${version}"
+          curl --fail --silent --show-error --retry 5 --retry-delay 2 "$feed" \
+            | jq -e --arg version "$version" '.Assets | any(.Version == $version and .Type == "Full")'
+      - name: Upload desktop installer to GitHub Release
+        shell: bash
+        run: |
+          shopt -s nullglob
+          installers=(target/velopack/${{ matrix.installer_glob }})
+          test "${#installers[@]}" -eq 1
+          cp "${installers[0]}" "${{ matrix.asset }}"
+          gh release upload "$RELEASE_TAG" "${{ matrix.asset }}" --clobber
         env:
           GH_TOKEN: ${{ github.token }}

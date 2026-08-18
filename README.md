@@ -6,7 +6,7 @@ A native agent harness with desktop and terminal clients.
 
 ## Install
 
-- Desktop: download the DMG (macOS), EXE (Windows), or DEB (Debian/Ubuntu) from [GitHub Releases](https://github.com/shenxiangzhuang/kcastle/releases).
+- Desktop: download the PKG (macOS), Setup EXE (Windows), or AppImage (Linux) from [GitHub Releases](https://github.com/shenxiangzhuang/kcastle/releases).
 - Terminal: `cargo install kcastle --locked`.
 
 ## Run
@@ -25,6 +25,7 @@ cargo run -p kcastle-desktop --release # Linux or Windows desktop app
 ```
 
 Desktop details live in [crates/desktop/README.md](crates/desktop/README.md).
+Current prerelease desktop installers are unsigned and may trigger operating-system warnings.
 
 ## Develop
 

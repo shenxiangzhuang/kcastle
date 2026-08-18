@@ -21,12 +21,11 @@ ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true
 ratex-types.workspace = true
-reqwest.workspace = true
-semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+velopack.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
