@@ -551,10 +551,11 @@ static MATH_CACHE: OnceLock<Mutex<MathCache>> = OnceLock::new();
 
 fn render_math(source: &str, display: bool, context: &BlockContext<'_>) -> Option<AnyElement> {
     let rendered = cached_math(source, display).ok()?;
+    let width = rendered.width;
     let formula = svg()
         .path(rendered.asset)
         .flex_none()
-        .w(px(rendered.width))
+        .w(px(width))
         .h(px(rendered.height))
         .text_color(context.colors.markdown_text);
     if display {
@@ -562,7 +563,14 @@ fn render_math(source: &str, display: bool, context: &BlockContext<'_>) -> Optio
             div()
                 .w_full()
                 .overflow_x_scrollbar()
-                .child(formula)
+                .child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .min_w_full()
+                        .w(px(width))
+                        .child(formula),
+                )
                 .into_any_element(),
         )
     } else {
