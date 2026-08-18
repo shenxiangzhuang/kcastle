@@ -9,7 +9,9 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon.icns</string>
 	<key>CFBundleName</key>
-	<string>kcastle</string>
+	<string>Kcastle</string>
+	<key>CFBundleDisplayName</key>
+	<string>Kcastle</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

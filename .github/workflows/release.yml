@@ -104,9 +104,9 @@ jobs:
           scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
           staging=$(mktemp -d)
           trap 'rm -rf "$staging"' EXIT
-          ditto target/kcastle.app "$staging/kcastle.app"
+          ditto target/Kcastle.app "$staging/Kcastle.app"
           ln -s /Applications "$staging/Applications"
-          hdiutil create -volname kcastle -srcfolder "$staging" -ov -format UDZO ${{ matrix.asset }}
+          hdiutil create -volname Kcastle -srcfolder "$staging" -ov -format UDZO ${{ matrix.asset }}
       - name: Package Windows desktop app
         if: runner.os == 'Windows'
         shell: pwsh

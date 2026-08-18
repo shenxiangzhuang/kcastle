@@ -22,9 +22,9 @@ use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{TerminalOptions, Viewport};
 
-const INSTRUCTIONS: &str = "You are kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
+const INSTRUCTIONS: &str = "You are Kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 const INLINE_VIEWPORT_HEIGHT: u16 = 12;
-const HELP: &str = "kcastle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /resume          Resume a saved session\n    /model           Select model and reasoning level\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
+const HELP: &str = "Kcastle — native agent harness\n\nUSAGE:\n    kcastle [--prompt TEXT] [--allow-tools]\n\nOPTIONS:\n    -h, --help       Show help\n    -V, --version    Show version\n    -p, --prompt     Run one non-interactive prompt\n        --allow-tools  Allow tools in non-interactive mode\n\nTUI COMMANDS:\n    /session         Manage saved sessions\n    /resume          Resume a saved session\n    /model           Select model and reasoning level\n    /compact [focus] Compact active context\n    /permissions     Toggle ask / allow all\n    /tool            Browse tool calls\n    /queue MESSAGE   Run after the active task settles\n    /help            Show commands\n    /exit            Exit\n";
 
 enum Command {
     Tui,
@@ -59,7 +59,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
         Command::Version => {
-            println!("kcastle {}", env!("CARGO_PKG_VERSION"));
+            println!("Kcastle {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         command => {

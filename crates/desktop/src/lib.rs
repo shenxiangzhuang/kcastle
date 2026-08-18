@@ -39,7 +39,8 @@ use assets::DesktopAssets;
 use project::ProjectStore;
 use settings::{Appearance, ProviderModel, ProviderProfile, SettingsStore};
 
-pub(crate) const INSTRUCTIONS: &str = "You are kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
+pub(crate) const APP_NAME: &str = "Kcastle";
+pub(crate) const INSTRUCTIONS: &str = "You are Kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 
 fn init_ui(cx: &mut App) {
     gpui_component::init(cx);
@@ -129,7 +130,7 @@ fn open_desktop_window(
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(900.0), px(620.0))),
             titlebar: Some(TitlebarOptions {
-                title: Some("kcastle".into()),
+                title: Some(APP_NAME.into()),
                 appears_transparent: true,
                 traffic_light_position: None,
             }),
