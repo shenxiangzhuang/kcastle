@@ -1,5 +1,8 @@
 use gpui::SharedString;
-use markdown::{ParseOptions, mdast::Node};
+use markdown::{
+    ParseOptions,
+    mdast::{Math, Node},
+};
 
 const UNSTABLE_TAIL_BLOCKS: usize = 2;
 
@@ -36,7 +39,12 @@ impl StreamingMarkdownState {
 
         let base = self.tail_start;
         self.last_parse_start = base;
-        let parsed = markdown::to_mdast(&text[base..], &ParseOptions::gfm());
+        let source = &text[base..];
+        let normalized = normalize_latex_math_delimiters(source);
+        let mut parsed = markdown::to_mdast(&normalized, &math_parse_options());
+        if let Ok(node) = &mut parsed {
+            promote_display_math(node, source);
+        }
         let Ok(Node::Root(root)) = parsed else {
             self.previous_text = text.to_owned();
             self.tail_start = 0;
@@ -116,11 +124,207 @@ impl StreamingMarkdownState {
     }
 }
 
+fn math_parse_options() -> ParseOptions {
+    let mut options = ParseOptions::gfm();
+    options.constructs.math_text = true;
+    options
+}
+
+fn normalize_latex_math_delimiters(source: &str) -> String {
+    let mut protected = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &ParseOptions::gfm()) {
+        collect_code_ranges(&root, &mut protected);
+        protected.sort_by_key(|range| range.start);
+    }
+
+    let replacements = paired_latex_math_delimiters(source, &protected);
+
+    let mut output = String::with_capacity(source.len());
+    let mut index = 0;
+    let mut protected = protected.into_iter().peekable();
+    let mut replacements = replacements.into_iter().peekable();
+    while index < source.len() {
+        if protected.peek().is_some_and(|range| range.start == index) {
+            let range = protected.next().expect("peeked protected range");
+            output.push_str(&source[range.clone()]);
+            index = range.end;
+            continue;
+        }
+
+        if replacements.peek() == Some(&index) {
+            output.push_str("$$");
+            replacements.next();
+            index += 2;
+            continue;
+        }
+
+        let rest = &source[index..];
+        let character = rest.chars().next().expect("index is in bounds");
+        output.push(character);
+        index += character.len_utf8();
+    }
+    output
+}
+
+fn paired_latex_math_delimiters(source: &str, protected: &[std::ops::Range<usize>]) -> Vec<usize> {
+    let mut replacements = Vec::new();
+    let mut open: Option<(u8, usize)> = None;
+    let mut index = 0;
+    let mut protected = protected.iter().peekable();
+    while index < source.len() {
+        if protected.peek().is_some_and(|range| range.start == index) {
+            index = protected.next().expect("peeked protected range").end;
+            continue;
+        }
+
+        let rest = &source[index..];
+        let delimiter = rest.as_bytes().get(1).copied().filter(|delimiter| {
+            rest.starts_with('\\')
+                && matches!(delimiter, b'(' | b')' | b'[' | b']')
+                && preceding_backslashes(source, index).is_multiple_of(2)
+        });
+        match (open, delimiter) {
+            (None, Some(delimiter @ (b'(' | b'['))) => open = Some((delimiter, index)),
+            (Some((b'(', start)), Some(b')')) | (Some((b'[', start)), Some(b']')) => {
+                replacements.extend([start, index]);
+                open = None;
+            }
+            _ => {}
+        }
+        if delimiter.is_some() {
+            index += 2;
+        } else {
+            index += rest.chars().next().expect("index is in bounds").len_utf8();
+        }
+    }
+    replacements.sort_unstable();
+    replacements
+}
+
+fn collect_code_ranges(node: &Node, ranges: &mut Vec<std::ops::Range<usize>>) {
+    if matches!(node, Node::Code(_) | Node::InlineCode(_)) {
+        if let Some(position) = node.position() {
+            ranges.push(position.start.offset..position.end.offset);
+        }
+        return;
+    }
+    if let Some(children) = node.children() {
+        for child in children {
+            collect_code_ranges(child, ranges);
+        }
+    }
+}
+
+fn preceding_backslashes(source: &str, index: usize) -> usize {
+    source[..index]
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count()
+}
+
+fn promote_display_math(node: &mut Node, source: &str) {
+    if let Node::Paragraph(paragraph) = node
+        && let [Node::InlineMath(math)] = paragraph.children.as_slice()
+        && let Some(position) = math.position.as_ref()
+        && let original = &source[position.start.offset..position.end.offset]
+        && (original.starts_with("$$") || original.starts_with("\\["))
+    {
+        *node = Node::Math(Math {
+            value: math.value.trim().to_owned(),
+            position: paragraph.position.clone(),
+            meta: None,
+        });
+        return;
+    }
+
+    if let Some(children) = node.children_mut() {
+        for child in children {
+            promote_display_math(child, source);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use markdown::mdast::Node;
 
     use super::StreamingMarkdownState;
+
+    fn contains_math(node: &Node, display: bool) -> bool {
+        matches!(
+            (node, display),
+            (Node::Math(_), true) | (Node::InlineMath(_), false)
+        ) || node
+            .children()
+            .is_some_and(|children| children.iter().any(|child| contains_math(child, display)))
+    }
+
+    #[test]
+    fn parses_dollar_and_latex_math_delimiters() {
+        for (source, display) in [
+            ("before $x^2$ after", false),
+            ("$$\n\\frac{1}{2}\n$$", true),
+            ("before \\(x^2\\) after", false),
+            ("\\[\\frac{1}{2}\\]", true),
+        ] {
+            let mut state = StreamingMarkdownState::default();
+            state.update(source);
+            assert!(
+                state
+                    .tail_blocks()
+                    .iter()
+                    .any(|block| contains_math(&block.node, display)),
+                "did not parse {source:?} as math"
+            );
+        }
+    }
+
+    #[test]
+    fn display_math_does_not_consume_following_markdown() {
+        for opening in ["", "\n"] {
+            let source = format!(
+                "intro\n\n$${opening}V_{{1:t}} = \\begin{{bmatrix}} v_1 \\\\ v_t \\end{{bmatrix}}$$\n\nafter\n\n$$q_{{t+1}} = x_{{t+1}} W_Q$$\n\nend"
+            );
+            let mut state = StreamingMarkdownState::default();
+            state.update(&source);
+            let blocks = state
+                .frozen()
+                .iter()
+                .chain(state.tail_blocks())
+                .map(|block| &block.node)
+                .collect::<Vec<_>>();
+
+            assert_eq!(blocks.len(), 5);
+            assert!(matches!(&blocks[0], Node::Paragraph(_)));
+            let Node::Math(first) = &blocks[1] else {
+                panic!("expected first display formula, got {:?}", blocks[1]);
+            };
+            assert_eq!(
+                first.value,
+                r"V_{1:t} = \begin{bmatrix} v_1 \\ v_t \end{bmatrix}"
+            );
+            assert!(matches!(&blocks[2], Node::Paragraph(_)));
+            let Node::Math(second) = &blocks[3] else {
+                panic!("expected second display formula, got {:?}", blocks[3]);
+            };
+            assert_eq!(second.value, r"q_{t+1} = x_{t+1} W_Q");
+            assert!(matches!(&blocks[4], Node::Paragraph(_)));
+        }
+    }
+
+    #[test]
+    fn latex_delimiters_inside_code_or_escaped_stay_literal() {
+        let source = "`\\(inline\\)`\n\n```tex\n\\[block\\]\n```\n\nliteral \\\\(text\\\\)";
+        assert_eq!(super::normalize_latex_math_delimiters(source), source);
+    }
+
+    #[test]
+    fn incomplete_latex_math_stays_literal_while_streaming() {
+        for source in ["before \\(x^2", "\\[\\frac{1}{2}"] {
+            assert_eq!(super::normalize_latex_math_delimiters(source), source);
+        }
+    }
 
     #[test]
     fn freezes_stable_blocks_and_reparses_only_the_tail() {

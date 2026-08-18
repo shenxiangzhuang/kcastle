@@ -1,10 +1,14 @@
-use std::ops::Range;
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::{Mutex, OnceLock},
+};
 
 use gpui::{
     AnyElement, App, Bounds, Context, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
     HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels,
     SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText, Window, div, fill,
-    point, prelude::FluentBuilder, px, rems, size,
+    point, prelude::FluentBuilder, px, rems, size, svg,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::clipboard::Clipboard;
@@ -13,6 +17,7 @@ use gpui_component::text::{TextView, TextViewStyle};
 use markdown::mdast::Node;
 
 use crate::app::DesktopApp;
+use crate::assets::register_generated_asset;
 use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
 use crate::ui_theme::{UiPalette, metrics, palette};
@@ -104,14 +109,22 @@ fn render_node(
     match node {
         Node::Paragraph(paragraph) => inline_block(
             &paragraph.children,
-            context.colors,
             16.0,
             metrics::MESSAGE_LINE_HEIGHT,
             FontWeight::NORMAL,
+            context,
+            window,
         ),
         Node::Heading(heading) => {
             let (size, line_height, weight) = heading_style(heading.depth);
-            inline_block(&heading.children, context.colors, size, line_height, weight)
+            inline_block(
+                &heading.children,
+                size,
+                line_height,
+                weight,
+                context,
+                window,
+            )
         }
         Node::List(list) => render_list(list, context, path, window, cx),
         Node::Blockquote(quote) => {
@@ -149,7 +162,8 @@ fn render_node(
             window,
             cx,
         ),
-        Node::Math(math) => render_code_block("math", &math.value, context, path, window, cx),
+        Node::Math(math) => render_math(&math.value, None, context)
+            .unwrap_or_else(|| render_code_block("math", &math.value, context, path, window, cx)),
         Node::Table(table) => render_table(table, context, path, window, cx),
         Node::ThematicBreak(_) => div()
             .w_full()
@@ -183,10 +197,11 @@ fn render_node(
         }
         _ => inline_block(
             std::slice::from_ref(node),
-            context.colors,
             16.0,
             metrics::MESSAGE_LINE_HEIGHT,
             FontWeight::NORMAL,
+            context,
+            window,
         ),
     }
 }
@@ -264,7 +279,7 @@ fn render_table(
     table: &markdown::mdast::Table,
     context: &BlockContext<'_>,
     _path: &str,
-    _window: &mut Window,
+    window: &mut Window,
     _cx: &mut Context<DesktopApp>,
 ) -> AnyElement {
     let columns = table
@@ -332,7 +347,18 @@ fn render_table(
                     } else {
                         FontWeight::NORMAL
                     })
-                    .child(inline_text(&cell.children, context.colors)),
+                    .child(inline_block(
+                        &cell.children,
+                        15.0,
+                        25.0,
+                        if row_index == 0 {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        },
+                        context,
+                        window,
+                    )),
             );
         }
         grid = grid.child(row_view);
@@ -465,20 +491,212 @@ fn heading_style(depth: u8) -> (f32, f32, FontWeight) {
 
 fn inline_block(
     nodes: &[Node],
-    colors: UiPalette,
     size: f32,
     line_height: f32,
     weight: FontWeight,
+    context: &BlockContext<'_>,
+    window: &Window,
 ) -> AnyElement {
-    div()
+    if !nodes.iter().any(|node| matches!(node, Node::InlineMath(_))) {
+        return div()
+            .w_full()
+            .min_w(px(0.0))
+            .whitespace_normal()
+            .text_size(px(size))
+            .line_height(px(line_height))
+            .font_weight(weight)
+            .child(inline_text(nodes, context.colors))
+            .into_any_element();
+    }
+
+    let mut body = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
         .w_full()
         .min_w(px(0.0))
         .whitespace_normal()
         .text_size(px(size))
         .line_height(px(line_height))
-        .font_weight(weight)
-        .child(inline_text(nodes, colors))
-        .into_any_element()
+        .font_weight(weight);
+    let text_baseline = shaped_text_baseline(nodes, size, line_height, weight, context, window);
+    let mut text_start = 0;
+    for (index, node) in nodes.iter().enumerate() {
+        let Node::InlineMath(math) = node else {
+            continue;
+        };
+        if text_start < index {
+            body = body.child(
+                div()
+                    .min_w(px(0.0))
+                    .flex_shrink()
+                    .child(inline_text(&nodes[text_start..index], context.colors)),
+            );
+        }
+        body = body.child(
+            render_math(&math.value, Some((text_baseline, line_height)), context).unwrap_or_else(
+                || {
+                    div()
+                        .child(inline_text(std::slice::from_ref(node), context.colors))
+                        .into_any_element()
+                },
+            ),
+        );
+        text_start = index + 1;
+    }
+    if text_start < nodes.len() {
+        body = body.child(
+            div()
+                .min_w(px(0.0))
+                .flex_shrink()
+                .child(inline_text(&nodes[text_start..], context.colors)),
+        );
+    }
+    body.into_any_element()
+}
+
+#[derive(Clone, Debug)]
+struct RenderedMath {
+    asset: SharedString,
+    width: f32,
+    height: f32,
+    baseline: f32,
+}
+
+type MathCache = HashMap<(String, bool), Result<RenderedMath, String>>;
+static MATH_CACHE: OnceLock<Mutex<MathCache>> = OnceLock::new();
+
+fn render_math(
+    source: &str,
+    inline_text_metrics: Option<(f32, f32)>,
+    context: &BlockContext<'_>,
+) -> Option<AnyElement> {
+    let display = inline_text_metrics.is_none();
+    let rendered = cached_math(source, display).ok()?;
+    let width = rendered.width;
+    let inline_offset = inline_text_metrics.map(|(text_baseline, line_height)| {
+        inline_math_offset(&rendered, text_baseline, line_height)
+    });
+    // GPUI exposes no baseline for these flex items; asymmetric margins move the
+    // centered SVG by half their difference while preserving the line's bounds.
+    let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
+    let formula = svg()
+        .path(rendered.asset)
+        .flex_none()
+        .w(px(width))
+        .h(px(rendered.height))
+        .mt(px(margin_top))
+        .mb(px(margin_bottom))
+        .text_color(context.colors.markdown_text);
+    if display {
+        Some(
+            div()
+                .w_full()
+                .overflow_x_scrollbar()
+                .child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .min_w_full()
+                        .w(px(width))
+                        .child(formula),
+                )
+                .into_any_element(),
+        )
+    } else {
+        Some(formula.into_any_element())
+    }
+}
+
+fn inline_math_offset(rendered: &RenderedMath, text_baseline: f32, line_height: f32) -> f32 {
+    text_baseline - line_height / 2.0 - (rendered.baseline - rendered.height / 2.0)
+}
+
+fn shaped_text_baseline(
+    nodes: &[Node],
+    size: f32,
+    line_height: f32,
+    weight: FontWeight,
+    context: &BlockContext<'_>,
+    window: &Window,
+) -> f32 {
+    let mut output = InlineOutput::default();
+    append_inlines(nodes, InlineStyle::default(), context.colors, &mut output);
+    let text: SharedString = output.text.replace('\n', " ").into();
+    let mut style = window.text_style();
+    style.font_weight = weight;
+    let shaped =
+        window
+            .text_system()
+            .shape_line(text.clone(), px(size), &[style.to_run(text.len())], None);
+    let ascent = f32::from(shaped.ascent);
+    let descent = f32::from(shaped.descent);
+    (line_height - ascent - descent) / 2.0 + ascent
+}
+
+fn inline_math_margins(offset: f32) -> (f32, f32) {
+    (offset.max(0.0) * 2.0, (-offset).max(0.0) * 2.0)
+}
+
+fn cached_math(source: &str, display: bool) -> Result<RenderedMath, String> {
+    let key = (source.to_owned(), display);
+    let cache = MATH_CACHE.get_or_init(Default::default);
+    if let Some(rendered) = cache
+        .lock()
+        .expect("math cache poisoned")
+        .get(&key)
+        .cloned()
+    {
+        return rendered;
+    }
+
+    let rendered = build_math(source, display);
+    // ponytail: process-wide cache; add eviction only if long sessions show material growth.
+    cache
+        .lock()
+        .expect("math cache poisoned")
+        .insert(key, rendered.clone());
+    rendered
+}
+
+fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
+    use ratex_layout::{LayoutOptions, layout, to_display_list};
+    use ratex_svg::{SvgOptions, render_to_svg};
+    use ratex_types::math_style::MathStyle;
+
+    let ast = ratex_parser::parse(source).map_err(|error| error.to_string())?;
+    let style = if display {
+        MathStyle::Display
+    } else {
+        MathStyle::Text
+    };
+    let layout = layout(&ast, &LayoutOptions::default().with_style(style));
+    let display_list = to_display_list(&layout);
+    let font_size = if display { 20.0 } else { 16.0 };
+    let padding = if display { 2.0 } else { 1.0 };
+    let width = (display_list.width * font_size + padding * 2.0) as f32;
+    let height = ((display_list.height + display_list.depth) * font_size + padding * 2.0) as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return Err("formula has no visible bounds".to_owned());
+    }
+
+    let svg = render_to_svg(
+        &display_list,
+        &SvgOptions {
+            font_size,
+            padding,
+            stroke_width: 1.0,
+            embed_glyphs: true,
+            font_dir: String::new(),
+        },
+    );
+    let asset = register_generated_asset(svg.into_bytes());
+    Ok(RenderedMath {
+        asset,
+        width,
+        height,
+        baseline: (display_list.height * font_size + padding) as f32,
+    })
 }
 
 fn inline_text(nodes: &[Node], colors: UiPalette) -> InlineText {
@@ -802,10 +1020,11 @@ fn append_inline_text(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{FontWeight, Hsla, px, rgb};
+    use gpui::{AssetSource, FontWeight, Hsla, px, rgb};
     use markdown::{ParseOptions, mdast::Node};
 
-    use super::{InlineText, heading_style, inline_text, root_block_gap};
+    use super::{InlineText, build_math, heading_style, inline_text, root_block_gap};
+    use crate::assets::DesktopAssets;
     use crate::ui_theme::{UiPalette, metrics};
 
     fn blocks(source: &str) -> Vec<Node> {
@@ -889,5 +1108,35 @@ mod tests {
             &inline.text[inline.backgrounds[1].0.clone()],
             "\u{a0}Agent::set_model\u{a0}"
         );
+    }
+
+    #[test]
+    fn latex_is_rendered_to_a_nonempty_embedded_svg() {
+        let rendered = build_math(r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}", true).unwrap();
+        let asset = DesktopAssets
+            .load(rendered.asset.as_ref())
+            .unwrap()
+            .unwrap();
+
+        assert!(rendered.width > 0.0 && rendered.height > 0.0);
+        assert!(asset.starts_with(b"<svg "));
+        assert!(build_math(r"\frac{", true).is_err());
+    }
+
+    #[test]
+    fn inline_math_aligns_svg_and_text_baselines() {
+        let line_height = 28.0;
+        let text_baseline = 20.0;
+        for source in ["q_t", "K,V", r"\frac{1}{2}"] {
+            let rendered = build_math(source, false).unwrap();
+            let offset = super::inline_math_offset(&rendered, text_baseline, line_height);
+            let (margin_top, margin_bottom) = super::inline_math_margins(offset);
+            let aligned_baseline = -(rendered.height + margin_top + margin_bottom) / 2.0
+                + margin_top
+                + rendered.baseline;
+            let expected_baseline = text_baseline - line_height / 2.0;
+
+            assert!((aligned_baseline - expected_baseline).abs() < f32::EPSILON);
+        }
     }
 }
