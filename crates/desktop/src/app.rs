@@ -69,6 +69,29 @@ impl ConfiguredModel {
     }
 }
 
+pub(crate) fn composer_model_indices(
+    models: &[ConfiguredModel],
+) -> impl Iterator<Item = usize> + '_ {
+    models
+        .iter()
+        .enumerate()
+        .filter(|(_, model)| model.model.has_api_key())
+        .map(|(index, _)| index)
+}
+
+pub(crate) fn active_model_index(
+    models: &[ConfiguredModel],
+    preferred_id: Option<&str>,
+) -> Option<usize> {
+    preferred_id
+        .and_then(|preferred| {
+            models
+                .iter()
+                .position(|model| model.id == preferred && model.model.has_api_key())
+        })
+        .or_else(|| composer_model_indices(models).next())
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SessionViewState {
     chat_anchor: ScrollAnchor,
@@ -404,6 +427,7 @@ impl DesktopApp {
     fn apply_selected_runtime_snapshot(&mut self, snapshot: SessionRuntimeSnapshot) {
         if let Some(model_id) = snapshot.config.model_id.as_deref()
             && let Some(index) = self.models.iter().position(|model| model.id == model_id)
+            && self.models[index].model.has_api_key()
         {
             self.selected_model = index;
             self.model = self.models[index].label();
@@ -486,13 +510,10 @@ impl DesktopApp {
             reindex_messages(&mut conversation.messages);
         }
         let mut config = session.config().clone();
-        let model_index = config
-            .model_id
-            .as_ref()
-            .and_then(|id| self.models.iter().position(|candidate| &candidate.id == id))
+        let model_index = active_model_index(&self.models, config.model_id.as_deref())
             .unwrap_or(self.selected_model);
         let configured = &self.models[model_index];
-        if config.model_id.is_none() {
+        if config.model_id.as_deref() != Some(&configured.id) {
             config = config_for_model(configured, self.settings.allow_all_tools());
         }
         let mut model = configured.model.clone();
@@ -825,6 +846,10 @@ impl DesktopApp {
     }
 
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.models[self.selected_model].model.has_api_key() {
+            self.open_model_settings_dialog(window, cx);
+            return;
+        }
         let value = self.input.read(cx).value().trim().to_owned();
         if value.is_empty() {
             return;
@@ -1135,7 +1160,7 @@ impl DesktopApp {
         match self.core.composer.menu {
             Some(ComposerMenu::Commands) => 3,
             Some(ComposerMenu::Permission | ComposerMenu::Model) => 2,
-            Some(ComposerMenu::Models) => self.models.len(),
+            Some(ComposerMenu::Models) => composer_model_indices(&self.models).count(),
             Some(ComposerMenu::Effort) => self.models[self.selected_model]
                 .model
                 .reasoning_efforts()
@@ -1154,7 +1179,10 @@ impl DesktopApp {
                     self.export_session_log(window, cx);
                 }
                 1 => self.set_composer_menu(Some(ComposerMenu::Permission), cx),
-                _ => self.set_composer_menu(Some(ComposerMenu::Model), cx),
+                _ if composer_model_indices(&self.models).next().is_some() => {
+                    self.set_composer_menu(Some(ComposerMenu::Model), cx)
+                }
+                _ => self.open_model_settings_dialog(window, cx),
             },
             Some(ComposerMenu::Permission) => self.set_allow_all_tools(index == 1, cx),
             Some(ComposerMenu::Model) => self.set_composer_menu(
@@ -1165,7 +1193,12 @@ impl DesktopApp {
                 }),
                 cx,
             ),
-            Some(ComposerMenu::Models) => self.select_model(index, cx),
+            Some(ComposerMenu::Models) => {
+                let selected = composer_model_indices(&self.models).nth(index);
+                if let Some(index) = selected {
+                    self.select_model(index, cx);
+                }
+            }
             Some(ComposerMenu::Effort) => {
                 if let Some(effort) = self.models[self.selected_model]
                     .model
@@ -1632,7 +1665,11 @@ impl DesktopApp {
     }
 
     pub(crate) fn select_model(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.task_active() || index >= self.models.len() || index == self.selected_model {
+        if self.task_active()
+            || index >= self.models.len()
+            || !self.models[index].model.has_api_key()
+            || index == self.selected_model
+        {
             return;
         }
         let configured = self.models[index].clone();
@@ -2386,6 +2423,28 @@ mod tests {
         let presentation = presentations.get(messages[0].key);
         assert_eq!(presentation.render_text.as_ref(), "hello world");
         assert_eq!(presentation.markdown.revision(), 1);
+    }
+
+    #[test]
+    fn composer_models_require_configured_credentials() {
+        let models = [
+            ConfiguredModel::new(
+                "deepseek-official",
+                ProviderModel::new("deepseek-test", "DeepSeek Test", 10_000, None),
+                Model::new("DeepSeek", "", "http://localhost", "deepseek-test", 10_000),
+            ),
+            ConfiguredModel::new(
+                "openai",
+                ProviderModel::new("gpt-test", "GPT Test", 10_000, None),
+                Model::new("OpenAI", "secret", "http://localhost", "gpt-test", 10_000),
+            ),
+        ];
+
+        assert_eq!(composer_model_indices(&models).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            active_model_index(&models, Some("deepseek-official/deepseek-test")),
+            Some(1)
+        );
     }
 
     #[test]
