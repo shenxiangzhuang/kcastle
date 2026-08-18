@@ -21,8 +21,9 @@ unbundled executable and does not reproduce all AppKit behavior, especially full
 reveal.
 
 Desktop preferences are stored in `~/.kcastle/settings.json`. The Models tab follows the DSH
-provider-card flow: choose OpenAI or DeepSeek, enter its API key, and edit its model catalog. The
-composer only lists models from providers with configured credentials. API keys saved there are never rendered
+provider-card flow: configured providers stay editable, while Add provider lets you choose OpenAI
+or DeepSeek before entering its API key and editing its model catalog. The composer only lists
+models from providers with configured credentials. API keys saved there are never rendered
 back into the form, and the settings file is written with user-only permissions on Unix. Global
 model and permission choices are defaults for new sessions. Each session persists its own runtime
 configuration and append-only history below `~/.kcastle/sessions`; the built-in Default project

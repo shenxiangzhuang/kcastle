@@ -7,10 +7,11 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_component::select::{Select, SelectEvent, SelectState};
+use gpui_component::{Disableable, Icon, IconName, IndexPath, Selectable, Sizable};
 use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-use crate::app::{DesktopApp, active_model_index};
+use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
 use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
 use crate::ui_theme::{UiPalette, palette};
@@ -244,14 +245,12 @@ fn models_settings_view(
             row.into_any_element()
         })
         .collect::<Vec<_>>();
-    let missing_known = [OPENAI_PROVIDER_ID, DEEPSEEK_PROVIDER_ID]
-        .into_iter()
-        .filter(|provider_id| !provider_configured(app, provider_id))
-        .collect::<Vec<_>>();
+    let addable = addable_provider_ids(&app.models).collect::<Vec<_>>();
     let standalone_editor = dialog
         .model_editor
         .as_ref()
         .filter(|editor| !provider_configured(app, editor.provider_id));
+    let adding_provider = standalone_editor.is_some();
 
     div()
         .flex()
@@ -262,7 +261,7 @@ fn models_settings_view(
             div()
                 .text_sm()
                 .text_color(colors.muted_text)
-                .child("Choose a provider, then enter its API key."),
+                .child("Enter your API keys to use models from the following providers."),
         )
         .children(dialog.saved_provider.as_ref().map(|provider| {
             div()
@@ -272,27 +271,16 @@ fn models_settings_view(
         }))
         .child(div().flex().flex_col().gap_2().mt_3().children(rows))
         .children(standalone_editor.map(|editor| model_editor_view(editor, cx, colors)))
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .children(
-                    missing_known
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, provider_id)| {
-                            let label = crate::default_provider_profile(provider_id).display_name;
-                            Button::new(("add-known-provider", index))
-                                .icon(IconName::Plus)
-                                .label(label)
-                                .w_full()
-                                .disabled(busy)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.edit_provider(provider_id, window, cx);
-                                }))
-                        }),
-                ),
-        )
+        .when(!adding_provider, |view| {
+            view.child(
+                Button::new("add-provider")
+                    .icon(IconName::Plus)
+                    .label("Add provider")
+                    .w_full()
+                    .disabled(busy || addable.is_empty())
+                    .on_click(cx.listener(|this, _, window, cx| this.add_provider(window, cx))),
+            )
+        })
         .into_any_element()
 }
 
@@ -302,6 +290,36 @@ fn model_editor_view(
     colors: UiPalette,
 ) -> gpui::AnyElement {
     let profile = crate::default_provider_profile(editor.provider_id);
+    let provider_field = match &editor.provider_select {
+        Some(provider_select) => div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child("Provider"),
+            )
+            .child(Select::new(provider_select).small().w_full())
+            .into_any_element(),
+        None => div()
+            .flex()
+            .items_baseline()
+            .gap_2()
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .child(profile.display_name),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(colors.muted_text)
+                    .child(editor.provider_id),
+            )
+            .into_any_element(),
+    };
     let model_rows = editor
         .models
         .iter()
@@ -315,23 +333,7 @@ fn model_editor_view(
         .p_4()
         .rounded(px(12.0))
         .bg(colors.subtle)
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap_2()
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(profile.display_name),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child(editor.provider_id),
-                ),
-        )
+        .child(provider_field)
         .child(model_editor_field("API key", &editor.api_key, true))
         .child(
             div().border_t_1().border_color(colors.border).pt_2().child(
@@ -516,6 +518,7 @@ fn model_editor(
         };
     ModelEditor {
         provider_id,
+        provider_select: None,
         api_key: input(
             String::new(),
             if configured_key {
@@ -604,6 +607,24 @@ fn provider_configured(app: &DesktopApp, provider_id: &str) -> bool {
         .any(|model| model.provider_id == provider_id && model.model.has_api_key())
 }
 
+fn addable_provider_ids(models: &[ConfiguredModel]) -> impl Iterator<Item = &'static str> + '_ {
+    [DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID]
+        .into_iter()
+        .filter(|provider_id| {
+            !models
+                .iter()
+                .any(|model| model.provider_id == *provider_id && model.model.has_api_key())
+        })
+}
+
+fn provider_id_for_display_name(display_name: &str) -> Option<&'static str> {
+    [DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID]
+        .into_iter()
+        .find(|provider_id| {
+            crate::default_provider_profile(provider_id).display_name == display_name
+        })
+}
+
 fn provider_profile(app: &DesktopApp, provider_id: &'static str) -> ProviderProfile {
     app.settings
         .provider_profiles()
@@ -627,6 +648,7 @@ pub(crate) struct SettingsDialog {
 
 struct ModelEditor {
     provider_id: &'static str,
+    provider_select: Option<Entity<SelectState<Vec<String>>>>,
     api_key: Entity<InputState>,
     api_base: Entity<InputState>,
     models: Vec<ModelEditorRow>,
@@ -739,6 +761,76 @@ impl DesktopApp {
             .is_some_and(|model| model.model.has_api_key());
         let editor = model_editor(provider_id, profile, configured_key, window, cx);
         self.set_model_editor(editor, window, cx);
+    }
+
+    pub(crate) fn add_provider(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let provider_ids = addable_provider_ids(&self.models).collect::<Vec<_>>();
+        let Some(&provider_id) = provider_ids.first() else {
+            return;
+        };
+        let provider_names = provider_ids
+            .into_iter()
+            .map(|provider_id| crate::default_provider_profile(provider_id).display_name)
+            .collect::<Vec<_>>();
+        let provider_select =
+            cx.new(|cx| SelectState::new(provider_names, Some(IndexPath::default()), window, cx));
+        cx.subscribe_in(
+            &provider_select,
+            window,
+            |this, _, event: &SelectEvent<Vec<String>>, window, cx| {
+                let SelectEvent::Confirm(Some(display_name)) = event else {
+                    return;
+                };
+                if let Some(provider_id) = provider_id_for_display_name(display_name) {
+                    this.select_add_provider(provider_id, window, cx);
+                }
+            },
+        )
+        .detach();
+
+        let mut editor = model_editor(
+            provider_id,
+            provider_profile(self, provider_id),
+            false,
+            window,
+            cx,
+        );
+        editor.provider_select = Some(provider_select);
+        self.set_model_editor(editor, window, cx);
+    }
+
+    fn select_add_provider(
+        &mut self,
+        provider_id: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if provider_configured(self, provider_id) {
+            return;
+        }
+        if matches!(
+            &self.modal,
+            Some(Modal::Settings(dialog))
+                if dialog.model_editor.as_ref().is_some_and(|editor| editor.provider_id == provider_id)
+        ) {
+            return;
+        }
+        let mut replacement = model_editor(
+            provider_id,
+            provider_profile(self, provider_id),
+            false,
+            window,
+            cx,
+        );
+        let Some(Modal::Settings(dialog)) = &mut self.modal else {
+            return;
+        };
+        let Some(editor) = dialog.model_editor.take() else {
+            return;
+        };
+        replacement.provider_select = editor.provider_select;
+        dialog.model_editor = Some(replacement);
+        cx.notify();
     }
 
     fn set_model_editor(
@@ -1431,7 +1523,11 @@ fn display_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_capacity, parse_optional_output_tokens};
+    use kcastle_agent::{DEEPSEEK_PROVIDER_ID, Model, OPENAI_PROVIDER_ID};
+
+    use super::{addable_provider_ids, parse_capacity, parse_optional_output_tokens};
+    use crate::app::ConfiguredModel;
+    use crate::settings::ProviderModel;
 
     #[test]
     fn model_capacity_accepts_plain_k_and_m_counts() {
@@ -1448,5 +1544,25 @@ mod tests {
         assert_eq!(parse_optional_output_tokens("256K"), Some(Some(256_000)));
         assert_eq!(parse_optional_output_tokens("0"), None);
         assert_eq!(parse_optional_output_tokens("large"), None);
+    }
+
+    #[test]
+    fn add_provider_only_offers_unconfigured_providers() {
+        let models = [ConfiguredModel::new(
+            DEEPSEEK_PROVIDER_ID,
+            ProviderModel::new("deepseek-test", "DeepSeek Test", 10_000, None),
+            Model::new(
+                "DeepSeek",
+                "secret",
+                "http://localhost",
+                "deepseek-test",
+                10_000,
+            ),
+        )];
+
+        assert_eq!(
+            addable_provider_ids(&models).collect::<Vec<_>>(),
+            vec![OPENAI_PROVIDER_ID]
+        );
     }
 }
