@@ -43,7 +43,7 @@ impl StreamingMarkdownState {
         let normalized = normalize_latex_math_delimiters(source);
         let mut parsed = markdown::to_mdast(&normalized, &math_parse_options());
         if let Ok(node) = &mut parsed {
-            promote_latex_display_math(node, source);
+            promote_display_math(node, source);
         }
         let Ok(Node::Root(root)) = parsed else {
             self.previous_text = text.to_owned();
@@ -126,7 +126,6 @@ impl StreamingMarkdownState {
 
 fn math_parse_options() -> ParseOptions {
     let mut options = ParseOptions::gfm();
-    options.constructs.math_flow = true;
     options.constructs.math_text = true;
     options
 }
@@ -224,14 +223,15 @@ fn preceding_backslashes(source: &str, index: usize) -> usize {
         .count()
 }
 
-fn promote_latex_display_math(node: &mut Node, source: &str) {
+fn promote_display_math(node: &mut Node, source: &str) {
     if let Node::Paragraph(paragraph) = node
         && let [Node::InlineMath(math)] = paragraph.children.as_slice()
         && let Some(position) = math.position.as_ref()
-        && source[position.start.offset..position.end.offset].starts_with("\\[")
+        && let original = &source[position.start.offset..position.end.offset]
+        && (original.starts_with("$$") || original.starts_with("\\["))
     {
         *node = Node::Math(Math {
-            value: math.value.clone(),
+            value: math.value.trim().to_owned(),
             position: paragraph.position.clone(),
             meta: None,
         });
@@ -240,7 +240,7 @@ fn promote_latex_display_math(node: &mut Node, source: &str) {
 
     if let Some(children) = node.children_mut() {
         for child in children {
-            promote_latex_display_math(child, source);
+            promote_display_math(child, source);
         }
     }
 }
@@ -277,6 +277,39 @@ mod tests {
                     .any(|block| contains_math(&block.node, display)),
                 "did not parse {source:?} as math"
             );
+        }
+    }
+
+    #[test]
+    fn display_math_does_not_consume_following_markdown() {
+        for opening in ["", "\n"] {
+            let source = format!(
+                "intro\n\n$${opening}V_{{1:t}} = \\begin{{bmatrix}} v_1 \\\\ v_t \\end{{bmatrix}}$$\n\nafter\n\n$$q_{{t+1}} = x_{{t+1}} W_Q$$\n\nend"
+            );
+            let mut state = StreamingMarkdownState::default();
+            state.update(&source);
+            let blocks = state
+                .frozen()
+                .iter()
+                .chain(state.tail_blocks())
+                .map(|block| &block.node)
+                .collect::<Vec<_>>();
+
+            assert_eq!(blocks.len(), 5);
+            assert!(matches!(&blocks[0], Node::Paragraph(_)));
+            let Node::Math(first) = &blocks[1] else {
+                panic!("expected first display formula, got {:?}", blocks[1]);
+            };
+            assert_eq!(
+                first.value,
+                r"V_{1:t} = \begin{bmatrix} v_1 \\ v_t \end{bmatrix}"
+            );
+            assert!(matches!(&blocks[2], Node::Paragraph(_)));
+            let Node::Math(second) = &blocks[3] else {
+                panic!("expected second display formula, got {:?}", blocks[3]);
+            };
+            assert_eq!(second.value, r"q_{t+1} = x_{t+1} W_Q");
+            assert!(matches!(&blocks[4], Node::Paragraph(_)));
         }
     }
 
