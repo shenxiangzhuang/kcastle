@@ -33,11 +33,11 @@ In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
 
-Velopack-installed builds check `updates.kcastle.mathewshen.me` hourly and download a newer release
-in the background. After the complete package passes its checksum, a Restart button appears next
-to Settings. Restart is blocked while any session is active; otherwise the updater waits for the
-old process to exit, installs the downloaded package, and launches the new version. Source and
-unbundled development builds do not auto-update.
+DMG, AppImage, and Setup EXE builds check `updates.kcastle.mathewshen.me` hourly and download a
+newer release in the background. After the complete package passes its checksum, a Restart button
+appears next to Settings. Restart is blocked while any session is active; otherwise the updater
+waits for the old process to exit, installs the downloaded package, and launches the new version.
+DEB, source, and unbundled development builds do not auto-update.
 
 ## Architecture
 
