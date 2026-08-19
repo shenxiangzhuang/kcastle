@@ -34,10 +34,11 @@ Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and
 delimited by `$$...$$` or `\[...\]`.
 
 DMG, AppImage, and Setup EXE builds check `updates.kcastle.mathewshen.me` hourly and download a
-newer release in the background. After the complete package passes its checksum, a Restart button
-appears next to Settings. Restart is blocked while any session is active; otherwise the updater
-waits for the old process to exit, installs the downloaded package, and launches the new version.
-DEB, source, and unbundled development builds do not auto-update.
+newer release in the background. After the complete package passes its checksum, a Restart to
+Update control appears above Settings and can be dismissed for the current process. Restart is
+blocked while any session is active; otherwise the updater waits for the old process to exit,
+installs the downloaded package, and launches the new version. DEB, source, and unbundled
+development builds do not auto-update.
 
 ## Architecture
 
