@@ -99,12 +99,21 @@ impl DesktopApp {
                     }))
                     .child(
                         Button::new("settings")
-                            .icon(IconName::Settings)
-                            .label("Settings")
+                            .accessibility_id("settings")
+                            .tooltip("Settings")
                             .ghost()
                             .w_full()
-                            .justify_start()
                             .px_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_start()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::Settings).size_4())
+                                    .child("Settings"),
+                            )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings_dialog(window, cx)
                             })),
