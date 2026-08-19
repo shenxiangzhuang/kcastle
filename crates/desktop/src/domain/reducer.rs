@@ -29,7 +29,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.composer.menu = menu;
             state.composer.highlighted_item = 0;
             state.sidebar.options_open = false;
-            state.sidebar.session_action_target = None;
         }
         Action::MoveComposerHighlight { delta, item_count } => {
             if item_count > 0 {
@@ -42,12 +41,10 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.sidebar.search_sessions = !state.sidebar.search_sessions;
             if state.sidebar.search_sessions {
                 state.sidebar.options_open = false;
-                state.sidebar.session_action_target = None;
             }
         }
         Action::ToggleSidebarOptions => {
             state.sidebar.options_open = !state.sidebar.options_open;
-            state.sidebar.session_action_target = None;
             if state.sidebar.options_open {
                 state.composer.menu = None;
             }
@@ -55,7 +52,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::CloseTransientOverlays => {
             state.composer.menu = None;
             state.sidebar.options_open = false;
-            state.sidebar.session_action_target = None;
         }
         Action::DismissTransient => {
             state.composer.menu = match state.composer.menu {
@@ -65,7 +61,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                 _ => None,
             };
             state.sidebar.options_open = false;
-            state.sidebar.session_action_target = None;
             state.sidebar.search_sessions = false;
         }
         Action::SetSidebarGrouping(group_by_workspace) => {
@@ -75,9 +70,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetSidebarSort(sort_by_recent) => {
             state.sidebar.sort_by_recent = sort_by_recent;
             state.sidebar.options_open = false;
-        }
-        Action::SetSessionActionTarget(target) => {
-            state.sidebar.session_action_target = target;
         }
         Action::ShowMoreSessions(path) => {
             let visible = state

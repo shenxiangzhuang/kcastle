@@ -36,7 +36,6 @@ pub(crate) struct ComposerState {
 pub(crate) struct SidebarState {
     pub(crate) search_sessions: bool,
     pub(crate) options_open: bool,
-    pub(crate) session_action_target: Option<PathBuf>,
     pub(crate) group_by_workspace: bool,
     pub(crate) sort_by_recent: bool,
     pub(crate) visible_sessions_by_project: HashMap<PathBuf, usize>,
@@ -47,7 +46,6 @@ impl Default for SidebarState {
         Self {
             search_sessions: false,
             options_open: false,
-            session_action_target: None,
             group_by_workspace: true,
             sort_by_recent: true,
             visible_sessions_by_project: HashMap::new(),

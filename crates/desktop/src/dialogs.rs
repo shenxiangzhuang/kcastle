@@ -12,9 +12,10 @@ use gpui_component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_component::{Disableable, Icon, IconName, IndexPath, Sizable};
-use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
+use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID, SessionInfo};
 
 use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
+use crate::assets::DesktopIconName;
 use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
 use crate::ui_theme::{UiPalette, palette};
@@ -25,10 +26,9 @@ pub(crate) enum Modal {
         path: PathBuf,
         input: Entity<InputState>,
     },
-    DeleteSession {
+    DeleteArchivedSession {
         project_index: usize,
-        path: PathBuf,
-        title: String,
+        session: SessionInfo,
     },
     RemoveProject(usize),
     Settings(Box<SettingsDialog>),
@@ -149,6 +149,22 @@ fn settings_dialog_view(
     let general_page =
         settings_page("General", IconName::Settings2, view.clone()).group(general_group);
     let models_page = settings_page("Models", IconName::Bot, view.clone()).group(models_group);
+    let archived_page = SettingPage::new("Archived Sessions")
+        .icon(Icon::new(DesktopIconName::Archive))
+        .resettable(false)
+        .title_suffix({
+            let view = view.clone();
+            move |_, _| settings_close_button(view.clone())
+        })
+        .group(
+            SettingGroup::new().item(
+                SettingItem::render({
+                    let view = view.clone();
+                    move |_, _, cx| archived_sessions_view(view.read(cx), &view, palette(cx))
+                })
+                .keywords(["archive", "session", "restore", "delete"]),
+            ),
+        );
     let about_page = settings_page("About", IconName::Info, view.clone()).group(
         SettingGroup::new()
             .item(SettingItem::new(
@@ -190,7 +206,6 @@ fn settings_dialog_view(
                 .description("Download installers and view release notes."),
             ),
     );
-
     div()
         .flex()
         .w(px(800.0))
@@ -203,7 +218,7 @@ fn settings_dialog_view(
             Settings::new(("settings", dialog.id))
                 .sidebar_width(px(188.0))
                 .default_selected_index(dialog.initial_page.select_index())
-                .pages([general_page, models_page, about_page]),
+                .pages([general_page, models_page, archived_page, about_page]),
         )
         .into_any_element()
 }
@@ -224,6 +239,159 @@ fn settings_close_button(view: Entity<DesktopApp>) -> Button {
         .on_click(move |_, window, cx| {
             view.update(cx, |app, cx| app.close_modal(window, cx));
         })
+}
+
+fn archived_sessions_view(
+    app: &DesktopApp,
+    view: &Entity<DesktopApp>,
+    colors: UiPalette,
+) -> gpui::AnyElement {
+    let mut projects = Vec::new();
+    for (project_index, project) in app.project_store.projects().iter().enumerate() {
+        let sessions = app
+            .project_archived_sessions
+            .get(&project.sessions_dir)
+            .cloned()
+            .unwrap_or_default();
+        let issue_count = app
+            .project_archived_session_issues
+            .get(&project.sessions_dir)
+            .map_or(0, Vec::len);
+        if sessions.is_empty() && issue_count == 0 {
+            continue;
+        }
+        let count = sessions.len();
+        let rows = sessions
+            .into_iter()
+            .enumerate()
+            .map(|(session_index, session)| {
+                let restore_view = view.clone();
+                let restore_session = session.clone();
+                let delete_view = view.clone();
+                let delete_session = session.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .h(px(40.0))
+                    .px_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_sm()
+                            .child(session.title),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "restore-archived-{project_index}-{session_index}"
+                        )))
+                        .icon(IconName::Undo2)
+                        .ghost()
+                        .small()
+                        .tooltip("Restore session")
+                        .on_click(move |_, window, cx| {
+                            restore_view.update(cx, |app, cx| {
+                                app.restore_archived_session(
+                                    project_index,
+                                    restore_session.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "delete-archived-{project_index}-{session_index}"
+                        )))
+                        .icon(IconName::Delete)
+                        .ghost()
+                        .small()
+                        .text_color(colors.danger)
+                        .tooltip("Delete permanently")
+                        .on_click(move |_, window, cx| {
+                            delete_view.update(cx, |app, cx| {
+                                app.open_delete_archived_session_dialog(
+                                    project_index,
+                                    delete_session.clone(),
+                                    window,
+                                    cx,
+                                )
+                            });
+                        }),
+                    )
+            });
+        projects.push(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(Icon::new(IconName::Folder).size_4())
+                        .child(project.name.clone())
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.muted_text)
+                                .child(count.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden()
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(colors.border)
+                        .children(rows),
+                )
+                .children((issue_count > 0).then(|| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(colors.warning)
+                        .child(Icon::new(IconName::TriangleAlert).size_4())
+                        .child(format!(
+                            "{issue_count} archived session files could not be read"
+                        ))
+                })),
+        );
+    }
+
+    if projects.is_empty() {
+        return div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .py_8()
+            .text_color(colors.muted_text)
+            .child(Icon::new(DesktopIconName::Archive).size_6())
+            .child("No archived sessions")
+            .into_any_element();
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap_4()
+        .children(projects)
+        .into_any_element()
 }
 
 fn appearance_setting_field(
@@ -754,6 +922,7 @@ static NEXT_SETTINGS_DIALOG_ID: AtomicUsize = AtomicUsize::new(1);
 enum SettingsPage {
     General,
     Models,
+    Archives,
 }
 
 pub(crate) struct SettingsDialog {
@@ -769,6 +938,7 @@ impl SettingsPage {
             page_ix: match self {
                 Self::General => 0,
                 Self::Models => 1,
+                Self::Archives => 2,
             },
             group_ix: None,
         }
@@ -825,21 +995,16 @@ impl DesktopApp {
         cx.notify();
     }
 
-    pub(crate) fn open_target_delete_session_dialog(
+    pub(crate) fn open_delete_archived_session_dialog(
         &mut self,
         project_index: usize,
-        path: PathBuf,
-        title: String,
+        session: SessionInfo,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
-            return;
-        }
-        self.modal = Some(Modal::DeleteSession {
+        self.modal = Some(Modal::DeleteArchivedSession {
             project_index,
-            path,
-            title,
+            session,
         });
         self.modal_focus.focus(window, cx);
         cx.notify();
@@ -1248,13 +1413,13 @@ impl DesktopApp {
                         ),
                 )
                 .into_any_element(),
-            Some(Modal::DeleteSession {
+            Some(Modal::DeleteArchivedSession {
                 project_index,
-                path,
-                title,
+                session,
             }) => {
                 let project_index = *project_index;
-                let path = path.clone();
+                let session = session.clone();
+                let title = session.title.clone();
                 modal_card("Delete session?", colors)
                     .child(format!("“{title}” will be permanently deleted."))
                     .child(
@@ -1268,22 +1433,26 @@ impl DesktopApp {
                             .child(
                                 Button::new("cancel-delete-session")
                                     .label("Cancel")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.close_modal(window, cx)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.modal = Some(Modal::Settings(Box::new(
+                                            SettingsDialog::new(SettingsPage::Archives),
+                                        )));
+                                        cx.notify();
                                     })),
                             )
                             .child(
                                 Button::new("confirm-delete-session")
                                     .label("Delete")
                                     .danger()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.modal = None;
-                                        this.delete_target_session(
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.modal = Some(Modal::Settings(Box::new(
+                                            SettingsDialog::new(SettingsPage::Archives),
+                                        )));
+                                        this.delete_archived_session(
                                             project_index,
-                                            path.clone(),
-                                            window,
+                                            session.clone(),
                                             cx,
-                                        )
+                                        );
                                     })),
                             ),
                     )
@@ -1449,13 +1618,18 @@ mod tests {
     fn settings_openings_have_isolated_component_state() {
         let general = SettingsDialog::new(SettingsPage::General);
         let models = SettingsDialog::new(SettingsPage::Models);
+        let archives = SettingsDialog::new(SettingsPage::Archives);
 
         assert_ne!(general.id, models.id);
+        assert_ne!(models.id, archives.id);
         assert!(matches!(general.initial_page, SettingsPage::General));
         assert!(matches!(models.initial_page, SettingsPage::Models));
         assert_eq!(general.initial_page.select_index().page_ix, 0);
         assert_eq!(general.initial_page.select_index().group_ix, None);
         assert_eq!(models.initial_page.select_index().page_ix, 1);
         assert_eq!(models.initial_page.select_index().group_ix, None);
+        assert!(matches!(archives.initial_page, SettingsPage::Archives));
+        assert_eq!(archives.initial_page.select_index().page_ix, 2);
+        assert_eq!(archives.initial_page.select_index().group_ix, None);
     }
 }

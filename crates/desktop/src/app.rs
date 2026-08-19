@@ -9,8 +9,8 @@ use gpui::{
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::{Theme, ThemeMode};
 use kcastle_agent::{
-    Agent, Model, Session, SessionConfig, SessionEvent, SessionId, SessionInfo, SessionIssue,
-    TranscriptItem,
+    ARCHIVE_DIRECTORY, Agent, Model, Session, SessionConfig, SessionEvent, SessionId, SessionInfo,
+    SessionIssue, TranscriptItem,
 };
 
 #[cfg(test)]
@@ -175,6 +175,8 @@ pub(crate) struct DesktopApp {
     pub(crate) tool_schemas: HashMap<String, String>,
     pub(crate) project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
     pub(crate) project_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
+    pub(crate) project_archived_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
+    pub(crate) project_archived_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     pub(crate) available_update: Option<AvailableUpdate>,
@@ -233,6 +235,8 @@ impl DesktopApp {
             },
         );
         let (project_sessions, project_session_issues) = load_project_sessions(&project_store);
+        let (project_archived_sessions, project_archived_session_issues) =
+            load_project_archived_sessions(&project_store);
         let session_activity = load_session_activity(&project_sessions);
         let sessions = project_sessions
             .get(&project.sessions_dir)
@@ -337,6 +341,8 @@ impl DesktopApp {
             tool_schemas,
             project_sessions,
             project_session_issues,
+            project_archived_sessions,
+            project_archived_session_issues,
             session_activity,
             session_search_documents,
             available_update: None,
@@ -1635,7 +1641,7 @@ impl DesktopApp {
         }
     }
 
-    pub(crate) fn delete_target_session(
+    pub(crate) fn archive_target_session(
         &mut self,
         project_index: usize,
         path: PathBuf,
@@ -1643,49 +1649,132 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) {
         if path.as_os_str().is_empty() || self.session_is_active(project_index, &path, cx) {
-            self.notice("This session cannot be deleted while it is active");
+            self.notice("This session cannot be archived while it is active");
             return;
         }
         let Some(session) = self.target_session_info(project_index, &path) else {
             self.notice("Could not find the target session");
             return;
         };
-        match Session::delete(&session) {
-            Ok(()) => {
-                if let Some(project) = self.project_store.project(project_index) {
-                    let key = (project.id.clone(), session.id.clone());
-                    if let Some(runtimes) = self.project_runtimes.get_mut(&project.id) {
-                        runtimes.sessions.remove(&session.id);
-                    }
-                    self.unread_sessions.remove(&key);
-                    self.runtime_observations.remove(&key);
-                }
-                let sessions_dir = self
-                    .project_store
-                    .project(project_index)
-                    .map(|project| project.sessions_dir.clone());
-                if let Some(sessions_dir) = sessions_dir {
-                    let sessions = self.reload_sessions(&sessions_dir);
-                    if project_index == self.core.workspace.active_project {
-                        self.dispatch(Action::RefreshSessions(sessions), window, cx);
-                    }
-                }
-                self.refresh_session_search_documents();
-                let deleted_selected = project_index == self.core.workspace.active_project
-                    && same_path(&path, &self.core.session.current);
-                if deleted_selected
-                    && let Some(runtime) = self.select_or_create_project_draft(project_index, cx)
-                {
-                    self.select_runtime(runtime, cx);
-                    self.input.update(cx, |input, cx| {
-                        input.set_placeholder("Describe what you want to build", window, cx);
-                        input.focus(window, cx);
-                    });
-                }
+        match Session::archive(&session) {
+            Ok(_) => {
+                self.remove_session_projection(project_index, &session, &path, window, cx);
+                self.reload_archived_sessions(project_index);
+                self.notice(format!("Archived “{}”", session.title));
             }
-            Err(error) => self.notice(format!("Could not delete session: {error}")),
+            Err(error) => self.notice(format!("Could not archive session: {error}")),
         }
         cx.notify();
+    }
+
+    pub(crate) fn restore_archived_session(
+        &mut self,
+        project_index: usize,
+        session: SessionInfo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match Session::restore(&session) {
+            Ok(_) => {
+                self.reload_archived_sessions(project_index);
+                self.reload_project_session_list(project_index, window, cx);
+                self.notice(format!("Restored “{}”", session.title));
+            }
+            Err(error) => self.notice(format!("Could not restore session: {error}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn delete_archived_session(
+        &mut self,
+        project_index: usize,
+        session: SessionInfo,
+        cx: &mut Context<Self>,
+    ) {
+        match Session::delete(&session) {
+            Ok(()) => {
+                self.reload_archived_sessions(project_index);
+                self.notice(format!("Deleted “{}”", session.title));
+            }
+            Err(error) => self.notice(format!("Could not delete archived session: {error}")),
+        }
+        cx.notify();
+    }
+
+    fn remove_session_projection(
+        &mut self,
+        project_index: usize,
+        session: &SessionInfo,
+        previous_path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.project_store.project(project_index) {
+            let key = (project.id.clone(), session.id.clone());
+            if let Some(runtimes) = self.project_runtimes.get_mut(&project.id) {
+                runtimes.sessions.remove(&session.id);
+            }
+            self.unread_sessions.remove(&key);
+            self.runtime_observations.remove(&key);
+        }
+        self.reload_project_session_list(project_index, window, cx);
+        let removed_selected = project_index == self.core.workspace.active_project
+            && same_path(previous_path, &self.core.session.current);
+        if removed_selected
+            && let Some(runtime) = self.select_or_create_project_draft(project_index, cx)
+        {
+            self.select_runtime(runtime, cx);
+            self.input.update(cx, |input, cx| {
+                input.set_placeholder("Describe what you want to build", window, cx);
+                input.focus(window, cx);
+            });
+        }
+    }
+
+    fn reload_project_session_list(
+        &mut self,
+        project_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sessions_dir = self
+            .project_store
+            .project(project_index)
+            .map(|project| project.sessions_dir.clone());
+        if let Some(sessions_dir) = sessions_dir {
+            let sessions = self.reload_sessions(&sessions_dir);
+            if project_index == self.core.workspace.active_project {
+                self.dispatch(Action::RefreshSessions(sessions), window, cx);
+            }
+        }
+        self.refresh_session_search_documents();
+    }
+
+    fn reload_archived_sessions(&mut self, project_index: usize) {
+        let Some(project) = self.project_store.project(project_index) else {
+            return;
+        };
+        let sessions_dir = project.sessions_dir.clone();
+        let directory = sessions_dir.join(ARCHIVE_DIRECTORY);
+        match Session::catalog_in_project(&directory, project.id.as_str()) {
+            Ok(catalog) => {
+                self.project_archived_sessions
+                    .insert(sessions_dir.clone(), catalog.sessions);
+                self.project_archived_session_issues
+                    .insert(sessions_dir, catalog.issues);
+            }
+            Err(error) => {
+                self.project_archived_sessions
+                    .insert(sessions_dir.clone(), Vec::new());
+                self.project_archived_session_issues.insert(
+                    sessions_dir,
+                    vec![SessionIssue {
+                        path: directory,
+                        message: error.to_string(),
+                    }],
+                );
+            }
+        }
     }
 
     pub(crate) fn set_reasoning_effort(
@@ -1854,9 +1943,13 @@ impl DesktopApp {
 
     fn refresh_project_session_cache(&mut self) {
         let (sessions, issues) = load_project_sessions(&self.project_store);
+        let (archived_sessions, archived_issues) =
+            load_project_archived_sessions(&self.project_store);
         self.session_activity = load_session_activity(&sessions);
         self.project_sessions = sessions;
         self.project_session_issues = issues;
+        self.project_archived_sessions = archived_sessions;
+        self.project_archived_session_issues = archived_issues;
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
@@ -2334,6 +2427,36 @@ fn load_project_sessions(
     (sessions, issues)
 }
 
+fn load_project_archived_sessions(
+    project_store: &ProjectStore,
+) -> (
+    HashMap<PathBuf, Vec<SessionInfo>>,
+    HashMap<PathBuf, Vec<SessionIssue>>,
+) {
+    let mut sessions = HashMap::new();
+    let mut issues = HashMap::new();
+    for project in project_store.projects() {
+        let directory = project.sessions_dir.join(ARCHIVE_DIRECTORY);
+        match Session::catalog_in_project(&directory, project.id.as_str()) {
+            Ok(catalog) => {
+                sessions.insert(project.sessions_dir.clone(), catalog.sessions);
+                issues.insert(project.sessions_dir.clone(), catalog.issues);
+            }
+            Err(error) => {
+                sessions.insert(project.sessions_dir.clone(), Vec::new());
+                issues.insert(
+                    project.sessions_dir.clone(),
+                    vec![SessionIssue {
+                        path: directory,
+                        message: error.to_string(),
+                    }],
+                );
+            }
+        }
+    }
+    (sessions, issues)
+}
+
 fn load_session_activity(
     project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
 ) -> HashMap<PathBuf, u64> {
@@ -2686,6 +2809,80 @@ mod tests {
             assert!(!app.core.session.current.as_os_str().is_empty());
             assert_eq!(app.core.session.sessions.len(), 1);
             assert_eq!(app.core.session.sessions[0].path, app.core.session.current);
+        });
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn archive_and_restore_refresh_both_session_catalogs(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-archive-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let project = project_store.project(active_project).unwrap();
+        let sessions_dir = project.sessions_dir.clone();
+        let path = sessions_dir.join("archivable.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"record\":\"session\",\"title\":\"Archive me\",\"created_at\":1,\"project_id\":\"{}\"}}\n",
+                project.id.as_str()
+            ),
+        )
+        .unwrap();
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.archive_target_session(active_project, path.clone(), window, cx)
+            });
+        });
+        let archived = cx.read_entity(&view, |app, _| {
+            assert!(app.project_sessions[&sessions_dir].is_empty());
+            assert_eq!(app.project_archived_sessions[&sessions_dir].len(), 1);
+            app.project_archived_sessions[&sessions_dir][0].clone()
+        });
+        assert_eq!(
+            archived.path.parent(),
+            Some(sessions_dir.join(ARCHIVE_DIRECTORY).as_path())
+        );
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.restore_archived_session(active_project, archived.clone(), window, cx)
+            });
+        });
+        cx.read_entity(&view, |app, _| {
+            assert_eq!(app.project_sessions[&sessions_dir].len(), 1);
+            assert!(app.project_archived_sessions[&sessions_dir].is_empty());
         });
 
         std::fs::remove_dir_all(root).unwrap();

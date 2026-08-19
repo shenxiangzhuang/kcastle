@@ -92,6 +92,7 @@ For native UI changes, also exercise the signed release bundle manually:
   after it finishes, and clears the dot when selected; the relative time label must remain visible.
 - Open a running session read-only, verify a second writer is rejected, and confirm a damaged log
   keeps valid catalog entries visible and reports its recovery state.
-- Open a row's ellipsis menu without selecting it and confirm rename/delete targets that row.
+- Hover a session row and confirm rename appears before archive without selecting the row; restore
+  or permanently delete archived sessions from the matching project in Settings.
 - Resize through compact, regular, split, and overlay layouts and confirm the composer never
   covers chat or trajectory content.

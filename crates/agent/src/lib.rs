@@ -11,8 +11,9 @@ pub use agent::{
 };
 pub use compaction::CompactionConfig;
 pub use session::{
-    DEFAULT_PROJECT_ID, InputMode, RecoveryReport, Session, SessionCatalog, SessionConfig,
-    SessionError, SessionEvent, SessionId, SessionInfo, SessionIssue, SessionSnapshot, StateCommit,
+    ARCHIVE_DIRECTORY, DEFAULT_PROJECT_ID, InputMode, RecoveryReport, Session, SessionCatalog,
+    SessionConfig, SessionError, SessionEvent, SessionId, SessionInfo, SessionIssue,
+    SessionSnapshot, StateCommit,
 };
 pub use state::{ResponseMetadata, State, StateEntry, TranscriptItem};
 pub use tool::{AgentTool, Env, ShellTool, ToolResult};
