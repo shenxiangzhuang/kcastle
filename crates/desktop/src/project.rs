@@ -265,7 +265,7 @@ impl Project {
         let path = root.join("sessions").join(DEFAULT_PROJECT_ID);
         Self {
             id: ProjectId::default_project(),
-            name: "Default".into(),
+            name: display_name(&path),
             path: path.clone(),
             sessions_dir: path,
             missing: false,
@@ -366,6 +366,7 @@ mod tests {
         let project = store.project(active).unwrap();
 
         assert!(project.is_default());
+        assert_eq!(project.name, "default");
         assert_eq!(project.path, root.join("sessions/default"));
         assert_eq!(project.sessions_dir, root.join("sessions/default"));
         assert!(project.sessions_dir.is_dir());
