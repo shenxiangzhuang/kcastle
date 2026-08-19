@@ -360,6 +360,46 @@ mod tests {
     }
 
     #[test]
+    fn inline_formula_is_promoted_only_after_its_delimiter_closes() {
+        let mut state = StreamingMarkdownState::default();
+        state.update(r"before $\gamma");
+        assert!(
+            state
+                .tail_blocks()
+                .iter()
+                .all(|block| !contains_math(&block.node, false))
+        );
+
+        state.update(r"before $\gamma$ after");
+        assert!(
+            state
+                .tail_blocks()
+                .iter()
+                .any(|block| contains_math(&block.node, false))
+        );
+    }
+
+    #[test]
+    fn formulas_inside_markdown_styles_remain_formula_nodes() {
+        for source in [
+            r"**bold $\gamma$ text**",
+            r"*italic $x^2$ text*",
+            r"~~deleted $x_i$ text~~",
+            r"[linked $\alpha$ text](https://example.com)",
+        ] {
+            let mut state = StreamingMarkdownState::default();
+            state.update(source);
+            assert!(
+                state
+                    .tail_blocks()
+                    .iter()
+                    .any(|block| contains_math(&block.node, false)),
+                "did not retain nested formula for {source:?}"
+            );
+        }
+    }
+
+    #[test]
     fn display_math_does_not_consume_following_markdown() {
         for opening in ["", "\n"] {
             let source = format!(

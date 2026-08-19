@@ -6,9 +6,9 @@ use std::{
 
 use gpui::{
     AnyElement, App, Bounds, Context, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
-    HighlightStyle, Hsla, InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels,
-    SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText, Window, div, fill,
-    point, prelude::FluentBuilder, px, rems, size, svg,
+    HighlightStyle, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
+    ParentElement, Pixels, SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText,
+    Window, div, fill, point, prelude::FluentBuilder, px, rems, size, svg,
 };
 use gpui_component::ActiveTheme;
 use gpui_component::clipboard::Clipboard;
@@ -518,7 +518,10 @@ fn inline_block(
         .whitespace_normal()
         .text_size(px(size))
         .line_height(px(line_height))
-        .font_weight(weight);
+        .font_weight(weight)
+        .when(cfg!(test), |element| {
+            element.debug_selector(|| "inline-math-flow".to_owned())
+        });
     let text_baseline = shaped_text_baseline(nodes, size, line_height, weight, context, window);
     for piece in inline_pieces(nodes, context.colors) {
         match piece {
@@ -529,7 +532,7 @@ fn inline_block(
             }
             InlinePiece::Math { source, style } => {
                 body = body.child(
-                    render_math(&source, Some((text_baseline, line_height)), context)
+                    render_math(&source, Some((text_baseline, line_height, size)), context)
                         .unwrap_or_else(|| inline_math_fallback(&source, style, context.colors)),
                 );
             }
@@ -560,18 +563,21 @@ struct RenderedMath {
     baseline: f32,
 }
 
-type MathCache = HashMap<(String, bool), Result<RenderedMath, String>>;
+type MathCache = HashMap<(String, bool, u32), Result<RenderedMath, String>>;
 static MATH_CACHE: OnceLock<Mutex<MathCache>> = OnceLock::new();
 
 fn render_math(
     source: &str,
-    inline_text_metrics: Option<(f32, f32)>,
+    inline_text_metrics: Option<(f32, f32, f32)>,
     context: &BlockContext<'_>,
 ) -> Option<AnyElement> {
     let display = inline_text_metrics.is_none();
-    let rendered = cached_math(source, display).ok()?;
+    let font_size = inline_text_metrics
+        .map(|(_, _, font_size)| font_size)
+        .unwrap_or(20.0);
+    let rendered = cached_math(source, display, font_size).ok()?;
     let width = rendered.width;
-    let inline_offset = inline_text_metrics.map(|(text_baseline, line_height)| {
+    let inline_offset = inline_text_metrics.map(|(text_baseline, line_height, _)| {
         inline_math_offset(&rendered, text_baseline, line_height)
     });
     // GPUI exposes no baseline for these flex items; asymmetric margins move the
@@ -584,7 +590,11 @@ fn render_math(
         .h(px(rendered.height))
         .mt(px(margin_top))
         .mb(px(margin_bottom))
-        .text_color(context.colors.markdown_text);
+        .text_color(context.colors.markdown_text)
+        .when(cfg!(test), |element| {
+            let source = source.to_owned();
+            element.debug_selector(move || format!("math:{source}"))
+        });
     if display {
         Some(
             div()
@@ -635,8 +645,8 @@ fn inline_math_margins(offset: f32) -> (f32, f32) {
     (offset.max(0.0) * 2.0, (-offset).max(0.0) * 2.0)
 }
 
-fn cached_math(source: &str, display: bool) -> Result<RenderedMath, String> {
-    let key = (source.to_owned(), display);
+fn cached_math(source: &str, display: bool, font_size: f32) -> Result<RenderedMath, String> {
+    let key = (source.to_owned(), display, font_size.to_bits());
     let cache = MATH_CACHE.get_or_init(Default::default);
     if let Some(rendered) = cache
         .lock()
@@ -647,7 +657,7 @@ fn cached_math(source: &str, display: bool) -> Result<RenderedMath, String> {
         return rendered;
     }
 
-    let rendered = build_math(source, display);
+    let rendered = build_math_at_size(source, display, font_size);
     // ponytail: process-wide cache; add eviction only if long sessions show material growth.
     cache
         .lock()
@@ -656,7 +666,12 @@ fn cached_math(source: &str, display: bool) -> Result<RenderedMath, String> {
     rendered
 }
 
+#[cfg(test)]
 fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
+    build_math_at_size(source, display, if display { 20.0 } else { 16.0 })
+}
+
+fn build_math_at_size(source: &str, display: bool, font_size: f32) -> Result<RenderedMath, String> {
     use ratex_layout::{LayoutOptions, layout, to_display_list};
     use ratex_svg::{SvgOptions, render_to_svg};
     use ratex_types::math_style::MathStyle;
@@ -669,8 +684,15 @@ fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
     };
     let layout = layout(&ast, &LayoutOptions::default().with_style(style));
     let display_list = to_display_list(&layout);
-    let font_size = if display { 20.0 } else { 16.0 };
-    let padding = if display { 2.0 } else { 1.0 };
+    if !font_size.is_finite() || font_size <= 0.0 {
+        return Err("formula font size must be positive and finite".to_owned());
+    }
+    let font_size = f64::from(font_size);
+    let padding = if display {
+        font_size / 10.0
+    } else {
+        font_size / 16.0
+    };
     let width = (display_list.width * font_size + padding * 2.0) as f32;
     let height = ((display_list.height + display_list.depth) * font_size + padding * 2.0) as f32;
     if width <= 0.0 || height <= 0.0 {
@@ -728,13 +750,18 @@ fn inline_flow_text(output: InlineOutput) -> Vec<AnyElement> {
 
             let mut elements = Vec::with_capacity(2);
             if content.start < content.end {
+                let chunk = output.slice(content);
+                let selector = chunk.text.clone();
                 elements.push(
                     div()
                         .min_w(px(0.0))
                         .max_w_full()
                         .flex_initial()
                         .whitespace_normal()
-                        .child(InlineText::new(output.slice(content)))
+                        .when(cfg!(test), |element| {
+                            element.debug_selector(move || format!("inline-text:{selector}"))
+                        })
+                        .child(InlineText::new(chunk))
                         .into_any_element(),
                 );
             }
@@ -844,7 +871,13 @@ fn inline_math_fallback(source: &str, style: InlineStyle, colors: UiPalette) -> 
         colors,
         &mut output,
     );
-    div().child(InlineText::new(output)).into_any_element()
+    div()
+        .when(cfg!(test), |element| {
+            let source = source.to_owned();
+            element.debug_selector(move || format!("math-fallback:{source}"))
+        })
+        .child(InlineText::new(output))
+        .into_any_element()
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1186,11 +1219,16 @@ fn append_inline_text(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AssetSource, FontWeight, Hsla, px, rgb};
+    use gpui::{
+        AssetSource, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, Styled,
+        TestAppContext, Window, div, px, rgb, size,
+    };
     use markdown::{ParseOptions, mdast::Node};
+    use proptest::prelude::*;
 
     use super::{InlineText, build_math, heading_style, inline_text, root_block_gap};
     use crate::assets::DesktopAssets;
+    use crate::streaming_markdown::MarkdownBlock;
     use crate::ui_theme::{UiPalette, metrics};
 
     fn blocks(source: &str) -> Vec<Node> {
@@ -1233,6 +1271,92 @@ mod tests {
             markdown_code_banner: color,
             markdown_link: color,
             markdown_quote: color,
+        }
+    }
+
+    struct InlineLayoutHarness {
+        block: MarkdownBlock,
+        text_size: f32,
+        line_height: f32,
+    }
+
+    impl InlineLayoutHarness {
+        fn new(source: &str) -> Self {
+            let mut nodes = math_blocks(source);
+            assert_eq!(nodes.len(), 1);
+            Self {
+                block: MarkdownBlock {
+                    key: 0,
+                    source: source.to_owned().into(),
+                    node: nodes.remove(0),
+                },
+                text_size: 16.0,
+                line_height: metrics::MESSAGE_LINE_HEIGHT,
+            }
+        }
+    }
+
+    impl Render for InlineLayoutHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let Node::Paragraph(paragraph) = &self.block.node else {
+                unreachable!();
+            };
+            let available_width = f32::from(window.viewport_size().width);
+            let context = super::BlockContext {
+                message_key: 0,
+                generation: 0,
+                revision: None,
+                block: &self.block,
+                streaming: false,
+                colors: test_palette(),
+                available_width,
+            };
+            div().size_full().child(super::inline_block(
+                &paragraph.children,
+                self.text_size,
+                self.line_height,
+                FontWeight::NORMAL,
+                &context,
+                window,
+            ))
+        }
+    }
+
+    struct DisplayMathHarness {
+        source: String,
+        block: MarkdownBlock,
+    }
+
+    impl DisplayMathHarness {
+        fn new(source: &str) -> Self {
+            Self {
+                source: source.to_owned(),
+                block: MarkdownBlock {
+                    key: 0,
+                    source: source.to_owned().into(),
+                    node: Node::Paragraph(markdown::mdast::Paragraph {
+                        children: Vec::new(),
+                        position: None,
+                    }),
+                },
+            }
+        }
+    }
+
+    impl Render for DisplayMathHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let context = super::BlockContext {
+                message_key: 0,
+                generation: 0,
+                revision: None,
+                block: &self.block,
+                streaming: false,
+                colors: test_palette(),
+                available_width: f32::from(window.viewport_size().width),
+            };
+            div()
+                .size_full()
+                .child(super::render_math(&self.source, None, &context).unwrap())
         }
     }
 
@@ -1299,6 +1423,58 @@ mod tests {
     }
 
     #[test]
+    fn common_latex_constructs_render_inline_and_display() {
+        let sources = [
+            "x",
+            "x^2",
+            "x_i",
+            "x_i^2",
+            r"\alpha + \beta = \gamma",
+            r"\Gamma \Delta \Omega",
+            r"\frac{a+b}{c}",
+            r"\sqrt{x}",
+            r"\sqrt[n]{x}",
+            r"\sum_{i=1}^{n} i",
+            r"\int_0^1 x\,dx",
+            r"\lim_{n \to \infty} a_n",
+            r"\left(\frac{a}{b}\right)",
+            r"a \le b",
+            r"a \ne b",
+            r"x \in \mathbb{R}",
+            r"\mathbf{x}",
+            r"\mathrm{softmax}(x)",
+            r"\text{draft tokens}",
+            r"\hat{x} + \bar{y} + \vec{z}",
+            r"\overline{AB}",
+            r"\begin{matrix} a & b \\ c & d \end{matrix}",
+            r"\begin{bmatrix} a & b \\ c & d \end{bmatrix}",
+            r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
+            r"a \cdot b \times c \approx d",
+            r"t_{\text{step}}",
+        ];
+
+        for source in sources {
+            for display in [false, true] {
+                let rendered = build_math(source, display)
+                    .unwrap_or_else(|error| panic!("failed to render {source:?}: {error}"));
+                assert!(
+                    rendered.width.is_finite() && rendered.width > 0.0,
+                    "{source}"
+                );
+                assert!(
+                    rendered.height.is_finite() && rendered.height > 0.0,
+                    "{source}"
+                );
+                let asset = DesktopAssets
+                    .load(rendered.asset.as_ref())
+                    .unwrap()
+                    .unwrap();
+                assert!(asset.starts_with(b"<svg "), "{source}");
+            }
+        }
+    }
+
+    #[test]
     fn inline_math_aligns_svg_and_text_baselines() {
         let line_height = 28.0;
         let text_baseline = 20.0;
@@ -1313,6 +1489,98 @@ mod tests {
 
             assert!((aligned_baseline - expected_baseline).abs() < f32::EPSILON);
         }
+    }
+
+    #[gpui::test]
+    fn inline_math_uses_remaining_width_before_wrapping(cx: &mut TestAppContext) {
+        let source = "回顾上轮结论：decode 阶段计算强度 $I \\approx 1$甲后续文本足够长，用于验证公式后内容不会整块移到下一行。";
+        let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
+        cx.simulate_resize(size(px(760.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let formula = cx.debug_bounds(r"math:I \approx 1").unwrap();
+        let following = cx.debug_bounds("inline-text:甲").unwrap();
+        let vertical_overlap = (formula.origin.y + formula.size.height)
+            .min(following.origin.y + following.size.height)
+            - formula.origin.y.max(following.origin.y);
+
+        assert!(vertical_overlap > px(0.0), "{formula:?} {following:?}");
+        assert!(following.origin.x >= formula.origin.x + formula.size.width - px(1.0));
+    }
+
+    #[gpui::test]
+    fn inline_math_scales_with_the_surrounding_text(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new("heading $\\gamma$"));
+        cx.simulate_resize(size(px(520.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let body_formula = cx.debug_bounds(r"math:\gamma").unwrap();
+
+        view.update(cx, |harness, cx| {
+            harness.text_size = 24.0;
+            harness.line_height = 34.0;
+            cx.notify();
+        });
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let heading_formula = cx.debug_bounds(r"math:\gamma").unwrap();
+
+        assert!(
+            heading_formula.size.height > body_formula.size.height * 1.25,
+            "body={body_formula:?} heading={heading_formula:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn inline_math_nested_in_bold_text_reaches_the_svg_renderer(cx: &mut TestAppContext) {
+        let source = "**一次前向生成全部 $\\gamma$ 个草稿 token**";
+        let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
+        cx.simulate_resize(size(px(620.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        assert!(cx.debug_bounds(r"math:\gamma").is_some());
+        assert!(cx.debug_bounds(r"math-fallback:\gamma").is_none());
+    }
+
+    #[gpui::test]
+    fn tall_inline_fraction_is_contained_and_does_not_overlap_text(cx: &mut TestAppContext) {
+        let source = r"left$\frac{1}{2}$right";
+        let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
+        cx.simulate_resize(size(px(520.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let flow = cx.debug_bounds("inline-math-flow").unwrap();
+        let left = cx.debug_bounds("inline-text:left").unwrap();
+        let formula = cx.debug_bounds(r"math:\frac{1}{2}").unwrap();
+        let right = cx.debug_bounds("inline-text:right").unwrap();
+
+        assert!(formula.origin.y >= flow.origin.y - px(1.0));
+        assert!(
+            formula.origin.y + formula.size.height <= flow.origin.y + flow.size.height + px(1.0),
+            "flow={flow:?} formula={formula:?}"
+        );
+        assert!(left.origin.x + left.size.width <= formula.origin.x + px(1.0));
+        assert!(formula.origin.x + formula.size.width <= right.origin.x + px(1.0));
+    }
+
+    #[gpui::test]
+    fn display_math_is_centered_when_it_fits(cx: &mut TestAppContext) {
+        let source = r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}";
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|_, _| DisplayMathHarness::new(source));
+        cx.simulate_resize(size(px(520.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let formula = cx
+            .debug_bounds(r"math:\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}")
+            .unwrap();
+        let formula_center = formula.origin.x + formula.size.width / 2.0;
+
+        assert!((formula_center - px(260.0)).abs() < px(1.0), "{formula:?}");
     }
 
     #[test]
@@ -1352,6 +1620,119 @@ mod tests {
     }
 
     #[test]
+    fn inline_math_survives_common_markdown_style_nesting() {
+        let cases = [
+            ("**before $x$ after**", (true, false, false, false)),
+            ("*before $x$ after*", (false, true, false, false)),
+            ("~~before $x$ after~~", (false, false, true, false)),
+            (
+                "[before $x$ after](https://example.com)",
+                (false, false, false, true),
+            ),
+            ("***before $x$ after***", (true, true, false, false)),
+        ];
+
+        for (source, expected) in cases {
+            let nodes = math_blocks(source);
+            let Node::Paragraph(paragraph) = &nodes[0] else {
+                panic!("expected paragraph for {source:?}");
+            };
+            let pieces = super::inline_pieces(&paragraph.children, test_palette());
+            let formulas = pieces
+                .iter()
+                .filter_map(|piece| match piece {
+                    super::InlinePiece::Math { source, style } => Some((source, style)),
+                    super::InlinePiece::Text(_) => None,
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(formulas.len(), 1, "{source}");
+            assert_eq!(formulas[0].0, "x", "{source}");
+            let style = formulas[0].1;
+            assert_eq!(
+                (style.strong, style.emphasis, style.deleted, style.link),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_inline_formulas_preserve_order_and_surrounding_text() {
+        let nodes = math_blocks("速度 $S$，当 $\\gamma$ 增大时，$t_{step}$ 不应消失。");
+        let Node::Paragraph(paragraph) = &nodes[0] else {
+            unreachable!();
+        };
+        let pieces = super::inline_pieces(&paragraph.children, test_palette());
+        let formulas = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                super::InlinePiece::Math { source, .. } => Some(source.as_str()),
+                super::InlinePiece::Text(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let text = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                super::InlinePiece::Text(output) => Some(output.text.as_str()),
+                super::InlinePiece::Math { .. } => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(formulas, ["S", r"\gamma", "t_{step}"]);
+        assert_eq!(text, "速度 ，当  增大时， 不应消失。");
+    }
+
+    #[test]
+    fn consecutive_inline_formulas_remain_two_atomic_formulas() {
+        let nodes = math_blocks("before $x$ $y$ after");
+        let Node::Paragraph(paragraph) = &nodes[0] else {
+            unreachable!();
+        };
+        let pieces = super::inline_pieces(&paragraph.children, test_palette());
+        let formulas = pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                super::InlinePiece::Math { source, .. } => Some(source.as_str()),
+                super::InlinePiece::Text(_) => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(formulas, ["x", "y"]);
+    }
+
+    #[gpui::test]
+    fn hard_break_after_inline_math_starts_the_following_text_on_a_new_line(
+        cx: &mut TestAppContext,
+    ) {
+        let (_, cx) =
+            cx.add_window_view(|_, _| InlineLayoutHarness::new("before $x$  \nafterbreak"));
+        cx.simulate_resize(size(px(520.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let formula = cx.debug_bounds("math:x").unwrap();
+        let following = cx.debug_bounds("inline-text:afterbreak").unwrap();
+
+        assert!(
+            following.origin.y >= formula.origin.y + formula.size.height,
+            "{formula:?} {following:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn invalid_inline_math_fallback_remains_visible(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(r"before $\frac{$ after"));
+        cx.simulate_resize(size(px(520.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        let fallback = cx.debug_bounds(r"math-fallback:\frac{").unwrap();
+        assert!(fallback.size.width > px(0.0));
+        assert!(fallback.size.height > px(0.0));
+    }
+
+    #[test]
     fn inline_wrap_slices_preserve_text_styles_and_code_backgrounds() {
         let nodes = blocks("**decode phase** `token`");
         let Node::Paragraph(paragraph) = &nodes[0] else {
@@ -1370,5 +1751,29 @@ mod tests {
 
         assert_eq!(&slice.text[slice.highlights[0].0.clone()], "phase");
         assert_eq!(&slice.text[slice.backgrounds[0].0.clone()], "\u{a0}token");
+    }
+
+    proptest! {
+        #[test]
+        fn unicode_wrap_ranges_are_a_lossless_utf8_partition(
+            characters in proptest::collection::vec(any::<char>(), 0..96)
+        ) {
+            let text = characters.into_iter().collect::<String>();
+            let ranges = super::inline_wrap_ranges(&text);
+            let mut cursor = 0;
+            let mut rebuilt = String::new();
+
+            for range in ranges {
+                prop_assert_eq!(range.start, cursor);
+                prop_assert!(range.start < range.end);
+                prop_assert!(text.is_char_boundary(range.start));
+                prop_assert!(text.is_char_boundary(range.end));
+                rebuilt.push_str(&text[range.clone()]);
+                cursor = range.end;
+            }
+
+            prop_assert_eq!(cursor, text.len());
+            prop_assert_eq!(rebuilt, text);
+        }
     }
 }
