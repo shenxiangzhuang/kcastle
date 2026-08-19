@@ -3666,6 +3666,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "unicode-linebreak",
  "velopack",
 ]
 
