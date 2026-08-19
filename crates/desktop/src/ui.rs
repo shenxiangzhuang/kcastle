@@ -68,9 +68,7 @@ impl Render for DesktopApp {
                     if this.core.composer.menu.is_some() {
                         this.dispatch(crate::domain::Action::SetComposerMenu(None), window, cx);
                     }
-                    if this.core.sidebar.options_open
-                        || this.core.sidebar.session_action_target.is_some()
-                    {
+                    if this.core.sidebar.options_open {
                         this.dispatch(crate::domain::Action::CloseTransientOverlays, window, cx);
                     }
                 }),

@@ -33,6 +33,7 @@ pub enum SessionError {
 }
 
 pub const DEFAULT_PROJECT_ID: &str = "default";
+pub const ARCHIVE_DIRECTORY: &str = "archive";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
@@ -551,6 +552,36 @@ impl Session {
         Ok(())
     }
 
+    pub fn archive(session: &SessionInfo) -> Result<SessionInfo, SessionError> {
+        let directory = session
+            .path
+            .parent()
+            .ok_or_else(|| SessionError::Invalid("session has no parent directory".into()))?;
+        if directory
+            .file_name()
+            .is_some_and(|name| name == ARCHIVE_DIRECTORY)
+        {
+            return Err(SessionError::Invalid("session is already archived".into()));
+        }
+        relocate(session, &directory.join(ARCHIVE_DIRECTORY))
+    }
+
+    pub fn restore(session: &SessionInfo) -> Result<SessionInfo, SessionError> {
+        let archive = session
+            .path
+            .parent()
+            .filter(|directory| {
+                directory
+                    .file_name()
+                    .is_some_and(|name| name == ARCHIVE_DIRECTORY)
+            })
+            .ok_or_else(|| SessionError::Invalid("session is not archived".into()))?;
+        let directory = archive
+            .parent()
+            .ok_or_else(|| SessionError::Invalid("archive has no parent directory".into()))?;
+        relocate(session, directory)
+    }
+
     pub fn info(&self) -> &SessionInfo {
         &self.info
     }
@@ -649,6 +680,29 @@ impl Session {
         }
         Ok(())
     }
+}
+
+fn relocate(session: &SessionInfo, directory: &Path) -> Result<SessionInfo, SessionError> {
+    let file_name = session
+        .path
+        .file_name()
+        .ok_or_else(|| SessionError::Invalid("session has no file name".into()))?;
+    fs::create_dir_all(directory)?;
+    let target = directory.join(file_name);
+    if target.try_exists()? {
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!("session already exists: {}", target.display()),
+        )
+        .into());
+    }
+    let writer_lock = acquire_writer_lock(&session.path)?;
+    fs::rename(&session.path, &target)?;
+    drop(writer_lock);
+    let _ = fs::remove_file(lock_path(&session.path));
+    let mut relocated = session.clone();
+    relocated.path = target;
+    Ok(relocated)
 }
 
 fn pending_inputs_from_events(events: &[SessionEvent]) -> Vec<(String, String, InputMode)> {
@@ -1512,6 +1566,32 @@ mod tests {
 
         assert!(!info.path.exists());
         assert!(Session::list(&directory).unwrap().is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn archived_session_leaves_the_catalog_and_can_be_restored() {
+        let directory = test_directory("archive");
+        let session = Session::create(&directory).await.unwrap();
+        let info = session.info().clone();
+        drop(session);
+
+        let archived = Session::archive(&info).unwrap();
+        assert_eq!(
+            archived.path.parent(),
+            Some(directory.join("archive").as_path())
+        );
+        assert!(!info.path.exists());
+        assert_eq!(Session::list(&directory).unwrap(), []);
+        assert_eq!(
+            Session::list(directory.join("archive")).unwrap(),
+            std::slice::from_ref(&archived)
+        );
+
+        let restored = Session::restore(&archived).unwrap();
+        assert_eq!(restored, info);
+        assert_eq!(Session::list(&directory).unwrap(), [info]);
+        assert!(Session::list(directory.join("archive")).unwrap().is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
