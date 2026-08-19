@@ -108,7 +108,7 @@ jobs:
         run: |
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
-          sudo apt-get install -y dpkg-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev librsvg2-bin
+          sudo apt-get install -y dpkg-dev libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev librsvg2-bin
       - name: Build Linux or Windows desktop app
         if: runner.os != 'macOS'
         run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
