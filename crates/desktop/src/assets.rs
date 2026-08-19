@@ -12,6 +12,7 @@ use gpui_component::IconNamed;
 use gpui_component_assets::Assets as ComponentAssets;
 
 const SQUARE_PEN_PATH: &str = "icons/square-pen.svg";
+const DOWNLOAD_PATH: &str = "icons/download.svg";
 static GENERATED_ASSETS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 static NEXT_GENERATED_ASSET: AtomicU64 = AtomicU64::new(0);
 
@@ -46,6 +47,11 @@ impl AssetSource for DesktopAssets {
                 "../assets/icons/square-pen.svg"
             ))));
         }
+        if path == DOWNLOAD_PATH {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../assets/icons/download.svg"
+            ))));
+        }
         ComponentAssets.load(path)
     }
 
@@ -54,18 +60,23 @@ impl AssetSource for DesktopAssets {
         if SQUARE_PEN_PATH.starts_with(path) {
             assets.push(SQUARE_PEN_PATH.into());
         }
+        if DOWNLOAD_PATH.starts_with(path) {
+            assets.push(DOWNLOAD_PATH.into());
+        }
         Ok(assets)
     }
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum DesktopIconName {
+    Download,
     SquarePen,
 }
 
 impl IconNamed for DesktopIconName {
     fn path(self) -> SharedString {
         match self {
+            Self::Download => DOWNLOAD_PATH,
             Self::SquarePen => SQUARE_PEN_PATH,
         }
         .into()
