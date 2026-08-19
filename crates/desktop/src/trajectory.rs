@@ -32,11 +32,7 @@ enum LedgerRow {
 }
 
 impl DesktopApp {
-    pub(crate) fn trajectory_panel(
-        &self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(crate) fn trajectory_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self
             .trajectory_search
             .read(cx)
@@ -85,7 +81,7 @@ impl DesktopApp {
                                                 .w_full()
                                                 .max_w(px(720.0))
                                                 .shadow_xl()
-                                                .child(self.details_panel(index, window, cx)),
+                                                .child(self.details_panel(index, cx)),
                                         )
                                         .into_any_element()
                                 } else {
@@ -99,7 +95,7 @@ impl DesktopApp {
                                             resizable_panel()
                                                 .size(px(410.0))
                                                 .size_range(px(320.0)..px(720.0))
-                                                .child(self.details_panel(index, window, cx)),
+                                                .child(self.details_panel(index, cx)),
                                         )
                                         .into_any_element()
                                 }
@@ -124,7 +120,7 @@ impl DesktopApp {
             }),
         )
         .size_full()
-        .track_scroll(self.trajectory_scroll.clone())
+        .track_scroll(&self.trajectory_scroll)
     }
 
     fn trajectory_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -575,12 +571,7 @@ impl DesktopApp {
         }
     }
 
-    fn details_panel(
-        &self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    fn details_panel(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
         let message = &self.core.conversation.messages[index];
         let tabs = detail_tabs(message).iter().copied().fold(
@@ -646,7 +637,7 @@ impl DesktopApp {
                     .p_4()
                     .track_scroll(&self.details_scroll)
                     .overflow_y_scrollbar()
-                    .child(self.details_body(index, message, window, cx)),
+                    .child(self.details_body(index, message, cx)),
             )
             .into_any_element()
     }
@@ -655,7 +646,6 @@ impl DesktopApp {
         &self,
         index: usize,
         message: &Message,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
@@ -679,7 +669,6 @@ impl DesktopApp {
                                 detail_content_id("detail-summary-payload", message),
                                 pretty_json(value),
                                 Some("json"),
-                                window,
                                 cx,
                             ),
                             colors,
@@ -695,7 +684,6 @@ impl DesktopApp {
                             detail_content_id("detail-summary-result", message),
                             result_text(message),
                             result_language(message),
-                            window,
                             cx,
                         ),
                         colors,
@@ -741,7 +729,6 @@ impl DesktopApp {
                             detail_content_id("detail-summary-preview", message),
                             message.text.clone(),
                             None,
-                            window,
                             cx,
                         ),
                         colors,
@@ -755,7 +742,6 @@ impl DesktopApp {
                 detail_content_id("detail-preview", message),
                 message.text.clone(),
                 None,
-                window,
                 cx,
             ),
             DetailsTab::Raw => {
@@ -769,14 +755,12 @@ impl DesktopApp {
                     .map(pretty_json)
                     .unwrap_or_else(|| "This record has no tool payload.".into()),
                 message.payload.as_ref().map(|_| "json"),
-                window,
                 cx,
             ),
             DetailsTab::Result => details_markdown(
                 detail_content_id("detail-result", message),
                 result_text(message),
                 result_language(message),
-                window,
                 cx,
             ),
             DetailsTab::Schema => details_schema(("detail-schema", index), message, colors),
@@ -1229,7 +1213,6 @@ fn details_markdown(
     id: impl Into<gpui::ElementId>,
     value: String,
     language: Option<&str>,
-    window: &mut Window,
     cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
     let colors = trajectory_palette(cx);
@@ -1237,7 +1220,7 @@ fn details_markdown(
     match language {
         Some("json") => details_json_code(id, value, colors),
         Some(_) => details_plain_code(id, value, colors),
-        None => TextView::markdown(id, value, window, cx)
+        None => TextView::markdown(id, value)
             .text_color(colors.label_primary)
             .into_any_element(),
     }

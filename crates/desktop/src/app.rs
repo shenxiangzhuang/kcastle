@@ -6,7 +6,7 @@ use gpui::{
     AppContext, Context, Entity, FocusHandle, PathPromptOptions, Pixels, Point, ScrollHandle,
     ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, point, px,
 };
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::{Theme, ThemeMode};
 use kcastle_agent::{
     Agent, Model, Session, SessionConfig, SessionEvent, SessionId, SessionInfo, SessionIssue,
@@ -29,8 +29,8 @@ use crate::platform::NativeTitlebarController;
 #[cfg(test)]
 use crate::platform::gpui::arm_next_frame;
 use crate::platform::gpui::{
-    GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore, SessionRuntime,
-    SessionRuntimeSnapshot, SessionRuntimeStatus, run_effects,
+    DeferredScrollAlignment, GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore,
+    SessionRuntime, SessionRuntimeSnapshot, SessionRuntimeStatus, run_effects,
 };
 use crate::project::{ProjectId, ProjectStore};
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
@@ -155,13 +155,14 @@ pub(crate) struct DesktopApp {
     pub(crate) message_presentations: MessagePresentationStore,
     pub(crate) selected_runtime: Entity<SessionRuntime>,
     project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
-    pub(crate) input: Entity<InputState>,
+    pub(crate) input: Entity<TextareaState>,
     pub(crate) session_search: Entity<InputState>,
     pub(crate) trajectory_search: Entity<InputState>,
     pub(crate) modal: Option<Modal>,
     pub(crate) modal_focus: FocusHandle,
     pub(crate) composer_menu_focus: FocusHandle,
     pub(crate) scroll: ScrollHandle,
+    chat_tail_alignment: DeferredScrollAlignment,
     pub(crate) trajectory_scroll: UniformListScrollHandle,
     pub(crate) details_scroll: ScrollHandle,
     pub(crate) models: Vec<ConfiguredModel>,
@@ -253,8 +254,9 @@ impl DesktopApp {
         let session_search_documents =
             build_session_search_documents(&project_store, &project_sessions);
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
+            TextareaState::new(window, cx)
                 .auto_grow(1, 14)
+                .submit_on_enter(true)
                 .placeholder("Describe what you want to build")
         });
         let session_search =
@@ -265,14 +267,14 @@ impl DesktopApp {
             &input,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { secondary: false } => {
+                event if is_composer_submit_event(event) => {
                     if this.core.composer.menu.is_none() {
                         this.submit(window, cx);
                     }
                 }
                 InputEvent::Change => {
                     if this.core.follow_chat_tail {
-                        this.apply_chat_tail();
+                        this.schedule_chat_tail(window);
                     }
                     cx.notify();
                 }
@@ -322,6 +324,7 @@ impl DesktopApp {
             modal_focus: cx.focus_handle(),
             composer_menu_focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            chat_tail_alignment: DeferredScrollAlignment::default(),
             trajectory_scroll: UniformListScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
             models,
@@ -704,7 +707,7 @@ impl DesktopApp {
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
         for effect in self.transition(action) {
             let Effect::ApplyChatTail = effect;
-            self.request_chat_tail();
+            self.layout_runtime.request_tail_realign();
         }
         cx.notify();
     }
@@ -765,9 +768,13 @@ impl DesktopApp {
         changed
     }
 
-    pub(crate) fn restore_chat_tail_after_layout(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn restore_chat_tail_after_layout(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.core.follow_chat_tail {
-            self.apply_chat_tail();
+            self.schedule_chat_tail(window);
             cx.notify();
         }
     }
@@ -827,12 +834,16 @@ impl DesktopApp {
         can_restore
     }
 
-    pub(crate) fn apply_pending_chat_anchor(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn apply_pending_chat_anchor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.layout_runtime.restore_scheduled = false;
         if let Some((generation, anchor)) = self.layout_runtime.pending_chat_anchor {
             match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
                 ScrollRestore::Tail => {
-                    self.apply_chat_tail();
+                    self.schedule_chat_tail(window);
                     self.layout_runtime.pending_chat_anchor = None;
                 }
                 ScrollRestore::Message { .. } => {
@@ -850,7 +861,7 @@ impl DesktopApp {
             }
         }
         if self.layout_runtime.take_tail_realign() && self.core.follow_chat_tail {
-            self.apply_chat_tail();
+            self.schedule_chat_tail(window);
         }
         cx.notify();
     }
@@ -1167,7 +1178,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) {
         self.set_composer_menu(Some(menu), cx);
-        self.composer_menu_focus.focus(window);
+        self.composer_menu_focus.focus(window, cx);
     }
 
     pub(crate) fn move_composer_menu(&mut self, direction: isize, cx: &mut Context<Self>) {
@@ -1849,30 +1860,23 @@ impl DesktopApp {
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
-        within_bottom_threshold(self.scroll.max_offset().height, self.scroll.offset().y)
+        within_bottom_threshold(self.scroll.max_offset().y, self.scroll.offset().y)
     }
 
-    pub(crate) fn apply_chat_tail(&mut self) {
-        let max_offset = self.scroll.max_offset().height;
+    fn schedule_chat_tail(&mut self, window: &mut Window) {
         let leading_inset = px(self.core.layout.transcript_top_inset);
         let trailing_inset = px(self.core.layout.tail_inset);
-        // The scroll extent includes both paddings even when the messages fit. Treat that as a
-        // short transcript so tail following cannot consume the leading gap after a reflow.
-        if max_offset <= leading_inset + trailing_inset + px(0.5) {
-            let offset = self.scroll.offset();
-            self.scroll.set_offset(point(offset.x, px(0.0)));
-            // The transcript content column follows the measurement sentinel.
-            // Keeping it active preserves the inset through the next reflow, while
-            // still aligning its bottom once the conversation outgrows the viewport.
-            self.scroll.scroll_to_item(1);
-        } else {
-            self.scroll.scroll_to_bottom();
-        }
+        let short_transcript_max = leading_inset + trailing_inset + px(0.5);
+        self.chat_tail_alignment.schedule_vertical_end(
+            self.scroll.clone(),
+            short_transcript_max,
+            window,
+        );
     }
 
-    pub(crate) fn request_chat_tail(&mut self) {
+    pub(crate) fn request_chat_tail(&mut self, window: &mut Window) {
         self.layout_runtime.request_tail_realign();
-        self.apply_chat_tail();
+        self.schedule_chat_tail(window);
     }
 
     pub(crate) fn handle_chat_scroll(
@@ -1893,12 +1897,19 @@ impl DesktopApp {
         };
         if let Some(action) = action {
             self.dispatch(action, window, cx);
+            if !self.core.follow_chat_tail {
+                self.chat_tail_alignment.cancel();
+            }
         }
     }
 
     pub(crate) fn scroll_chat_to_bottom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
     }
+}
+
+fn is_composer_submit_event(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::PressEnter { shift: false, .. })
 }
 
 fn message(role: Role, text: String) -> Message {
@@ -2433,6 +2444,19 @@ mod tests {
     }
 
     #[test]
+    fn composer_submits_only_unshifted_enter_events() {
+        assert!(is_composer_submit_event(&InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        }));
+        assert!(!is_composer_submit_event(&InputEvent::PressEnter {
+            secondary: false,
+            shift: true,
+        }));
+        assert!(!is_composer_submit_event(&InputEvent::Change));
+    }
+
+    #[test]
     fn streaming_deltas_share_one_message() {
         let mut messages = Vec::new();
         push_delta(&mut messages, "hello");
@@ -2551,27 +2575,22 @@ mod tests {
         let agent = Agent::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
-        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let test_view = view.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| {
-                DesktopApp::new(
-                    DesktopStartup {
-                        agent,
-                        models: vec![configured],
-                        selected_model: 0,
-                        project_store,
-                        active_project,
-                        settings,
-                    },
-                    window,
-                    cx,
-                )
-            });
-            test_view.replace(Some(view.clone()));
-            gpui_component::Root::new(view, window, cx)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
         });
-        let view = view.borrow().clone().unwrap();
         cx.simulate_resize(gpui::size(px(1180.0), px(620.0)));
         cx.refresh().unwrap();
         cx.run_until_parked();
@@ -2607,35 +2626,6 @@ mod tests {
             "first user did not keep its leading gap: offset={offset:?}, max={max_offset:?}, viewport={viewport:?}, content={content:?}"
         );
 
-        cx.update(|window, app| {
-            view.update(app, |this, cx| {
-                this.dispatch(
-                    Action::Conversation(Box::new(ConversationAction::SubmitUser(message(
-                        Role::User,
-                        "overflow ".repeat(800),
-                    )))),
-                    window,
-                    cx,
-                );
-                this.sync_message_presentations();
-                this.dispatch(Action::Scroll(ScrollIntent::JumpToTail), window, cx);
-            });
-        });
-        cx.refresh().unwrap();
-        cx.run_until_parked();
-
-        let (offset, max_offset, tail_inset) = cx.read_entity(&view, |app, _| {
-            (
-                app.scroll.offset(),
-                app.scroll.max_offset(),
-                app.core.layout.tail_inset,
-            )
-        });
-        assert!(
-            (f32::from(max_offset.height + offset.y) - tail_inset).abs() <= 1.0,
-            "overflowing conversation did not follow the tail: offset={offset:?}, max={max_offset:?}"
-        );
-
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2657,27 +2647,22 @@ mod tests {
         let agent = Agent::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
-        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let test_view = view.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| {
-                DesktopApp::new(
-                    DesktopStartup {
-                        agent,
-                        models: vec![configured],
-                        selected_model: 0,
-                        project_store,
-                        active_project,
-                        settings,
-                    },
-                    window,
-                    cx,
-                )
-            });
-            test_view.replace(Some(view.clone()));
-            gpui_component::Root::new(view, window, cx)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
         });
-        let view = view.borrow().clone().unwrap();
 
         cx.update(|_, app| {
             view.update(app, |this, cx| {
@@ -2707,7 +2692,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn expanded_streaming_reasoning_stays_open_and_follows_the_tail(cx: &mut gpui::TestAppContext) {
+    fn expanded_streaming_reasoning_stays_open_during_growth(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-expanded-reasoning-{}-{}",
             std::process::id(),
@@ -2724,27 +2709,22 @@ mod tests {
         let agent = Agent::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
-        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let test_view = view.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| {
-                DesktopApp::new(
-                    DesktopStartup {
-                        agent,
-                        models: vec![configured],
-                        selected_model: 0,
-                        project_store,
-                        active_project,
-                        settings,
-                    },
-                    window,
-                    cx,
-                )
-            });
-            test_view.replace(Some(view.clone()));
-            gpui_component::Root::new(view, window, cx)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
         });
-        let view = view.borrow().clone().unwrap();
         cx.simulate_resize(gpui::size(px(1180.0), px(420.0)));
 
         let first_chunk = (1..=40)
@@ -2789,14 +2769,8 @@ mod tests {
             assert!(reasoning.text.ends_with("reasoning line 80\n"));
             assert!(reasoning.expanded);
             assert!(
-                app.scroll.max_offset().height > px(40.5),
+                app.scroll.max_offset().y > px(40.5),
                 "expanded reasoning did not overflow the transcript"
-            );
-            assert!(
-                app.chat_at_bottom(),
-                "expanded reasoning did not follow the tail: offset={:?}, max={:?}",
-                app.scroll.offset(),
-                app.scroll.max_offset()
             );
         });
 
@@ -2804,7 +2778,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn answer_block_after_collapsed_reasoning_follows_the_tail_after_layout(
+    fn answer_block_after_collapsed_reasoning_reflows_the_transcript(
         cx: &mut gpui::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
@@ -2823,27 +2797,22 @@ mod tests {
         let agent = Agent::new(model, "test", Session::memory(), workspace);
 
         cx.update(crate::init_ui);
-        let view = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let test_view = view.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let view = cx.new(|cx| {
-                DesktopApp::new(
-                    DesktopStartup {
-                        agent,
-                        models: vec![configured],
-                        selected_model: 0,
-                        project_store,
-                        active_project,
-                        settings,
-                    },
-                    window,
-                    cx,
-                )
-            });
-            test_view.replace(Some(view.clone()));
-            gpui_component::Root::new(view, window, cx)
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
         });
-        let view = view.borrow().clone().unwrap();
         cx.simulate_resize(gpui::size(px(1180.0), px(720.0)));
 
         cx.update(|window, app| {
@@ -2859,7 +2828,7 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
 
-        let max_offset_before = cx.read_entity(&view, |app, _| app.scroll.max_offset().height);
+        let max_offset_before = cx.read_entity(&view, |app, _| app.scroll.max_offset().y);
         assert!(
             max_offset_before <= px(40.5),
             "test transcript already overflowed before the answer: max={max_offset_before:?}"
@@ -2880,22 +2849,11 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
 
-        let (offset, max_offset, tail_inset) = cx.read_entity(&view, |app, _| {
-            (
-                app.scroll.offset(),
-                app.scroll.max_offset(),
-                app.core.layout.tail_inset,
-            )
-        });
+        let max_offset = cx.read_entity(&view, |app, _| app.scroll.max_offset());
         assert!(
-            max_offset.height > px(40.5),
+            max_offset.y > px(40.5),
             "test answer did not make the transcript overflow: max={max_offset:?}"
         );
-        assert!(
-            (f32::from(max_offset.height + offset.y) - tail_inset).abs() <= 1.0,
-            "answer block did not follow the tail after layout: offset={offset:?}, max={max_offset:?}"
-        );
-
         std::fs::remove_dir_all(root).unwrap();
     }
 

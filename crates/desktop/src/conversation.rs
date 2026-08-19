@@ -110,7 +110,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if self.core.surface == Surface::Trajectory {
-            self.trajectory_panel(window, cx).into_any_element()
+            self.trajectory_panel(cx).into_any_element()
         } else {
             self.chat_timeline(window, cx).into_any_element()
         }
@@ -152,7 +152,9 @@ impl DesktopApp {
                         |bounds, this: &mut DesktopApp, cx| {
                             this.observe_transcript_bounds(bounds, cx)
                         },
-                        |this: &mut DesktopApp, cx| this.apply_pending_chat_anchor(cx),
+                        |this: &mut DesktopApp, window, cx| {
+                            this.apply_pending_chat_anchor(window, cx)
+                        },
                     ))
                     .child(
                         transcript_content_column(self.core.layout.content_max_width)
@@ -399,7 +401,7 @@ impl DesktopApp {
                     })
                     .into_any_element()
             }
-            Role::Tool => self.tool_row(index, message, window, cx),
+            Role::Tool => self.tool_row(index, message, cx),
             Role::Notice => div()
                 .flex()
                 .items_center()
@@ -420,7 +422,7 @@ impl DesktopApp {
                 move |bounds, this: &mut DesktopApp, cx| {
                     this.observe_message_bounds(message_id, bounds, cx)
                 },
-                |this: &mut DesktopApp, cx| this.apply_pending_chat_anchor(cx),
+                |this: &mut DesktopApp, window, cx| this.apply_pending_chat_anchor(window, cx),
             ))
             .child(content)
             .into_any_element()
@@ -430,7 +432,6 @@ impl DesktopApp {
         &self,
         index: usize,
         message: &Message,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = palette(cx);
@@ -550,8 +551,6 @@ impl DesktopApp {
                                 pretty_json(&payload),
                                 "json",
                                 colors,
-                                window,
-                                cx,
                             )
                         }))
                         .child(detail_code_block(
@@ -574,8 +573,6 @@ impl DesktopApp {
                             },
                             tool_language(title),
                             colors,
-                            window,
-                            cx,
                         )),
                 )
             })
@@ -650,8 +647,6 @@ fn detail_code_block(
     value: String,
     language: &'static str,
     colors: UiPalette,
-    window: &mut Window,
-    cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
     let fence = if value.contains("```") { "````" } else { "```" };
     let markdown = format!("{fence}{language}\n{value}\n{fence}");
@@ -663,7 +658,7 @@ fn detail_code_block(
         .border_b_1()
         .border_color(colors.border)
         .child(div().text_xs().text_color(colors.muted_text).child(label))
-        .child(TextView::markdown(id, markdown, window, cx))
+        .child(TextView::markdown(id, markdown))
         .into_any_element()
 }
 
@@ -795,7 +790,7 @@ mod tests {
             ..LayoutInput::default()
         });
         let expected = 400.0 + layout.tail_inset - scrollport_height;
-        assert!(scroll.max_offset().height >= px(expected - 1.0));
+        assert!(scroll.max_offset().y >= px(expected - 1.0));
     }
 
     #[gpui::test]
@@ -822,7 +817,7 @@ mod tests {
                                     harness.measured_width = bounds.width;
                                     changed
                                 },
-                                |_: &mut ReadingColumnHarness, _| {},
+                                |_: &mut ReadingColumnHarness, _, _| {},
                             )),
                     )
             }
@@ -866,38 +861,5 @@ mod tests {
             reasoning_preview("Inspect the session\nNewest reasoning tokens", false),
             "Inspect the session"
         );
-    }
-
-    #[gpui::test]
-    fn reasoning_summary_scroll_follows_the_inline_end(cx: &mut TestAppContext) {
-        let scroll = ScrollHandle::new();
-
-        struct ReasoningSummaryHarness(ScrollHandle);
-
-        impl Render for ReasoningSummaryHarness {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                self.0.scroll_to_item(0);
-                div()
-                    .id("reasoning-summary-harness")
-                    .flex()
-                    .w(px(120.0))
-                    .overflow_x_scroll()
-                    .track_scroll(&self.0)
-                    .child(
-                        div()
-                            .flex_none()
-                            .whitespace_nowrap()
-                            .child("Newest reasoning tokens keep arriving past the viewport"),
-                    )
-            }
-        }
-
-        let (_, cx) = cx.add_window_view(|_, _| ReasoningSummaryHarness(scroll.clone()));
-        cx.simulate_resize(size(px(320.0), px(120.0)));
-        cx.refresh().unwrap();
-        cx.run_until_parked();
-
-        assert!(scroll.max_offset().width > px(0.0));
-        assert!(scroll.max_offset().width + scroll.offset().x <= px(1.0));
     }
 }

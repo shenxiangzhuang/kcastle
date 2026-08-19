@@ -1,4 +1,4 @@
-use gpui::{Context, IntoElement, Styled, WeakEntity, canvas};
+use gpui::{Context, IntoElement, Styled, WeakEntity, Window, canvas};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MeasuredBounds {
@@ -11,7 +11,7 @@ pub(crate) struct MeasuredBounds {
 pub(crate) fn measured_container<T: 'static>(
     owner: WeakEntity<T>,
     on_measure: impl 'static + Fn(MeasuredBounds, &mut T, &mut Context<T>) -> bool,
-    after_layout: impl 'static + Fn(&mut T, &mut Context<T>),
+    after_layout: impl 'static + Fn(&mut T, &mut Window, &mut Context<T>),
 ) -> impl IntoElement {
     canvas(
         {
@@ -33,8 +33,8 @@ pub(crate) fn measured_container<T: 'static>(
                     .unwrap_or(false);
                 if changed {
                     let owner = owner.clone();
-                    window.on_next_frame(move |_, cx| {
-                        let _ = owner.update(cx, |state, cx| after_layout(state, cx));
+                    window.on_next_frame(move |window, cx| {
+                        let _ = owner.update(cx, |state, cx| after_layout(state, window, cx));
                     });
                     window.refresh();
                 }
@@ -72,7 +72,7 @@ mod tests {
                     harness.width = bounds.width;
                     true
                 },
-                |_: &mut MeasurementHarness, _| {},
+                |_: &mut MeasurementHarness, _, _| {},
             ))
         }
     }
