@@ -390,6 +390,7 @@ impl DesktopApp {
                     sidebar_label(&project.name, metrics::SIDEBAR_LABEL_UNITS);
                 let preview_project_name = project.name.clone();
                 let show_more_project_path = project.path.clone();
+                let show_more_keyboard_project_path = project.path.clone();
                 let issue_count = self
                     .project_session_issues
                     .get(&project.sessions_dir)
@@ -605,21 +606,35 @@ impl DesktopApp {
                                 div()
                                     .pl(px(metrics::SESSION_ROW_INDENT))
                                     .child(
-                                        Button::new(("show-more-sessions", index))
-                                            .label("Show more")
-                                            .ghost()
+                                        div()
+                                            .id(("show-more-sessions", index))
+                                            .flex()
                                             .w_full()
-                                            .h(px(metrics::SESSION_ROW_HEIGHT))
-                                            .px_2()
+                                            .items_center()
                                             .justify_start()
+                                            .h(px(metrics::SESSION_ROW_HEIGHT))
+                                            .cursor_pointer()
+                                            .tab_index(0)
+                                            .role(gpui::accesskit::Role::Button)
+                                            .aria_label("Show more")
                                             .text_sm()
                                             .text_color(colors.muted_text)
+                                            .child("Show more")
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.dispatch(
                                                     Action::ShowMoreSessions(show_more_project_path.clone()),
                                                     window,
                                                     cx,
                                                 )
+                                            }))
+                                            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                                    this.dispatch(
+                                                        Action::ShowMoreSessions(show_more_keyboard_project_path.clone()),
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
                                             })),
                                     )
                             }))
