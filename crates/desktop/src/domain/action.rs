@@ -31,6 +31,7 @@ pub(crate) enum Action {
     SetSidebarGrouping(bool),
     SetSidebarSort(bool),
     SetSessionActionTarget(Option<PathBuf>),
+    ShowMoreSessions(PathBuf),
     ToggleProjectExpanded(PathBuf),
     ExpandProject(PathBuf),
     ToggleTrajectoryDuration,

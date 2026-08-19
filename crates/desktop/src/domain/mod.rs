@@ -11,4 +11,7 @@ pub(crate) use conversation::{
 };
 pub(crate) use ids::{LayoutGeneration, MessageId, RunId, next_message_id};
 pub(crate) use reducer::reduce;
-pub(crate) use state::{AppState, ApprovalState, ComposerMenu, DetailsTab, RunState, Surface};
+pub(crate) use state::{
+    AppState, ApprovalState, ComposerMenu, DetailsTab, INITIAL_SESSION_LIMIT, RunState,
+    SESSION_PAGE_SIZE, Surface,
+};
