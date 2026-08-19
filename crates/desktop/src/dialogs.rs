@@ -1,14 +1,17 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
-    AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement,
+    App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{Select, SelectEvent, SelectState};
-use gpui_component::{Disableable, Icon, IconName, IndexPath, Selectable, Sizable};
+use gpui_component::setting::{
+    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+};
+use gpui_component::{Disableable, Icon, IconName, IndexPath, Sizable};
 use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
 use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
@@ -37,34 +40,128 @@ fn settings_dialog_view(
     cx: &mut Context<DesktopApp>,
     colors: UiPalette,
 ) -> gpui::AnyElement {
-    let selected_tab = dialog.tab;
-    let body = match selected_tab {
-        SettingsTab::General => div()
-            .flex()
-            .flex_col()
-            .child(permission_settings_row(app.settings.allow_all_tools(), cx))
-            .child(settings_row(
-                "Project",
-                "The working directory for new sessions.",
-                display_path(&app.core.workspace.cwd),
-                colors,
-            ))
-            .child(appearance_settings_row(app.settings.appearance(), cx))
-            .child(motion_settings_row(app.settings.reduce_motion(), cx))
-            .child(enter_behavior_settings_row(
-                app.settings.enter_behavior(),
-                cx,
-            ))
-            .child(
-                div()
-                    .pt_6()
-                    .text_xs()
-                    .text_color(colors.muted_text)
-                    .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+    let view = cx.entity();
+    let project = display_path(&app.core.workspace.cwd);
+    let general_group = SettingGroup::new()
+        .title("General")
+        .item(
+            SettingItem::new(
+                "Allow all tools",
+                SettingField::switch(
+                    {
+                        let view = view.clone();
+                        move |cx: &App| view.read(cx).settings.allow_all_tools()
+                    },
+                    {
+                        let view = view.clone();
+                        move |allow, cx: &mut App| {
+                            view.update(cx, |app, cx| app.set_default_allow_all_tools(allow, cx));
+                        }
+                    },
+                ),
             )
-            .into_any_element(),
-        SettingsTab::Models => models_settings_view(app, dialog, cx, colors),
-    };
+            .description("Skip approval prompts for shell and tool calls."),
+        )
+        .item(
+            SettingItem::new(
+                "Project",
+                SettingField::render(move |_, _, cx| {
+                    div()
+                        .max_w(px(280.0))
+                        .truncate()
+                        .text_sm()
+                        .text_color(palette(cx).muted_text)
+                        .child(project.clone())
+                }),
+            )
+            .description("The working directory for new sessions."),
+        )
+        .item(
+            SettingItem::new(
+                "Appearance",
+                SettingField::render({
+                    let view = view.clone();
+                    move |options, _, cx| appearance_setting_field(&view, options, cx)
+                }),
+            )
+            .description("Use the system appearance or choose a fixed theme."),
+        )
+        .item(
+            SettingItem::new(
+                "Reduce motion",
+                SettingField::switch(
+                    {
+                        let view = view.clone();
+                        move |cx: &App| view.read(cx).settings.reduce_motion()
+                    },
+                    {
+                        let view = view.clone();
+                        move |reduce, cx: &mut App| {
+                            view.update(cx, |app, cx| app.set_reduce_motion(reduce, cx));
+                        }
+                    },
+                ),
+            )
+            .description("Reduce non-essential interface animation."),
+        )
+        .item(
+            SettingItem::new(
+                "Enter while busy",
+                SettingField::dropdown(
+                    vec![
+                        ("steer".into(), "Steer".into()),
+                        ("queue".into(), "Queue".into()),
+                    ],
+                    {
+                        let view = view.clone();
+                        move |cx: &App| match view.read(cx).settings.enter_behavior() {
+                            EnterBehavior::Steer => SharedString::from("steer"),
+                            EnterBehavior::Queue => SharedString::from("queue"),
+                        }
+                    },
+                    {
+                        let view = view.clone();
+                        move |value, cx: &mut App| {
+                            let behavior = if value == "queue" {
+                                EnterBehavior::Queue
+                            } else {
+                                EnterBehavior::Steer
+                            };
+                            view.update(cx, |app, cx| app.set_enter_behavior(behavior, cx));
+                        }
+                    },
+                ),
+            )
+            .description("Steer the active turn or queue a follow-up after it settles."),
+        );
+    let models_group = SettingGroup::new().title("Models").item(
+        SettingItem::render({
+            let view = view.clone();
+            move |_, _, cx| {
+                let app = view.read(cx);
+                let Some(Modal::Settings(dialog)) = &app.modal else {
+                    return div().into_any_element();
+                };
+                models_settings_view(app, dialog, &view, palette(cx))
+            }
+        })
+        .keywords(["API", "provider", "model", "DeepSeek", "OpenAI"]),
+    );
+    let settings_page = SettingPage::new("Settings")
+        .icon(Icon::new(IconName::Settings))
+        .default_open(true)
+        .description(concat!("Kcastle v", env!("CARGO_PKG_VERSION")))
+        .resettable(false)
+        .title_suffix({
+            let view = view.clone();
+            move |_, _| settings_close_button(view.clone())
+        })
+        .groups(
+            dialog
+                .initial_page
+                .order_groups(general_group, models_group),
+        );
+
     div()
         .flex()
         .w(px(800.0))
@@ -74,104 +171,55 @@ fn settings_dialog_view(
         .shadow_xl()
         .overflow_hidden()
         .child(
-            div()
-                .flex()
-                .flex_col()
-                .w(px(188.0))
-                .flex_none()
-                .p_3()
-                .bg(colors.sidebar)
-                .border_r_1()
-                .border_color(colors.border)
-                .child(
-                    div()
-                        .px_2()
-                        .pt_2()
-                        .pb_4()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child("Settings"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            settings_nav(
-                                "settings-general",
-                                "General",
-                                IconName::Settings,
-                                selected_tab == SettingsTab::General,
-                                colors,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_settings_tab(SettingsTab::General, cx)
-                            })),
-                        )
-                        .child(
-                            settings_nav(
-                                "settings-models",
-                                "Models",
-                                IconName::Bot,
-                                selected_tab == SettingsTab::Models,
-                                colors,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_settings_tab(SettingsTab::Models, cx)
-                            })),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .h(px(58.0))
-                        .px_6()
-                        .child(
-                            div()
-                                .text_lg()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(match selected_tab {
-                                    SettingsTab::General => "General",
-                                    SettingsTab::Models => "Models",
-                                }),
-                        )
-                        .child(
-                            Button::new("close-settings")
-                                .icon(IconName::Close)
-                                .ghost()
-                                .compact()
-                                .tooltip("Close")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.close_modal(window, cx)),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h(px(0.0))
-                        .overflow_y_scrollbar()
-                        .px_6()
-                        .pb_6()
-                        .child(body),
-                ),
+            Settings::new(("settings", dialog.id))
+                .sidebar_width(px(188.0))
+                .default_selected_index(dialog.initial_page.select_index())
+                .page(settings_page),
         )
         .into_any_element()
+}
+
+fn settings_close_button(view: Entity<DesktopApp>) -> Button {
+    Button::new("close-settings")
+        .icon(IconName::Close)
+        .ghost()
+        .compact()
+        .tooltip("Close")
+        .on_click(move |_, window, cx| {
+            view.update(cx, |app, cx| app.close_modal(window, cx));
+        })
+}
+
+fn appearance_setting_field(
+    view: &Entity<DesktopApp>,
+    options: &gpui_component::setting::RenderOptions,
+    cx: &App,
+) -> gpui::Div {
+    let appearance = view.read(cx).settings.appearance();
+    div().flex().items_center().gap_1().children(
+        [
+            ("appearance-system", "System", Appearance::System),
+            ("appearance-light", "Light", Appearance::Light),
+            ("appearance-dark", "Dark", Appearance::Dark),
+        ]
+        .map(|(id, label, value)| {
+            let view = view.clone();
+            Button::new(id)
+                .label(label)
+                .compact()
+                .with_size(options.size())
+                .when(appearance == value, |button| button.primary())
+                .on_click(move |_, window, cx| {
+                    view.update(cx, |app, cx| app.set_appearance(value, window, cx));
+                })
+        }),
+    )
 }
 
 fn models_settings_view(
     app: &DesktopApp,
     dialog: &SettingsDialog,
-    cx: &mut Context<DesktopApp>,
+    view: &Entity<DesktopApp>,
     colors: UiPalette,
 ) -> gpui::AnyElement {
     let busy = app.task_active();
@@ -230,17 +278,22 @@ fn models_settings_view(
                                     .label(if is_open { "Close" } else { "Edit" })
                                     .compact()
                                     .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if is_open {
-                                            this.cancel_model_editor(cx);
-                                        } else {
-                                            this.edit_provider(provider_id, window, cx);
+                                    .on_click({
+                                        let view = view.clone();
+                                        move |_, window, cx| {
+                                            view.update(cx, |app, cx| {
+                                                if is_open {
+                                                    app.cancel_model_editor(cx);
+                                                } else {
+                                                    app.edit_provider(provider_id, window, cx);
+                                                }
+                                            });
                                         }
-                                    })),
+                                    }),
                             ),
                     );
             if is_open && let Some(editor) = &dialog.model_editor {
-                row = row.child(model_editor_view(editor, cx, colors));
+                row = row.child(model_editor_view(editor, view, colors));
             }
             row.into_any_element()
         })
@@ -251,6 +304,7 @@ fn models_settings_view(
         .as_ref()
         .filter(|editor| !provider_configured(app, editor.provider_id));
     let adding_provider = standalone_editor.is_some();
+    let add_provider_view = view.clone();
 
     div()
         .flex()
@@ -270,15 +324,18 @@ fn models_settings_view(
                 .child(format!("Saved {provider}."))
         }))
         .child(div().flex().flex_col().gap_2().mt_3().children(rows))
-        .children(standalone_editor.map(|editor| model_editor_view(editor, cx, colors)))
-        .when(!adding_provider, |view| {
-            view.child(
+        .children(standalone_editor.map(|editor| model_editor_view(editor, view, colors)))
+        .when(!adding_provider, move |container| {
+            let app_view = add_provider_view.clone();
+            container.child(
                 Button::new("add-provider")
                     .icon(IconName::Plus)
                     .label("Add provider")
                     .w_full()
                     .disabled(busy || addable.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| this.add_provider(window, cx))),
+                    .on_click(move |_, window, cx| {
+                        app_view.update(cx, |app, cx| app.add_provider(window, cx));
+                    }),
             )
         })
         .into_any_element()
@@ -286,7 +343,7 @@ fn models_settings_view(
 
 fn model_editor_view(
     editor: &ModelEditor,
-    cx: &mut Context<DesktopApp>,
+    view: &Entity<DesktopApp>,
     colors: UiPalette,
 ) -> gpui::AnyElement {
     let profile = crate::default_provider_profile(editor.provider_id);
@@ -324,7 +381,7 @@ fn model_editor_view(
         .models
         .iter()
         .enumerate()
-        .map(|(index, row)| model_editor_row_view(index, row, editor.models.len(), cx, colors))
+        .map(|(index, row)| model_editor_row_view(index, row, editor.models.len(), view, colors))
         .collect::<Vec<_>>();
     div()
         .flex()
@@ -346,7 +403,12 @@ fn model_editor_view(
                     .label("Customized settings")
                     .ghost()
                     .compact()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_model_advanced(cx))),
+                    .on_click({
+                        let view = view.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |app, cx| app.toggle_model_advanced(cx));
+                        }
+                    }),
             ),
         )
         .when(editor.advanced_open, |card| {
@@ -383,9 +445,14 @@ fn model_editor_view(
                                 .icon(IconName::Plus)
                                 .label("Add model")
                                 .compact()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.add_provider_model(window, cx)
-                                })),
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        view.update(cx, |app, cx| {
+                                            app.add_provider_model(window, cx)
+                                        });
+                                    }
+                                }),
                         ),
                 )
         })
@@ -403,13 +470,23 @@ fn model_editor_view(
                 .child(
                     Button::new("cancel-model-editor")
                         .label("Cancel")
-                        .on_click(cx.listener(|this, _, _, cx| this.cancel_model_editor(cx))),
+                        .on_click({
+                            let view = view.clone();
+                            move |_, _, cx| {
+                                view.update(cx, |app, cx| app.cancel_model_editor(cx));
+                            }
+                        }),
                 )
                 .child(
                     Button::new("save-model-editor")
                         .label("Save")
                         .primary()
-                        .on_click(cx.listener(|this, _, _, cx| this.save_model_editor(cx))),
+                        .on_click({
+                            let view = view.clone();
+                            move |_, _, cx| {
+                                view.update(cx, |app, cx| app.save_model_editor(cx));
+                            }
+                        }),
                 ),
         )
         .into_any_element()
@@ -419,7 +496,7 @@ fn model_editor_row_view(
     index: usize,
     row: &ModelEditorRow,
     model_count: usize,
-    cx: &mut Context<DesktopApp>,
+    view: &Entity<DesktopApp>,
     colors: UiPalette,
 ) -> gpui::AnyElement {
     div()
@@ -451,11 +528,12 @@ fn model_editor_row_view(
                         .compact()
                         .disabled(model_count <= 1)
                         .tooltip("Delete model")
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.remove_provider_model(index, cx)
-                            }),
-                        ),
+                        .on_click({
+                            let view = view.clone();
+                            move |_, _, cx| {
+                                view.update(cx, |app, cx| app.remove_provider_model(index, cx));
+                            }
+                        }),
                 ),
         )
         .child(
@@ -634,16 +712,46 @@ fn provider_profile(app: &DesktopApp, provider_id: &'static str) -> ProviderProf
         .unwrap_or_else(|| crate::default_provider_profile(provider_id))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettingsTab {
+static NEXT_SETTINGS_DIALOG_ID: AtomicUsize = AtomicUsize::new(1);
+
+#[derive(Clone, Copy)]
+enum SettingsPage {
     General,
     Models,
 }
 
 pub(crate) struct SettingsDialog {
-    tab: SettingsTab,
+    id: usize,
+    initial_page: SettingsPage,
     model_editor: Option<ModelEditor>,
     saved_provider: Option<String>,
+}
+
+impl SettingsPage {
+    fn select_index(self) -> SelectIndex {
+        SelectIndex {
+            page_ix: 0,
+            group_ix: Some(0),
+        }
+    }
+
+    fn order_groups(self, general: SettingGroup, models: SettingGroup) -> [SettingGroup; 2] {
+        match self {
+            Self::General => [general, models],
+            Self::Models => [models, general],
+        }
+    }
+}
+
+impl SettingsDialog {
+    fn new(initial_page: SettingsPage) -> Self {
+        Self {
+            id: NEXT_SETTINGS_DIALOG_ID.fetch_add(1, Ordering::Relaxed),
+            initial_page,
+            model_editor: None,
+            saved_provider: None,
+        }
+    }
 }
 
 struct ModelEditor {
@@ -720,11 +828,9 @@ impl DesktopApp {
 
     pub(crate) fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dispatch(Action::CloseTransientOverlays, window, cx);
-        self.modal = Some(Modal::Settings(Box::new(SettingsDialog {
-            tab: SettingsTab::General,
-            model_editor: None,
-            saved_provider: None,
-        })));
+        self.modal = Some(Modal::Settings(Box::new(SettingsDialog::new(
+            SettingsPage::General,
+        ))));
         self.modal_focus.focus(window, cx);
         cx.notify();
     }
@@ -734,16 +840,11 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_dialog(window, cx);
-        self.set_settings_tab(SettingsTab::Models, cx);
-    }
-
-    pub(crate) fn set_settings_tab(&mut self, tab: SettingsTab, cx: &mut Context<Self>) {
-        self.dispatch_local(Action::CloseTransientOverlays, cx);
-        if let Some(Modal::Settings(dialog)) = &mut self.modal {
-            dialog.tab = tab;
-            dialog.model_editor = None;
-        }
+        self.dispatch(Action::CloseTransientOverlays, window, cx);
+        self.modal = Some(Modal::Settings(Box::new(SettingsDialog::new(
+            SettingsPage::Models,
+        ))));
+        self.modal_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -841,7 +942,6 @@ impl DesktopApp {
     ) {
         let focus = editor.api_key.clone();
         if let Some(Modal::Settings(dialog)) = &mut self.modal {
-            dialog.tab = SettingsTab::Models;
             dialog.saved_provider = None;
             dialog.model_editor = Some(editor);
         }
@@ -1255,262 +1355,6 @@ fn modal_actions() -> gpui::Div {
     div().flex().items_center().justify_end().gap_2().pt_2()
 }
 
-fn settings_row(
-    label: &'static str,
-    description: &'static str,
-    value: String,
-    colors: UiPalette,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_6()
-        .min_h(px(74.0))
-        .border_b_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap_1()
-                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(label))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child(description),
-                ),
-        )
-        .child(
-            div()
-                .w(px(240.0))
-                .flex_none()
-                .truncate()
-                .text_right()
-                .text_sm()
-                .text_color(colors.muted_text)
-                .child(value),
-        )
-}
-
-fn permission_settings_row(allow_all: bool, cx: &mut Context<DesktopApp>) -> impl IntoElement {
-    let colors = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_6()
-        .min_h(px(82.0))
-        .border_b_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .gap_1()
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child("Permission"),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child("Choose whether shell calls require approval."),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    Button::new("settings-permission-ask")
-                        .label("Ask")
-                        .when(!allow_all, |button| button.primary())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.set_default_allow_all_tools(false, cx)
-                        })),
-                )
-                .child(
-                    Button::new("settings-permission-allow")
-                        .label("Allow all")
-                        .when(allow_all, |button| button.primary())
-                        .on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.set_default_allow_all_tools(true, cx)
-                            }),
-                        ),
-                ),
-        )
-}
-
-fn appearance_settings_row(
-    appearance: Appearance,
-    cx: &mut Context<DesktopApp>,
-) -> impl IntoElement {
-    let colors = palette(cx);
-    settings_control_row(
-        "Appearance",
-        "Use the system appearance or choose a fixed theme.",
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("appearance-system")
-                    .label("System")
-                    .compact()
-                    .when(appearance == Appearance::System, |button| button.primary())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_appearance(Appearance::System, window, cx)
-                    })),
-            )
-            .child(
-                Button::new("appearance-light")
-                    .label("Light")
-                    .compact()
-                    .when(appearance == Appearance::Light, |button| button.primary())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_appearance(Appearance::Light, window, cx)
-                    })),
-            )
-            .child(
-                Button::new("appearance-dark")
-                    .label("Dark")
-                    .compact()
-                    .when(appearance == Appearance::Dark, |button| button.primary())
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.set_appearance(Appearance::Dark, window, cx)
-                    })),
-            )
-            .into_any_element(),
-        colors,
-    )
-}
-
-fn enter_behavior_settings_row(
-    behavior: EnterBehavior,
-    cx: &mut Context<DesktopApp>,
-) -> impl IntoElement {
-    let colors = palette(cx);
-    settings_control_row(
-        "Enter while busy",
-        "Steer the active turn or queue a follow-up after it settles.",
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("enter-steer")
-                    .label("Steer")
-                    .compact()
-                    .when(behavior == EnterBehavior::Steer, |button| button.primary())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_enter_behavior(EnterBehavior::Steer, cx)
-                    })),
-            )
-            .child(
-                Button::new("enter-queue")
-                    .label("Queue")
-                    .compact()
-                    .when(behavior == EnterBehavior::Queue, |button| button.primary())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.set_enter_behavior(EnterBehavior::Queue, cx)
-                    })),
-            )
-            .into_any_element(),
-        colors,
-    )
-}
-
-fn motion_settings_row(reduce_motion: bool, cx: &mut Context<DesktopApp>) -> impl IntoElement {
-    let colors = palette(cx);
-    settings_control_row(
-        "Motion",
-        "Reduce non-essential interface animation.",
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("motion-standard")
-                    .label("Standard")
-                    .compact()
-                    .when(!reduce_motion, |button| button.primary())
-                    .on_click(cx.listener(|this, _, _, cx| this.set_reduce_motion(false, cx))),
-            )
-            .child(
-                Button::new("motion-reduced")
-                    .label("Reduced")
-                    .compact()
-                    .when(reduce_motion, |button| button.primary())
-                    .on_click(cx.listener(|this, _, _, cx| this.set_reduce_motion(true, cx))),
-            )
-            .into_any_element(),
-        colors,
-    )
-}
-
-fn settings_control_row(
-    label: &'static str,
-    description: &'static str,
-    control: gpui::AnyElement,
-    colors: UiPalette,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_6()
-        .min_h(px(82.0))
-        .border_b_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w(px(0.0))
-                .gap_1()
-                .child(div().font_weight(gpui::FontWeight::MEDIUM).child(label))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(colors.muted_text)
-                        .child(description),
-                ),
-        )
-        .child(control)
-}
-
-fn settings_nav(
-    id: &'static str,
-    label: &'static str,
-    icon: IconName,
-    selected: bool,
-    _colors: UiPalette,
-) -> Button {
-    Button::new(id)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_3()
-                .child(Icon::new(icon).size_4())
-                .child(label),
-        )
-        .ghost()
-        .w_full()
-        .justify_start()
-        .selected(selected)
-}
-
 fn display_path(path: &std::path::Path) -> String {
     std::env::var_os("HOME")
         .and_then(|home| {
@@ -1525,7 +1369,10 @@ fn display_path(path: &std::path::Path) -> String {
 mod tests {
     use kcastle_agent::{DEEPSEEK_PROVIDER_ID, Model, OPENAI_PROVIDER_ID};
 
-    use super::{addable_provider_ids, parse_capacity, parse_optional_output_tokens};
+    use super::{
+        SettingsDialog, SettingsPage, addable_provider_ids, parse_capacity,
+        parse_optional_output_tokens,
+    };
     use crate::app::ConfiguredModel;
     use crate::settings::ProviderModel;
 
@@ -1564,5 +1411,15 @@ mod tests {
             addable_provider_ids(&models).collect::<Vec<_>>(),
             vec![OPENAI_PROVIDER_ID]
         );
+    }
+
+    #[test]
+    fn settings_openings_have_isolated_component_state() {
+        let general = SettingsDialog::new(SettingsPage::General);
+        let models = SettingsDialog::new(SettingsPage::Models);
+
+        assert_ne!(general.id, models.id);
+        assert!(matches!(general.initial_page, SettingsPage::General));
+        assert!(matches!(models.initial_page, SettingsPage::Models));
     }
 }
