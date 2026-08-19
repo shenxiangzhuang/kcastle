@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use kcastle_agent::SessionInfo;
 
 use crate::domain::{ConversationState, LayoutGeneration, MessageId, RunId};
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
+
+pub(crate) const INITIAL_SESSION_LIMIT: usize = 5;
+pub(crate) const SESSION_PAGE_SIZE: usize = 10;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Surface {
@@ -36,6 +39,7 @@ pub(crate) struct SidebarState {
     pub(crate) session_action_target: Option<PathBuf>,
     pub(crate) group_by_workspace: bool,
     pub(crate) sort_by_recent: bool,
+    pub(crate) visible_sessions_by_project: HashMap<PathBuf, usize>,
 }
 
 impl Default for SidebarState {
@@ -46,6 +50,7 @@ impl Default for SidebarState {
             session_action_target: None,
             group_by_workspace: true,
             sort_by_recent: true,
+            visible_sessions_by_project: HashMap::new(),
         }
     }
 }

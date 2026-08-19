@@ -79,6 +79,14 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetSessionActionTarget(target) => {
             state.sidebar.session_action_target = target;
         }
+        Action::ShowMoreSessions(path) => {
+            let visible = state
+                .sidebar
+                .visible_sessions_by_project
+                .entry(path)
+                .or_insert(crate::domain::INITIAL_SESSION_LIMIT);
+            *visible = visible.saturating_add(crate::domain::SESSION_PAGE_SIZE);
+        }
         Action::ToggleProjectExpanded(path) => {
             if !state.workspace.expanded_projects.remove(&path) {
                 state.workspace.expanded_projects.insert(path);
@@ -179,5 +187,31 @@ fn recompute_layout(state: &mut AppState, effects: &mut Vec<Effect>) {
     state.layout = layout;
     if state.follow_chat_tail {
         effects.push(Effect::ApplyChatTail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::layout::LayoutInput;
+
+    #[test]
+    fn show_more_sessions_adds_ten_to_the_initial_five() {
+        let mut state = AppState::new(LayoutInput::default());
+        let project = PathBuf::from("project-a");
+
+        reduce(&mut state, Action::ShowMoreSessions(project.clone()));
+        assert_eq!(
+            state.sidebar.visible_sessions_by_project.get(&project),
+            Some(&15)
+        );
+
+        reduce(&mut state, Action::ShowMoreSessions(project.clone()));
+        assert_eq!(
+            state.sidebar.visible_sessions_by_project.get(&project),
+            Some(&25)
+        );
     }
 }

@@ -4,7 +4,7 @@ use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, deferred, div,
-    prelude::FluentBuilder, px, relative,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
@@ -14,7 +14,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, IconName, Sizable};
 
 use crate::assets::DesktopIconName;
-use crate::domain::Action;
+use crate::domain::{Action, INITIAL_SESSION_LIMIT};
 use crate::layout::SidebarMode;
 use crate::ui_theme::{UiPalette, metrics, palette};
 
@@ -399,8 +399,20 @@ impl DesktopApp {
                 if self.core.sidebar.sort_by_recent {
                     sessions.reverse();
                 }
+                let visible_session_count = visible_session_count(
+                    self.core
+                        .sidebar
+                        .visible_sessions_by_project
+                        .get(&project.path)
+                        .copied(),
+                    !query.is_empty(),
+                    sessions.len(),
+                );
+                let has_more_sessions = query.is_empty() && sessions.len() > visible_session_count;
                 let project_name =
                     sidebar_label(&project.name, metrics::SIDEBAR_LABEL_UNITS);
+                let preview_project_name = project.name.clone();
+                let show_more_project_path = project.path.clone();
                 let issue_count = self
                     .project_session_issues
                     .get(&project.sessions_dir)
@@ -541,7 +553,7 @@ impl DesktopApp {
                                     .text_color(colors.danger)
                                     .child("Some session files could not be read; valid sessions remain available.")
                             }))
-                            .children(sessions.into_iter().enumerate().filter_map(|(session_index, session)| {
+                            .children(sessions.into_iter().take(visible_session_count).enumerate().filter_map(|(session_index, session)| {
                                 let path = session.path.clone();
                                 let keyboard_path = path.clone();
                                 let selected =
@@ -567,7 +579,7 @@ impl DesktopApp {
                                 } else {
                                     title.clone()
                                 };
-                                let action_title = title;
+                                let action_title = title.clone();
                                 let group = SharedString::from(format!("session-{index}-{session_index}"));
                                 let action_path = path.clone();
                                 let action_open = self
@@ -613,11 +625,18 @@ impl DesktopApp {
                                     session_row(
                                         group.clone(),
                                         group.clone(),
-                                        display_title,
-                                        SessionRowTrailing {
-                                            age,
-                                            status,
-                                            reduce_motion: self.settings.reduce_motion(),
+                                        SessionRowData {
+                                            title: display_title,
+                                            trailing: SessionRowTrailing {
+                                                age: age.clone(),
+                                                status,
+                                                reduce_motion: self.settings.reduce_motion(),
+                                            },
+                                            preview: SessionPreview {
+                                                title: title.clone(),
+                                                age,
+                                                project_name: preview_project_name.clone(),
+                                            },
                                         },
                                         selected,
                                         colors,
@@ -647,6 +666,28 @@ impl DesktopApp {
                                             )
                                         })),
                                 )
+                            }))
+                            .children(has_more_sessions.then(|| {
+                                div()
+                                    .pl(px(metrics::SESSION_ROW_INDENT))
+                                    .child(
+                                        Button::new(("show-more-sessions", index))
+                                            .label("Show more")
+                                            .ghost()
+                                            .w_full()
+                                            .h(px(metrics::SESSION_ROW_HEIGHT))
+                                            .px_2()
+                                            .justify_start()
+                                            .text_sm()
+                                            .text_color(colors.muted_text)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.dispatch(
+                                                    Action::ShowMoreSessions(show_more_project_path.clone()),
+                                                    window,
+                                                    cx,
+                                                )
+                                            })),
+                                    )
                             }))
                     }))
             }))
@@ -754,11 +795,18 @@ impl DesktopApp {
                     session_row(
                         ("flat-session", row_index),
                         SharedString::from(format!("flat-session-{row_index}")),
-                        format!("{title} · {project_name}"),
-                        SessionRowTrailing {
-                            age,
-                            status,
-                            reduce_motion: self.settings.reduce_motion(),
+                        SessionRowData {
+                            title: format!("{title} · {project_name}"),
+                            trailing: SessionRowTrailing {
+                                age: age.clone(),
+                                status,
+                                reduce_motion: self.settings.reduce_motion(),
+                            },
+                            preview: SessionPreview {
+                                title: title.clone(),
+                                age,
+                                project_name: project_name.clone(),
+                            },
                         },
                         selected,
                         colors,
@@ -825,16 +873,37 @@ struct SessionRowTrailing {
     reduce_motion: bool,
 }
 
+struct SessionPreview {
+    title: String,
+    age: String,
+    project_name: String,
+}
+
+struct SessionRowData {
+    title: String,
+    trailing: SessionRowTrailing,
+    preview: SessionPreview,
+}
+
 fn session_row(
     id: impl Into<gpui::ElementId>,
     group: impl Into<SharedString>,
-    title: String,
-    trailing: SessionRowTrailing,
+    data: SessionRowData,
     selected: bool,
     colors: UiPalette,
     action: Option<gpui::AnyElement>,
 ) -> gpui::Stateful<gpui::Div> {
     let group = group.into();
+    let title = normalized_sidebar_text(&data.title);
+    let title_overflows = sidebar_text_units(&title) > metrics::SIDEBAR_LABEL_UNITS;
+    let fade_base = if selected {
+        colors.selected
+    } else {
+        colors.sidebar
+    };
+    let SessionRowData {
+        trailing, preview, ..
+    } = data;
     let SessionRowTrailing {
         age,
         status,
@@ -857,11 +926,26 @@ fn session_row(
         .hover(move |element| element.bg(colors.hover))
         .child(
             div()
+                .relative()
                 .flex_1()
                 .min_w(px(0.0))
-                .truncate()
+                .h_full()
+                .flex()
+                .items_center()
+                .overflow_hidden()
+                .whitespace_nowrap()
                 .text_sm()
-                .child(sidebar_label(&title, metrics::SIDEBAR_LABEL_UNITS)),
+                .child(title)
+                .children(title_overflows.then(|| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .w(px(28.0))
+                        .h_full()
+                        .bg(title_fade(fade_base))
+                        .group_hover(group.clone(), move |fade| fade.bg(title_fade(colors.hover)))
+                })),
         )
         .child(
             div()
@@ -903,6 +987,74 @@ fn session_row(
                         .group_hover(group, |element| element.visible())
                         .child(action)
                 })),
+        )
+        .tooltip(move |window, cx| {
+            let SessionPreview {
+                title,
+                age,
+                project_name,
+            } = &preview;
+            let title = title.clone();
+            let age = age.clone();
+            let project_name = project_name.clone();
+            Tooltip::element(move |_, _| {
+                session_preview_card(title.clone(), age.clone(), project_name.clone(), colors)
+            })
+            .p_0()
+            .build(window, cx)
+        })
+}
+
+fn title_fade(color: gpui::Hsla) -> gpui::Background {
+    linear_gradient(
+        90.0,
+        linear_color_stop(color.opacity(0.0), 0.0),
+        linear_color_stop(color, 1.0),
+    )
+}
+
+fn session_preview_card(
+    title: String,
+    age: String,
+    project_name: String,
+    colors: UiPalette,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w(px(300.0))
+        .p_3()
+        .child(
+            div()
+                .flex()
+                .items_start()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(sidebar_label(&title, 56)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(colors.muted_text)
+                        .child(age),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .text_color(colors.muted_text)
+                .child(Icon::new(IconName::Folder).size_4())
+                .child(sidebar_label(&project_name, 32)),
         )
 }
 
@@ -1037,7 +1189,7 @@ fn session_actions_popover(
 }
 
 fn sidebar_label(value: &str, max_units: usize) -> String {
-    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let value = normalized_sidebar_text(value);
     let mut units = 0;
     let mut output = String::new();
     let mut truncated = false;
@@ -1056,9 +1208,32 @@ fn sidebar_label(value: &str, max_units: usize) -> String {
     output
 }
 
+fn normalized_sidebar_text(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sidebar_text_units(value: &str) -> usize {
+    value
+        .chars()
+        .map(|character| if character.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+fn visible_session_count(
+    configured_limit: Option<usize>,
+    search_active: bool,
+    total: usize,
+) -> usize {
+    if search_active {
+        total
+    } else {
+        configured_limit.unwrap_or(INITIAL_SESSION_LIMIT).min(total)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sidebar_label;
+    use super::{sidebar_label, sidebar_text_units, visible_session_count};
 
     #[test]
     fn sidebar_labels_are_width_aware_and_show_truncation() {
@@ -1071,5 +1246,19 @@ mod tests {
             sidebar_label("你好，这是一个很长的会话标题", 12),
             "你好，这是一…"
         );
+    }
+
+    #[test]
+    fn session_paging_starts_at_five_and_search_bypasses_the_limit() {
+        assert_eq!(visible_session_count(None, false, 24), 5);
+        assert_eq!(visible_session_count(Some(15), false, 24), 15);
+        assert_eq!(visible_session_count(Some(25), false, 24), 24);
+        assert_eq!(visible_session_count(None, true, 24), 24);
+    }
+
+    #[test]
+    fn sidebar_text_units_detect_long_mixed_width_titles() {
+        assert_eq!(sidebar_text_units("hello"), 5);
+        assert_eq!(sidebar_text_units("你好 agent"), 10);
     }
 }
