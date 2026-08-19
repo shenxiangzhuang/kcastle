@@ -7,7 +7,14 @@
 - `cargo test --workspace --locked`
 - `cargo build --workspace --release --locked`
 - `cargo test -p kcastle-agent`
+- `cargo test -p kcastle`
+- `cargo test -p kcastle-desktop`
 - `cargo check -p kcastle`
+- `cargo check -p kcastle-desktop`
+
+The workspace-wide commands cover the agent core and both user interfaces. Package-specific
+commands are focused checks: `kcastle` is the terminal UI, while `kcastle-desktop` is the desktop
+UI.
 
 ## Release workflow
 
@@ -22,16 +29,30 @@
 
 ## Architecture
 
-kcastle is a minimal Rust workspace with two packages:
+kcastle is a Rust workspace with an agent core and two user interfaces:
 
 | Package | Crate | Responsibility |
 | --- | --- | --- |
-| `kcastle-agent` | `kcastle_agent` | Agent, state, commit port, Session, compaction, Env, and tools |
-| `kcastle` | binary | Ratatui rendering, input, approvals, and dependency composition |
+| `kcastle-agent` | `kcastle_agent` library | UI-independent agent runtime, state, commit port, `Session`, compaction, `Env`, and tools |
+| `kcastle` | terminal binary | Ratatui/Crossterm rendering, terminal input, approvals, and TUI dependency composition |
+| `kcastle-desktop` | desktop binary | GPUI rendering, desktop input, approvals, session orchestration, and desktop dependency composition |
 
-The package dependency direction is `kcastle -> kcastle-agent`. The agent package must never
-import terminal infrastructure. It uses `async-openai` directly instead of maintaining a provider
-abstraction.
+The package dependency directions are `kcastle -> kcastle-agent` and
+`kcastle-desktop -> kcastle-agent`. The two UI packages do not depend on each other. The agent core
+must never import terminal or desktop infrastructure. It uses `async-openai` directly instead of
+maintaining a provider abstraction.
+
+## Keeping this file current
+
+- Treat repository manifests, source boundaries, and CI/release workflows as the source of truth
+  when they conflict with this file.
+- When an architecture or workflow change makes `AGENTS.md` stale, adapt by proposing an update to
+  `AGENTS.md`; do not silently preserve known-outdated guidance.
+- Before editing `AGENTS.md` for that reason, tell the user why the update is needed and summarize
+  the exact sections or rules that would change. Wait for explicit user approval before applying
+  the edit.
+- After approval, update the stale guidance in the same task and verify it against the relevant
+  manifests, source boundaries, and automation files.
 
 ## Core semantics
 
@@ -51,7 +72,8 @@ abstraction.
 ## Conventions
 
 - Rust edition 2024; stable toolchain.
-- Tokio, async-openai Responses API, Serde, Ratatui, Crossterm.
+- Tokio, async-openai Responses API, Serde, Ratatui/Crossterm for the TUI, and GPUI for the desktop
+  UI.
 - `cargo fmt`; Clippy with warnings denied; built-in Rust test harness.
 - For bug fixes, reproduce the failure before implementing the fix.
 - Tests protect non-trivial behavior and trust boundaries; avoid tests for trivial configuration.
