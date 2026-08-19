@@ -88,11 +88,6 @@ fn restart_block_reason(has_active_sessions: bool) -> Option<&'static str> {
 }
 
 impl DesktopApp {
-    pub(crate) fn dismiss_available_update(&mut self, cx: &mut Context<Self>) {
-        self.available_update = None;
-        cx.notify();
-    }
-
     #[cfg(not(test))]
     pub(crate) fn check_for_updates(&self, window: &mut Window, cx: &mut Context<Self>) {
         let executor = cx.background_executor().clone();

@@ -53,56 +53,15 @@ impl DesktopApp {
                 div()
                     .flex()
                     .flex_none()
-                    .flex_col()
+                    .items_center()
                     .gap_2()
                     .p_3()
-                    .children(self.available_update.as_ref().map(|update| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .w_full()
-                            .h(px(36.0))
-                            .overflow_hidden()
-                            .rounded(px(7.0))
-                            .border_1()
-                            .border_color(colors.border)
-                            .child(
-                                Button::new("update")
-                                    .icon(DesktopIconName::Download)
-                                    .label("Restart to Update")
-                                    .ghost()
-                                    .rounded(px(0.0))
-                                    .h_full()
-                                    .flex_1()
-                                    .justify_start()
-                                    .px_3()
-                                    .tooltip(format!("Restart to update to v{}", update.version))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.restart_to_update(cx)),
-                                    ),
-                            )
-                            .child(div().w(px(1.0)).h_full().bg(colors.border))
-                            .child(
-                                Button::new("dismiss-update")
-                                    .ghost()
-                                    .rounded(px(0.0))
-                                    .flex_none()
-                                    .h_full()
-                                    .w(px(36.0))
-                                    .px_0()
-                                    .tooltip("Dismiss update")
-                                    .child(Icon::new(IconName::Close).size(px(14.0)))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.dismiss_available_update(cx)
-                                    })),
-                            )
-                    }))
                     .child(
                         Button::new("settings")
                             .accessibility_id("settings")
                             .tooltip("Settings")
                             .ghost()
-                            .w_full()
+                            .flex_1()
                             .px_2()
                             .child(
                                 div()
@@ -117,7 +76,16 @@ impl DesktopApp {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_settings_dialog(window, cx)
                             })),
-                    ),
+                    )
+                    .children(self.available_update.as_ref().map(|update| {
+                        Button::new("update")
+                            .accessibility_id("update")
+                            .icon(DesktopIconName::Download)
+                            .ghost()
+                            .compact()
+                            .tooltip(format!("Restart to update to v{}", update.version))
+                            .on_click(cx.listener(|this, _, _, cx| this.restart_to_update(cx)))
+                    })),
             );
         panel.into_any_element()
     }
