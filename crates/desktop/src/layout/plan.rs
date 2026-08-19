@@ -13,6 +13,14 @@ const TRANSCRIPT_TAIL_INSET_REM: f32 = 1.5;
 const COMPACT_HEIGHT: f32 = 680.0;
 const SPACIOUS_HEIGHT: f32 = 920.0;
 
+pub(crate) fn sidebar_max_width(viewport_width: f32) -> f32 {
+    let viewport_width = finite_non_negative(viewport_width);
+    (viewport_width * 0.5)
+        .min((viewport_width - MAIN_MIN_WIDTH).max(0.0))
+        .max(SIDEBAR_EXPANDED_WIDTH)
+        .min(viewport_width)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LayoutInput {
     pub(crate) viewport_width: f32,
@@ -184,6 +192,13 @@ mod tests {
         });
         assert_eq!(wide.sidebar, SidebarMode::Expanded);
         assert_eq!(wide.trajectory, TrajectoryMode::Split);
+    }
+
+    #[test]
+    fn sidebar_max_width_caps_at_half_and_preserves_main_width() {
+        assert_eq!(sidebar_max_width(1_000.0), 280.0);
+        assert_eq!(sidebar_max_width(1_180.0), 460.0);
+        assert_eq!(sidebar_max_width(1_600.0), 800.0);
     }
 
     #[test]

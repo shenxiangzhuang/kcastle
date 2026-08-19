@@ -33,7 +33,7 @@ impl DesktopApp {
             .flex()
             .flex_col()
             .relative()
-            .w(px(metrics::SIDEBAR_WIDTH))
+            .w_full()
             .h_full()
             .flex_none()
             .bg(colors.sidebar)
