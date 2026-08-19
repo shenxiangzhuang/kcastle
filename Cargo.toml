@@ -3,7 +3,7 @@ members = ["crates/agent", "crates/desktop", "crates/tui"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0-alpha.11"
+version = "0.2.0-alpha.12"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -41,7 +41,7 @@ markdown-ratatui = { package = "codewandler-markdown-ratatui", version = "=0.2.1
 time = { version = "=0.3.55", features = ["formatting", "local-offset", "macros"] }
 velopack = "=1.2.110-ge826545"
 
-kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.11" }
+kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.12" }
 
 [profile.release]
 codegen-units = 1
