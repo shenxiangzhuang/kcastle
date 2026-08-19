@@ -43,7 +43,6 @@ fn settings_dialog_view(
     let view = cx.entity();
     let project = display_path(&app.core.workspace.cwd);
     let general_group = SettingGroup::new()
-        .title("General")
         .item(
             SettingItem::new(
                 "Allow all tools",
@@ -134,7 +133,7 @@ fn settings_dialog_view(
             )
             .description("Steer the active turn or queue a follow-up after it settles."),
         );
-    let models_group = SettingGroup::new().title("Models").item(
+    let models_group = SettingGroup::new().item(
         SettingItem::render({
             let view = view.clone();
             move |_, _, cx| {
@@ -147,20 +146,50 @@ fn settings_dialog_view(
         })
         .keywords(["API", "provider", "model", "DeepSeek", "OpenAI"]),
     );
-    let settings_page = SettingPage::new("Settings")
-        .icon(Icon::new(IconName::Settings))
-        .default_open(true)
-        .description(concat!("Kcastle v", env!("CARGO_PKG_VERSION")))
-        .resettable(false)
-        .title_suffix({
-            let view = view.clone();
-            move |_, _| settings_close_button(view.clone())
-        })
-        .groups(
-            dialog
-                .initial_page
-                .order_groups(general_group, models_group),
-        );
+    let general_page =
+        settings_page("General", IconName::Settings2, view.clone()).group(general_group);
+    let models_page = settings_page("Models", IconName::Bot, view.clone()).group(models_group);
+    let about_page = settings_page("About", IconName::Info, view.clone()).group(
+        SettingGroup::new()
+            .item(SettingItem::new(
+                "Version",
+                SettingField::render(|_, _, cx| {
+                    div()
+                        .text_sm()
+                        .text_color(palette(cx).muted_text)
+                        .child(concat!("v", env!("CARGO_PKG_VERSION")))
+                }),
+            ))
+            .item(
+                SettingItem::new(
+                    "GitHub repository",
+                    SettingField::render(|options, _, _| {
+                        Button::new("open-repository")
+                            .icon(IconName::Github)
+                            .label("Open")
+                            .outline()
+                            .with_size(options.size())
+                            .on_click(|_, _, cx| cx.open_url(env!("CARGO_PKG_REPOSITORY")))
+                    }),
+                )
+                .description("Source code, issues, and project documentation."),
+            )
+            .item(
+                SettingItem::new(
+                    "Releases",
+                    SettingField::render(|options, _, _| {
+                        Button::new("open-releases")
+                            .label("Open")
+                            .outline()
+                            .with_size(options.size())
+                            .on_click(|_, _, cx| {
+                                cx.open_url(concat!(env!("CARGO_PKG_REPOSITORY"), "/releases"))
+                            })
+                    }),
+                )
+                .description("Download installers and view release notes."),
+            ),
+    );
 
     div()
         .flex()
@@ -174,9 +203,16 @@ fn settings_dialog_view(
             Settings::new(("settings", dialog.id))
                 .sidebar_width(px(188.0))
                 .default_selected_index(dialog.initial_page.select_index())
-                .page(settings_page),
+                .pages([general_page, models_page, about_page]),
         )
         .into_any_element()
+}
+
+fn settings_page(title: &'static str, icon: IconName, view: Entity<DesktopApp>) -> SettingPage {
+    SettingPage::new(title)
+        .icon(Icon::new(icon))
+        .resettable(false)
+        .title_suffix(move |_, _| settings_close_button(view.clone()))
 }
 
 fn settings_close_button(view: Entity<DesktopApp>) -> Button {
@@ -730,15 +766,11 @@ pub(crate) struct SettingsDialog {
 impl SettingsPage {
     fn select_index(self) -> SelectIndex {
         SelectIndex {
-            page_ix: 0,
-            group_ix: Some(0),
-        }
-    }
-
-    fn order_groups(self, general: SettingGroup, models: SettingGroup) -> [SettingGroup; 2] {
-        match self {
-            Self::General => [general, models],
-            Self::Models => [models, general],
+            page_ix: match self {
+                Self::General => 0,
+                Self::Models => 1,
+            },
+            group_ix: None,
         }
     }
 }
@@ -1421,5 +1453,9 @@ mod tests {
         assert_ne!(general.id, models.id);
         assert!(matches!(general.initial_page, SettingsPage::General));
         assert!(matches!(models.initial_page, SettingsPage::Models));
+        assert_eq!(general.initial_page.select_index().page_ix, 0);
+        assert_eq!(general.initial_page.select_index().group_ix, None);
+        assert_eq!(models.initial_page.select_index().page_ix, 1);
+        assert_eq!(models.initial_page.select_index().group_ix, None);
     }
 }
