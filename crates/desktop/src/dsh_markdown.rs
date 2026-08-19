@@ -497,7 +497,7 @@ fn inline_block(
     context: &BlockContext<'_>,
     window: &Window,
 ) -> AnyElement {
-    if !nodes.iter().any(|node| matches!(node, Node::InlineMath(_))) {
+    if !contains_inline_math(nodes) {
         return div()
             .w_full()
             .min_w(px(0.0))
@@ -520,39 +520,36 @@ fn inline_block(
         .line_height(px(line_height))
         .font_weight(weight);
     let text_baseline = shaped_text_baseline(nodes, size, line_height, weight, context, window);
-    let mut text_start = 0;
-    for (index, node) in nodes.iter().enumerate() {
-        let Node::InlineMath(math) = node else {
-            continue;
-        };
-        if text_start < index {
-            body = body.child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_shrink()
-                    .child(inline_text(&nodes[text_start..index], context.colors)),
-            );
+    for piece in inline_pieces(nodes, context.colors) {
+        match piece {
+            InlinePiece::Text(output) => {
+                for element in inline_flow_text(output) {
+                    body = body.child(element);
+                }
+            }
+            InlinePiece::Math { source, style } => {
+                body = body.child(
+                    render_math(&source, Some((text_baseline, line_height)), context)
+                        .unwrap_or_else(|| inline_math_fallback(&source, style, context.colors)),
+                );
+            }
         }
-        body = body.child(
-            render_math(&math.value, Some((text_baseline, line_height)), context).unwrap_or_else(
-                || {
-                    div()
-                        .child(inline_text(std::slice::from_ref(node), context.colors))
-                        .into_any_element()
-                },
-            ),
-        );
-        text_start = index + 1;
-    }
-    if text_start < nodes.len() {
-        body = body.child(
-            div()
-                .min_w(px(0.0))
-                .flex_shrink()
-                .child(inline_text(&nodes[text_start..], context.colors)),
-        );
     }
     body.into_any_element()
+}
+
+fn contains_inline_math(nodes: &[Node]) -> bool {
+    nodes.iter().any(|node| match node {
+        Node::InlineMath(_) => true,
+        Node::Strong(strong) => contains_inline_math(&strong.children),
+        Node::Emphasis(emphasis) => contains_inline_math(&emphasis.children),
+        Node::Delete(deleted) => contains_inline_math(&deleted.children),
+        Node::Link(link) => contains_inline_math(&link.children),
+        Node::LinkReference(link) => contains_inline_math(&link.children),
+        Node::Paragraph(paragraph) => contains_inline_math(&paragraph.children),
+        Node::TableCell(cell) => contains_inline_math(&cell.children),
+        _ => false,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -705,6 +702,151 @@ fn inline_text(nodes: &[Node], colors: UiPalette) -> InlineText {
     InlineText::new(output)
 }
 
+fn inline_wrap_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut start = 0;
+    unicode_linebreak::linebreaks(text)
+        .filter_map(|(end, _)| {
+            let range = (start < end).then_some(start..end);
+            start = end;
+            range
+        })
+        .collect()
+}
+
+fn inline_flow_text(output: InlineOutput) -> Vec<AnyElement> {
+    inline_wrap_ranges(&output.text)
+        .into_iter()
+        .flat_map(|range| {
+            let explicit_break = output.text[range.clone()].ends_with('\n');
+            let mut content = range.clone();
+            if explicit_break {
+                content.end -= 1;
+                if content.start < content.end && output.text[content.clone()].ends_with('\r') {
+                    content.end -= 1;
+                }
+            }
+
+            let mut elements = Vec::with_capacity(2);
+            if content.start < content.end {
+                elements.push(
+                    div()
+                        .min_w(px(0.0))
+                        .max_w_full()
+                        .flex_initial()
+                        .whitespace_normal()
+                        .child(InlineText::new(output.slice(content)))
+                        .into_any_element(),
+                );
+            }
+            if explicit_break {
+                elements.push(div().w_full().h(px(0.0)).into_any_element());
+            }
+            elements
+        })
+        .collect()
+}
+
+enum InlinePiece {
+    Text(InlineOutput),
+    Math { source: String, style: InlineStyle },
+}
+
+fn inline_pieces(nodes: &[Node], colors: UiPalette) -> Vec<InlinePiece> {
+    let mut pieces = Vec::new();
+    append_inline_pieces(nodes, InlineStyle::default(), colors, &mut pieces);
+    pieces
+}
+
+fn append_inline_pieces(
+    nodes: &[Node],
+    style: InlineStyle,
+    colors: UiPalette,
+    pieces: &mut Vec<InlinePiece>,
+) {
+    for node in nodes {
+        match node {
+            Node::InlineMath(math) => pieces.push(InlinePiece::Math {
+                source: math.value.clone(),
+                style,
+            }),
+            Node::Strong(strong) => append_inline_pieces(
+                &strong.children,
+                InlineStyle {
+                    strong: true,
+                    ..style
+                },
+                colors,
+                pieces,
+            ),
+            Node::Emphasis(emphasis) => append_inline_pieces(
+                &emphasis.children,
+                InlineStyle {
+                    emphasis: true,
+                    ..style
+                },
+                colors,
+                pieces,
+            ),
+            Node::Delete(deleted) => append_inline_pieces(
+                &deleted.children,
+                InlineStyle {
+                    deleted: true,
+                    ..style
+                },
+                colors,
+                pieces,
+            ),
+            Node::Link(link) => append_inline_pieces(
+                &link.children,
+                InlineStyle {
+                    link: true,
+                    ..style
+                },
+                colors,
+                pieces,
+            ),
+            Node::LinkReference(link) => append_inline_pieces(
+                &link.children,
+                InlineStyle {
+                    link: true,
+                    ..style
+                },
+                colors,
+                pieces,
+            ),
+            Node::Paragraph(paragraph) => {
+                append_inline_pieces(&paragraph.children, style, colors, pieces);
+            }
+            Node::TableCell(cell) => {
+                append_inline_pieces(&cell.children, style, colors, pieces);
+            }
+            _ => {
+                if !matches!(pieces.last(), Some(InlinePiece::Text(_))) {
+                    pieces.push(InlinePiece::Text(InlineOutput::default()));
+                }
+                let Some(InlinePiece::Text(output)) = pieces.last_mut() else {
+                    unreachable!();
+                };
+                append_inlines(std::slice::from_ref(node), style, colors, output);
+            }
+        }
+    }
+}
+
+fn inline_math_fallback(source: &str, style: InlineStyle, colors: UiPalette) -> AnyElement {
+    let mut output = InlineOutput::default();
+    append_inline_text(
+        &format!("\u{a0}{source}\u{a0}"),
+        InlineStyle {
+            code: true,
+            ..style
+        },
+        colors,
+        &mut output,
+    );
+    div().child(InlineText::new(output)).into_any_element()
+}
+
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
     strong: bool,
@@ -719,6 +861,30 @@ struct InlineOutput {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     backgrounds: Vec<(Range<usize>, Hsla)>,
+}
+
+impl InlineOutput {
+    fn slice(&self, range: Range<usize>) -> Self {
+        let adjust = |candidate: &Range<usize>| {
+            let start = candidate.start.max(range.start);
+            let end = candidate.end.min(range.end);
+            (start < end).then_some((start - range.start)..(end - range.start))
+        };
+
+        Self {
+            text: self.text[range.clone()].to_owned(),
+            highlights: self
+                .highlights
+                .iter()
+                .filter_map(|(candidate, style)| adjust(candidate).map(|range| (range, *style)))
+                .collect(),
+            backgrounds: self
+                .backgrounds
+                .iter()
+                .filter_map(|(candidate, color)| adjust(candidate).map(|range| (range, *color)))
+                .collect(),
+        }
+    }
 }
 
 // GPUI highlight backgrounds occupy the entire line height, which makes code on
@@ -1034,6 +1200,15 @@ mod tests {
         }
     }
 
+    fn math_blocks(source: &str) -> Vec<Node> {
+        let mut options = ParseOptions::gfm();
+        options.constructs.math_text = true;
+        match markdown::to_mdast(source, &options).unwrap() {
+            Node::Root(root) => root.children,
+            _ => unreachable!(),
+        }
+    }
+
     fn test_palette() -> UiPalette {
         let color: Hsla = rgb(0x123456).into();
         UiPalette {
@@ -1127,7 +1302,7 @@ mod tests {
     fn inline_math_aligns_svg_and_text_baselines() {
         let line_height = 28.0;
         let text_baseline = 20.0;
-        for source in ["q_t", "K,V", r"\frac{1}{2}"] {
+        for source in ["q_t", "K,V", r"\gamma", r"\frac{1}{2}"] {
             let rendered = build_math(source, false).unwrap();
             let offset = super::inline_math_offset(&rendered, text_baseline, line_height);
             let (margin_top, margin_bottom) = super::inline_math_margins(offset);
@@ -1138,5 +1313,62 @@ mod tests {
 
             assert!((aligned_baseline - expected_baseline).abs() < f32::EPSILON);
         }
+    }
+
+    #[test]
+    fn inline_math_prose_exposes_unicode_wrap_opportunities() {
+        let text = "回顾上轮结论：decode 阶段计算强度，深度访存受限。";
+        let ranges = super::inline_wrap_ranges(text);
+        let pieces = ranges
+            .iter()
+            .map(|range| &text[range.clone()])
+            .collect::<Vec<_>>();
+
+        assert!(pieces.len() > 3);
+        assert_eq!(pieces.concat(), text);
+        assert!(pieces.contains(&"decode "));
+    }
+
+    #[test]
+    fn inline_math_nested_in_strong_text_is_rendered_as_math() {
+        let nodes = math_blocks("**一次前向生成全部 $\\gamma$ 个草稿 token**");
+        let Node::Paragraph(paragraph) = &nodes[0] else {
+            unreachable!();
+        };
+        assert!(super::contains_inline_math(&paragraph.children));
+
+        let pieces = super::inline_pieces(&paragraph.children, test_palette());
+        assert!(matches!(
+            pieces.as_slice(),
+            [
+                super::InlinePiece::Text(before),
+                super::InlinePiece::Math { source, style },
+                super::InlinePiece::Text(after),
+            ] if before.text == "一次前向生成全部 "
+                && source == r"\gamma"
+                && style.strong
+                && after.text == " 个草稿 token"
+        ));
+    }
+
+    #[test]
+    fn inline_wrap_slices_preserve_text_styles_and_code_backgrounds() {
+        let nodes = blocks("**decode phase** `token`");
+        let Node::Paragraph(paragraph) = &nodes[0] else {
+            unreachable!();
+        };
+        let mut output = super::InlineOutput::default();
+        super::append_inlines(
+            &paragraph.children,
+            super::InlineStyle::default(),
+            test_palette(),
+            &mut output,
+        );
+        let start = output.text.find("phase").unwrap();
+        let end = output.text.find("token").unwrap() + "token".len();
+        let slice = output.slice(start..end);
+
+        assert_eq!(&slice.text[slice.highlights[0].0.clone()], "phase");
+        assert_eq!(&slice.text[slice.backgrounds[0].0.clone()], "\u{a0}token");
     }
 }
