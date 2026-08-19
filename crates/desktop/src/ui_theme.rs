@@ -70,7 +70,8 @@ pub(crate) mod metrics {
     pub(crate) const SIDEBAR_LABEL_UNITS: usize = 24;
     pub(crate) const TAB_HEIGHT: f32 = 42.0;
     pub(crate) const DETAILS_HEADER_HEIGHT: f32 = 54.0;
-    pub(crate) const LEDGER_ROW_HEIGHT: f32 = 30.0;
+    pub(crate) const LEDGER_TOOLBAR_HEIGHT: f32 = 30.0;
+    pub(crate) const LEDGER_ROW_HEIGHT: f32 = 36.0;
     pub(crate) const BODY_LINE_HEIGHT: f32 = 24.0;
     pub(crate) const MESSAGE_LINE_HEIGHT: f32 = 28.0;
     pub(crate) const MARKDOWN_BLOCK_GAP: f32 = 16.0;

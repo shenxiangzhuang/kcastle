@@ -153,7 +153,7 @@ impl DesktopApp {
             .flex()
             .items_center()
             .justify_between()
-            .h(px(metrics::LEDGER_ROW_HEIGHT))
+            .h(px(metrics::LEDGER_TOOLBAR_HEIGHT))
             .px_2()
             .border_b_1()
             .border_color(colors.border_l2)
@@ -496,6 +496,7 @@ impl DesktopApp {
                 div()
                     .id(("trajectory-row", index))
                     .flex()
+                    .w_full()
                     .items_center()
                     .h(px(metrics::LEDGER_ROW_HEIGHT))
                     .px_3()
@@ -545,6 +546,7 @@ impl DesktopApp {
             LedgerRow::Summary { key, turn, text } => div()
                 .id(("trajectory-summary", *key))
                 .flex()
+                .w_full()
                 .items_center()
                 .h(px(metrics::LEDGER_ROW_HEIGHT))
                 .px_3()
@@ -971,7 +973,7 @@ fn turn_marker(
 
 fn role_chip(role: Role, colors: TrajectoryPalette) -> impl IntoElement {
     let (foreground, background) = role_colors(role, colors);
-    div().w(px(88.0)).flex_none().child(
+    div().w(px(88.0)).mr(px(12.0)).flex_none().child(
         div()
             .flex()
             .px_2()
