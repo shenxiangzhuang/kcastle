@@ -6,7 +6,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, WindowControlArea, div, linear_color_stop,
     linear_gradient, prelude::FluentBuilder, px,
 };
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::input::Input;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::spinner::Spinner;
@@ -151,11 +151,11 @@ impl DesktopApp {
     }
 
     fn sidebar_primary_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = palette(cx);
         div()
             .flex()
             .flex_col()
             .px_3()
-            .pb_2()
             .child(
                 div()
                     .flex()
@@ -186,13 +186,25 @@ impl DesktopApp {
             )
             .child(
                 Button::new("new-chat")
-                    .icon(DesktopIconName::SquarePen)
-                    .label("New Session")
-                    .ghost()
+                    .custom(
+                        ButtonCustomVariant::new(cx)
+                            .foreground(colors.text)
+                            .hover(colors.hover)
+                            .active(colors.hover),
+                    )
                     .w_full()
-                    .h(px(40.0))
-                    .justify_start()
                     .px_2()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_start()
+                            .w_full()
+                            .gap_1()
+                            .text_sm()
+                            .child(Icon::new(DesktopIconName::SquarePen).size_4())
+                            .child("New session"),
+                    )
                     .on_click(cx.listener(|this, _, window, cx| this.new_chat(window, cx))),
             )
     }
@@ -204,7 +216,7 @@ impl DesktopApp {
                 .flex()
                 .items_center()
                 .justify_between()
-                .h(px(44.0))
+                .h(px(32.0))
                 .w_full()
                 .px_1()
                 .text_sm()
