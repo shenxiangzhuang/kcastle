@@ -53,9 +53,9 @@ impl Render for DesktopApp {
                         |bounds, this: &mut DesktopApp, cx| {
                             this.update_main_measurement(bounds.width, cx)
                         },
-                        |this: &mut DesktopApp, cx| {
+                        |this: &mut DesktopApp, window, cx| {
                             if this.core.follow_chat_tail {
-                                this.restore_chat_tail_after_layout(cx);
+                                this.restore_chat_tail_after_layout(window, cx);
                             }
                         },
                     ))

@@ -5,9 +5,9 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::Input;
+use gpui_component::input::Textarea;
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{Disableable, Icon, IconName, Sizable};
+use gpui_component::{Disableable, Icon, IconName};
 
 use crate::app::{DesktopApp, composer_model_indices};
 use crate::application::{composer_status, empty_conversation_view_model};
@@ -148,7 +148,7 @@ impl DesktopApp {
                 |bounds, this: &mut DesktopApp, cx| {
                     this.update_composer_measurement(bounds.height, cx)
                 },
-                |this: &mut DesktopApp, cx| this.restore_chat_tail_after_layout(cx),
+                |this: &mut DesktopApp, window, cx| this.restore_chat_tail_after_layout(window, cx),
             ))
             .child(
                 div()
@@ -156,10 +156,10 @@ impl DesktopApp {
                         this.handle_root_key(event, window, cx)
                     }))
                     .child(
-                        Input::new(&self.input)
+                        Textarea::new(&self.input)
                             .appearance(false)
                             .bordered(false)
-                            .large(),
+                            .text_base(),
                     ),
             )
             .children(self.composer_menu_view(cx))

@@ -3,6 +3,7 @@ name = "kcastle-desktop"
 description = "Native GPUI desktop interface for kcastle-agent"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
@@ -13,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 gpui.workspace = true
+gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 kcastle-agent.workspace = true

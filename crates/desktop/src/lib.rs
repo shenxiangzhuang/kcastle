@@ -3,10 +3,9 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, TitlebarOptions, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions, px, size,
+    App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, px, size,
 };
-use gpui_component::input::Enter;
 use gpui_component::{Root, Theme, ThemeMode};
 use kcastle_agent::{
     Agent, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID, Model, OPENAI_MODEL_PRESETS,
@@ -44,11 +43,6 @@ pub(crate) const INSTRUCTIONS: &str = "You are Kcastle, a concise coding agent. 
 
 fn init_ui(cx: &mut App) {
     gpui_component::init(cx);
-    cx.bind_keys([KeyBinding::new(
-        "shift-enter",
-        Enter { secondary: true },
-        Some("Input"),
-    )]);
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -58,7 +52,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let _runtime = runtime.enter();
     let root = home_dir()?.join(".kcastle");
     let (startup, appearance) = desktop_startup(root.clone())?;
-    let application = Application::new().with_assets(DesktopAssets);
+    let application = gpui_platform::application().with_assets(DesktopAssets);
     application.on_reopen(move |cx| {
         if cx.windows().is_empty()
             && let Err(error) = desktop_startup(root.clone())
@@ -223,19 +217,12 @@ fn home_dir() -> Result<PathBuf, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::fs;
-    use std::rc::Rc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use gpui::{
-        AppContext, Context, Entity, IntoElement, Render, Subscription, TestAppContext, Window,
-    };
-    use gpui_component::Root;
-    use gpui_component::input::{Input, InputEvent, InputState};
     use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-    use super::{desktop_startup, init_ui, models_from_profiles};
+    use super::{desktop_startup, models_from_profiles};
 
     #[test]
     fn desktop_startup_can_be_rebuilt_after_last_window_closes() {
@@ -270,57 +257,5 @@ mod tests {
                 .iter()
                 .any(|model| model.provider_id == OPENAI_PROVIDER_ID && !model.model.has_api_key())
         );
-    }
-
-    struct InputHarness {
-        input: Entity<InputState>,
-        enter_events: Vec<bool>,
-        _subscription: Subscription,
-    }
-
-    impl Render for InputHarness {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            Input::new(&self.input)
-        }
-    }
-
-    #[gpui::test]
-    fn shift_enter_inserts_a_newline_without_submitting(cx: &mut TestAppContext) {
-        cx.update(init_ui);
-        let harness = Rc::new(RefCell::new(None));
-        let test_harness = harness.clone();
-        let (_, cx) = cx.add_window_view(|window, cx| {
-            let harness = cx.new(|cx| {
-                let input = cx.new(|cx| InputState::new(window, cx).auto_grow(1, 14));
-                input.update(cx, |input, cx| input.focus(window, cx));
-                let subscription = cx.subscribe(
-                    &input,
-                    |this: &mut InputHarness, _, event: &InputEvent, _| {
-                        if let InputEvent::PressEnter { secondary } = event {
-                            this.enter_events.push(*secondary);
-                        }
-                    },
-                );
-                InputHarness {
-                    input,
-                    enter_events: Vec::new(),
-                    _subscription: subscription,
-                }
-            });
-            test_harness.replace(Some(harness.clone()));
-            Root::new(harness, window, cx)
-        });
-        cx.refresh().unwrap();
-
-        cx.simulate_input("first line");
-        cx.simulate_keystrokes("shift-enter");
-        cx.simulate_input("second line");
-
-        let harness = harness.borrow().clone().unwrap();
-        let input = cx.read_entity(&harness, |view, _| view.input.clone());
-        let value = cx.read_entity(&input, |input: &InputState, _| input.value());
-        let enter_events = cx.read_entity(&harness, |view, _| view.enter_events.clone());
-        assert_eq!(value.as_ref(), "first line\nsecond line");
-        assert_eq!(enter_events, [true]);
     }
 }

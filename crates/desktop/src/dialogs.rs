@@ -701,7 +701,7 @@ impl DesktopApp {
             path,
             title,
         });
-        self.modal_focus.focus(window);
+        self.modal_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -713,7 +713,7 @@ impl DesktopApp {
     ) {
         if self.project_store.project(index).is_some() {
             self.modal = Some(Modal::RemoveProject(index));
-            self.modal_focus.focus(window);
+            self.modal_focus.focus(window, cx);
             cx.notify();
         }
     }
@@ -725,7 +725,7 @@ impl DesktopApp {
             model_editor: None,
             saved_provider: None,
         })));
-        self.modal_focus.focus(window);
+        self.modal_focus.focus(window, cx);
         cx.notify();
     }
 

@@ -159,11 +159,10 @@ fn render_node(
             &code.value,
             context,
             path,
-            window,
             cx,
         ),
         Node::Math(math) => render_math(&math.value, None, context)
-            .unwrap_or_else(|| render_code_block("math", &math.value, context, path, window, cx)),
+            .unwrap_or_else(|| render_code_block("math", &math.value, context, path, cx)),
         Node::Table(table) => render_table(table, context, path, window, cx),
         Node::ThematicBreak(_) => div()
             .w_full()
@@ -375,7 +374,6 @@ fn render_code_block(
     code: &str,
     context: &BlockContext<'_>,
     path: &str,
-    window: &mut Window,
     cx: &mut Context<DesktopApp>,
 ) -> AnyElement {
     let clipboard_id = SharedString::from(format!(
@@ -438,7 +436,7 @@ fn render_code_block(
             .text_size(px(13.0))
             .line_height(px(22.0));
         body = body.child(
-            TextView::markdown(render_id(context, path), markdown, window, cx)
+            TextView::markdown(render_id(context, path), markdown)
                 .style(style)
                 .selectable(true),
         );

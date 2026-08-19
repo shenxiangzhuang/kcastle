@@ -29,6 +29,8 @@ Current prerelease desktop installers are unsigned and may trigger operating-sys
 
 ## Develop
 
+Source builds require Rust 1.97 or newer.
+
 ```bash
 just qa
 ```

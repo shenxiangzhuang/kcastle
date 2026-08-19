@@ -6,7 +6,7 @@ mod message_projection;
 mod session_runtime;
 
 pub(crate) use effect_runner::run_effects;
-pub(crate) use frame_clock::arm_next_frame;
+pub(crate) use frame_clock::{DeferredScrollAlignment, arm_next_frame};
 pub(crate) use layout_runtime::GpuiLayoutRuntime;
 pub(crate) use measured_container::{MeasuredBounds, measured_container};
 pub(crate) use message_projection::{MessagePresentation, MessagePresentationStore};
