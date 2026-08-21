@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashSet;
 
 use crate::domain::{AppState, Message};
@@ -88,9 +89,10 @@ pub(crate) fn composer_status(state: &AppState) -> String {
     groups.join(" | ")
 }
 
-pub(crate) fn step_count(messages: &[Message]) -> usize {
+pub(crate) fn step_count(messages: &[impl Borrow<Message>]) -> usize {
     messages
         .iter()
+        .map(Borrow::borrow)
         .map(|message| (message.turn, message.step))
         .filter(|(_, step)| *step > 0)
         .collect::<HashSet<_>>()

@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,13 @@ use crate::domain::{
 };
 use crate::layout::TrajectoryMode;
 use crate::ui_theme::{TrajectoryPalette, metrics, trajectory_palette};
+
+const TIMELINE_INPUT_TOP: f32 = 6.0;
+const TIMELINE_MODEL_TOP: f32 = 20.0;
+const TIMELINE_TOOLS_TOP: f32 = 34.0;
+const TIMELINE_BAR_OFFSET: f32 = 1.0;
+const TIMELINE_BAR_HEIGHT: f32 = 8.0;
+const TIMELINE_CLICK_SLOP: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug)]
 struct TimelineCell {
@@ -66,11 +74,11 @@ pub(crate) struct TimelineModelCache {
 }
 
 impl TimelineModelCache {
-    fn new(
+    fn new<R: Borrow<TrajectoryRecord>>(
         workspace: PathBuf,
         session: PathBuf,
         revision: u64,
-        records: &[TrajectoryRecord],
+        records: &[R],
         mode: TimelineMode,
         viewport: Option<(f64, f64)>,
     ) -> Self {
@@ -298,34 +306,27 @@ impl DesktopApp {
             .border_color(colors.border_l2)
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
+                    .relative()
                     .w(px(44.0))
                     .h_full()
                     .pr_1()
                     .items_end()
-                    .gap(px(4.0))
                     .overflow_hidden()
                     .text_size(px(10.0))
                     .line_height(px(10.0))
                     .text_color(colors.label_caption)
-                    .child(timeline_lane_label("Input"))
-                    .child(timeline_lane_label("Model"))
-                    .child(timeline_lane_label("Tools")),
+                    .child(timeline_lane_label("Input", TIMELINE_INPUT_TOP))
+                    .child(timeline_lane_label("Model", TIMELINE_MODEL_TOP))
+                    .child(timeline_lane_label("Tools", TIMELINE_TOOLS_TOP)),
             )
             .child(
                 div()
                     .id("trajectory-timeline")
                     .relative()
-                    .flex()
-                    .flex_col()
                     .flex_1()
                     .h_full()
-                    .justify_center()
                     .min_w(px(0.0))
                     .overflow_hidden()
-                    .gap(px(6.0))
                     .cursor_crosshair()
                     .children(
                         model.map(|model| {
@@ -496,11 +497,17 @@ impl DesktopApp {
             let record = &self.core.trajectory_data.records[cell.index];
             hovered == Some(cell.index) || selected == Some(record.id)
         });
-        div().relative().h(px(10.0)).children(
-            cells
-                .into_iter()
-                .map(|cell| self.timeline_block(cell, model.viewport, query, cx)),
-        )
+        div()
+            .absolute()
+            .top(px(timeline_lane_top(lane)))
+            .left_0()
+            .right_0()
+            .h(px(10.0))
+            .children(
+                cells
+                    .into_iter()
+                    .map(|cell| self.timeline_block(cell, model.viewport, query, cx)),
+            )
     }
 
     fn timeline_block(
@@ -529,9 +536,9 @@ impl DesktopApp {
             .id(("timeline-record-v1", record.source_seq))
             .absolute()
             .left(relative(cell.left as f32))
-            .top(px(1.0))
+            .top(px(TIMELINE_BAR_OFFSET))
             .w(relative(cell.width.max(0.002) as f32))
-            .h(px(8.0))
+            .h(px(TIMELINE_BAR_HEIGHT))
             .rounded(px(2.0))
             .bg(if hovered {
                 color
@@ -586,10 +593,6 @@ impl DesktopApp {
                     .line_height(px(16.0))
                     .build(window, cx)
             })
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.select_trajectory(cell.index, window, cx)
-            }))
             .into_any_element()
     }
 
@@ -1050,9 +1053,14 @@ impl DesktopApp {
         let Some(value) = self.timeline_value(event.position.x) else {
             return;
         };
+        let record_index = (!pan)
+            .then(|| self.timeline_record_index(event.position))
+            .flatten();
         self.timeline_drag = Some(TimelineDragState {
             pan,
             start_value: value,
+            start_x: f32::from(event.position.x),
+            record_index,
             initial_viewport: self.core.trajectory.visible_range,
         });
         if pan {
@@ -1119,6 +1127,11 @@ impl DesktopApp {
         let Some(end) = self.timeline_value(event.position.x) else {
             return;
         };
+        let moved = (f32::from(event.position.x) - drag.start_x).abs() >= TIMELINE_CLICK_SLOP;
+        if !moved && let Some(index) = drag.record_index {
+            self.select_trajectory(index, window, cx);
+            return;
+        }
         let Some((viewport, domain)) =
             self.with_timeline_model(|model| (model.viewport, model.domain))
         else {
@@ -1200,12 +1213,7 @@ impl DesktopApp {
         };
         let fraction =
             f64::from(((position.x - bounds.origin.x) / bounds.size.width).clamp(0.0, 1.0));
-        let local_y = f32::from(position.y - bounds.origin.y);
-        let record_index = self
-            .with_timeline_model(|model| {
-                timeline_record_at(model, &self.core.trajectory_data.records, fraction, local_y)
-            })
-            .flatten();
+        let record_index = self.timeline_record_index(position);
         let hover = Some(TimelineHoverState {
             fraction,
             record_index,
@@ -1215,10 +1223,25 @@ impl DesktopApp {
             cx.notify();
         }
     }
+
+    fn timeline_record_index(&self, position: Point<Pixels>) -> Option<usize> {
+        let bounds = self.timeline_bounds?;
+        let fraction =
+            f64::from(((position.x - bounds.origin.x) / bounds.size.width).clamp(0.0, 1.0));
+        let local_y = f32::from(position.y - bounds.origin.y);
+        self.with_timeline_model(|model| {
+            timeline_record_at(model, &self.core.trajectory_data.records, fraction, local_y)
+        })
+        .flatten()
+    }
 }
 
-fn timeline_lane_label(label: &'static str) -> gpui::AnyElement {
+fn timeline_lane_label(label: &'static str, top: f32) -> gpui::AnyElement {
     div()
+        .absolute()
+        .top(px(top))
+        .left_0()
+        .right_0()
         .flex()
         .flex_none()
         .items_center()
@@ -1228,6 +1251,14 @@ fn timeline_lane_label(label: &'static str) -> gpui::AnyElement {
         .overflow_hidden()
         .child(label)
         .into_any_element()
+}
+
+fn timeline_lane_top(lane: TrajectoryLane) -> f32 {
+    match lane {
+        TrajectoryLane::Input => TIMELINE_INPUT_TOP,
+        TrajectoryLane::Model => TIMELINE_MODEL_TOP,
+        TrajectoryLane::Tools => TIMELINE_TOOLS_TOP,
+    }
 }
 
 fn timeline_lane_at(local_y: f32) -> Option<TrajectoryLane> {
@@ -1241,14 +1272,14 @@ fn timeline_lane_at(local_y: f32) -> Option<TrajectoryLane> {
 
 fn timeline_record_at(
     model: &TimelineModel,
-    records: &[TrajectoryRecord],
+    records: &[impl Borrow<TrajectoryRecord>],
     fraction: f64,
     local_y: f32,
 ) -> Option<usize> {
     let lane = timeline_lane_at(local_y)?;
     model.cells.iter().rev().find_map(|cell| {
         let right = (cell.left + cell.width.max(0.002)).min(1.0);
-        (records[cell.index].lane == lane && fraction >= cell.left && fraction <= right)
+        (records[cell.index].borrow().lane == lane && fraction >= cell.left && fraction <= right)
             .then_some(cell.index)
     })
 }
@@ -1285,15 +1316,18 @@ fn focus_scroll_target(positions: &[usize]) -> Option<(usize, ScrollStrategy)> {
 }
 
 #[cfg(test)]
-fn timeline_model(
-    records: &[TrajectoryRecord],
+fn timeline_model<R: Borrow<TrajectoryRecord>>(
+    records: &[R],
     mode: TimelineMode,
     viewport: Option<(f64, f64)>,
 ) -> Option<TimelineModel> {
     timeline_geometry(records, mode).map(|geometry| project_timeline(&geometry, viewport))
 }
 
-fn timeline_geometry(records: &[TrajectoryRecord], mode: TimelineMode) -> Option<TimelineGeometry> {
+fn timeline_geometry<R: Borrow<TrajectoryRecord>>(
+    records: &[R],
+    mode: TimelineMode,
+) -> Option<TimelineGeometry> {
     if records.is_empty() {
         return None;
     }
@@ -1301,6 +1335,7 @@ fn timeline_geometry(records: &[TrajectoryRecord], mode: TimelineMode) -> Option
         .iter()
         .enumerate()
         .map(|(index, record)| {
+            let record = record.borrow();
             let start = record
                 .timing
                 .started
@@ -1379,7 +1414,7 @@ fn timeline_geometry(records: &[TrajectoryRecord], mode: TimelineMode) -> Option
     };
     let mut cells = Vec::new();
     for (index, start, end) in coordinates {
-        let record = &records[index];
+        let record = records[index].borrow();
         let inner_segment = match record.kind {
             TrajectoryKind::Tool => record
                 .timing
@@ -1773,13 +1808,19 @@ fn timing_duration(record: &TrajectoryRecord) -> String {
         return "Not recorded".into();
     }
     if record.timing.completed.is_none() {
-        return "Pending".into();
+        return if record.status == TrajectoryStatus::Running {
+            "Pending".into()
+        } else {
+            "Not recorded".into()
+        };
     }
     format_duration(record.timing.duration_ns())
 }
 
 fn assistant_ttft(record: &TrajectoryRecord) -> String {
-    if record.timing.started.is_none() {
+    if record.timing.completed.is_none() && record.status != TrajectoryStatus::Running {
+        "Not recorded".into()
+    } else if record.timing.started.is_none() {
         "Step start unavailable".into()
     } else if record.timing.first_token.is_none() {
         "First token unavailable".into()
@@ -1790,7 +1831,11 @@ fn assistant_ttft(record: &TrajectoryRecord) -> String {
 
 fn assistant_generation(record: &TrajectoryRecord) -> String {
     if record.timing.completed.is_none() {
-        "Pending".into()
+        if record.status == TrajectoryStatus::Running {
+            "Pending".into()
+        } else {
+            "Not recorded".into()
+        }
     } else if record.timing.first_token.is_none() {
         "First token unavailable".into()
     } else {
@@ -1799,6 +1844,9 @@ fn assistant_generation(record: &TrajectoryRecord) -> String {
 }
 
 fn assistant_throughput(record: &TrajectoryRecord) -> String {
+    if record.timing.completed.is_none() && record.status != TrajectoryStatus::Running {
+        return "Not recorded".into();
+    }
     let Some(usage) = record.usage else {
         return "Usage unavailable".into();
     };
@@ -1838,9 +1886,10 @@ mod tests {
     };
 
     use super::{
-        BusyTimeline, ScrollStrategy, TimelineCell, TimelineModelCache, cell_intersects_range,
-        clamp_range, focus_scroll_target, nested_segment_geometry, normalized_range,
-        record_tooltip, timeline_lane_at, timeline_model, timeline_record_at,
+        BusyTimeline, ScrollStrategy, TIMELINE_BAR_HEIGHT, TIMELINE_BAR_OFFSET, TimelineCell,
+        TimelineModelCache, cell_intersects_range, clamp_range, focus_scroll_target,
+        nested_segment_geometry, normalized_range, record_tooltip, timeline_lane_at,
+        timeline_lane_top, timeline_model, timeline_record_at,
     };
 
     fn time(ms: u64) -> EventTime {
@@ -1967,6 +2016,15 @@ mod tests {
         let records = [record(1, 0, 100), record(2, 0, 100)];
         let model = timeline_model(&records, TimelineMode::Actual, None).unwrap();
 
+        for lane in [
+            TrajectoryLane::Input,
+            TrajectoryLane::Model,
+            TrajectoryLane::Tools,
+        ] {
+            let top = timeline_lane_top(lane) + TIMELINE_BAR_OFFSET;
+            assert_eq!(timeline_lane_at(top), Some(lane));
+            assert_eq!(timeline_lane_at(top + TIMELINE_BAR_HEIGHT), Some(lane));
+        }
         assert_eq!(timeline_lane_at(7.0), Some(TrajectoryLane::Input));
         assert_eq!(timeline_lane_at(20.0), None);
         assert_eq!(timeline_lane_at(35.0), Some(TrajectoryLane::Tools));

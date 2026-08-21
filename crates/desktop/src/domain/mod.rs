@@ -8,7 +8,7 @@ mod trajectory;
 pub(crate) use action::{Action, Effect, ScrollIntent};
 pub(crate) use conversation::{
     ConversationAction, ConversationState, Message, Role, UsageSnapshot, reduce_conversation,
-    reindex_messages,
+    reindex_messages, reindex_shared_messages_from,
 };
 pub(crate) use ids::{LayoutGeneration, MessageId, RunId, next_message_id};
 pub(crate) use reducer::reduce;
