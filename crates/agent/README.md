@@ -24,5 +24,5 @@ Tool calls record four independent milestones: call observed, execution dispatch
 finished, and result committed. This preserves real parallel completion order while committing
 tool results in model order. Assistant streaming records typed text, reasoning, and tool-argument
 deltas so consumers can derive lifecycle duration, TTFT, generation time, and throughput without
-using UI clocks. Assistant timing starts at the durable model-request boundary, after any automatic
-compaction, rather than at the enclosing step boundary.
+using UI clocks. Assistant duration and TTFT start at the durable step boundary, matching DSH even
+when automatic compaction happens before the provider request.
