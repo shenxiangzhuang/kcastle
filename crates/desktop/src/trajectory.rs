@@ -1,34 +1,114 @@
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
 use gpui::{
-    Context, HighlightStyle, InteractiveElement, IntoElement, ParentElement, ScrollStrategy,
-    SharedString, StatefulInteractiveElement, Styled, StyledText, Window, div,
-    prelude::FluentBuilder, px, relative, rgba, uniform_list,
+    Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, ScrollStrategy, ScrollWheelEvent,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Input;
 use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Disableable, IconName, Sizable};
+use gpui_component::{ElementExt, IconName, Sizable};
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
 
-use crate::app::DesktopApp;
-use crate::domain::{Action, DetailsTab, Message, Role};
+use crate::app::{DesktopApp, TimelineDragState, TimelineHoverState};
+use crate::domain::{
+    Action, DetailsTab, TimelineMode, TrajectoryKind, TrajectoryLane, TrajectoryRecord,
+    TrajectoryStatus,
+};
 use crate::layout::TrajectoryMode;
 use crate::ui_theme::{TrajectoryPalette, metrics, trajectory_palette};
 
+#[derive(Clone, Copy, Debug)]
+struct TimelineCell {
+    index: usize,
+    start: f64,
+    end: f64,
+    left: f64,
+    width: f64,
+    execution_left: Option<f64>,
+    execution_width: Option<f64>,
+}
+
 #[derive(Clone, Debug)]
-enum LedgerRow {
-    Message {
-        index: usize,
-        turn: usize,
-        step: usize,
-    },
-    Summary {
-        key: usize,
-        turn: usize,
-        text: String,
-    },
+struct TimelineModel {
+    domain: (f64, f64),
+    viewport: (f64, f64),
+    cells: Vec<TimelineCell>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TimelineGeometryCell {
+    index: usize,
+    start: f64,
+    end: f64,
+    execution: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Debug)]
+struct TimelineGeometry {
+    domain: (f64, f64),
+    cells: Vec<TimelineGeometryCell>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TimelineModelCache {
+    workspace: PathBuf,
+    session: PathBuf,
+    revision: u64,
+    mode: TimelineMode,
+    viewport: Option<(f64, f64)>,
+    geometry: Option<TimelineGeometry>,
+    model: Option<TimelineModel>,
+}
+
+impl TimelineModelCache {
+    fn new(
+        workspace: PathBuf,
+        session: PathBuf,
+        revision: u64,
+        records: &[TrajectoryRecord],
+        mode: TimelineMode,
+        viewport: Option<(f64, f64)>,
+    ) -> Self {
+        let geometry = timeline_geometry(records, mode);
+        let model = geometry
+            .as_ref()
+            .map(|geometry| project_timeline(geometry, viewport));
+        Self {
+            workspace,
+            session,
+            revision,
+            mode,
+            viewport,
+            geometry,
+            model,
+        }
+    }
+
+    fn geometry_matches(
+        &self,
+        workspace: &Path,
+        session: &Path,
+        revision: u64,
+        mode: TimelineMode,
+    ) -> bool {
+        self.workspace == workspace
+            && self.session == session
+            && self.revision == revision
+            && self.mode == mode
+    }
+
+    fn set_viewport(&mut self, viewport: Option<(f64, f64)>) {
+        self.viewport = viewport;
+        self.model = self
+            .geometry
+            .as_ref()
+            .map(|geometry| project_timeline(geometry, viewport));
+    }
 }
 
 impl DesktopApp {
@@ -39,15 +119,16 @@ impl DesktopApp {
             .value()
             .trim()
             .to_lowercase();
-        let rows = self.ledger_rows(&query);
+        let rows = self.trajectory_rows(&query);
         let selected = self.core.details.selected.and_then(|selected| {
             self.core
-                .conversation
-                .messages
+                .trajectory_data
+                .records
                 .iter()
-                .position(|message| message.key == selected)
+                .position(|record| record.id == selected)
         });
         let narrow_details = self.core.layout.trajectory == TrajectoryMode::Overlay;
+
         div()
             .flex()
             .flex_col()
@@ -64,87 +145,58 @@ impl DesktopApp {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_hidden()
-                    .child(
-                        selected
-                            .map(|index| {
-                                if narrow_details {
-                                    div()
-                                        .relative()
-                                        .size_full()
-                                        .child(self.trajectory_ledger(&rows, cx))
-                                        .child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .right_0()
-                                                .bottom_0()
-                                                .w_full()
-                                                .max_w(px(720.0))
-                                                .shadow_xl()
-                                                .child(self.details_panel(index, cx)),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    h_resizable("trajectory-panes")
-                                        .child(
-                                            resizable_panel()
-                                                .size_range(px(320.0)..px(2_000.0))
-                                                .child(self.trajectory_ledger(&rows, cx)),
-                                        )
-                                        .child(
-                                            resizable_panel()
-                                                .size(px(410.0))
-                                                .size_range(px(320.0)..px(720.0))
-                                                .child(self.details_panel(index, cx)),
-                                        )
-                                        .into_any_element()
-                                }
-                            })
-                            .unwrap_or_else(|| {
-                                self.trajectory_ledger(&rows, cx).into_any_element()
-                            }),
-                    ),
+                    .child(match selected {
+                        Some(index) if narrow_details => div()
+                            .relative()
+                            .size_full()
+                            .child(self.trajectory_ledger(&rows, cx))
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w_full()
+                                    .max_w(px(720.0))
+                                    .shadow_xl()
+                                    .child(self.trajectory_details(index, cx)),
+                            )
+                            .into_any_element(),
+                        Some(index) => h_resizable("trajectory-v1-panes")
+                            .child(
+                                resizable_panel()
+                                    .size_range(px(320.0)..px(2_000.0))
+                                    .child(self.trajectory_ledger(&rows, cx)),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .size(px(410.0))
+                                    .size_range(px(320.0)..px(720.0))
+                                    .child(self.trajectory_details(index, cx)),
+                            )
+                            .into_any_element(),
+                        None => self.trajectory_ledger(&rows, cx).into_any_element(),
+                    }),
             )
-    }
-
-    fn trajectory_ledger(&self, rows: &[LedgerRow], cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = rows.to_vec();
-        uniform_list(
-            "trajectory-ledger",
-            rows.len(),
-            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-                range
-                    .filter_map(|index| rows.get(index))
-                    .map(|row| this.ledger_row(row, cx))
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .size_full()
-        .track_scroll(&self.trajectory_scroll)
     }
 
     fn trajectory_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = trajectory_palette(cx);
+        let actual_duration = self.core.trajectory.mode != TimelineMode::Sequence;
         let query = self
             .trajectory_search
             .read(cx)
             .value()
             .trim()
             .to_lowercase();
-        let match_count = (!query.is_empty()).then(|| {
+        let matches = (!query.is_empty()).then(|| {
             self.core
-                .conversation
-                .messages
+                .trajectory_data
+                .records
                 .iter()
-                .filter(|message| message_matches(message, &query))
+                .filter(|record| record.matches(&query))
                 .count()
         });
-        let has_timing = self
-            .core
-            .conversation
-            .messages
-            .iter()
-            .any(|message| message.duration_ms.is_some());
         div()
             .flex()
             .items_center()
@@ -157,60 +209,51 @@ impl DesktopApp {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap(px(2.0))
                     .child(
-                        Button::new("trajectory-duration")
-                            .icon(IconName::Calendar)
-                            .label("Duration")
-                            .ghost()
+                        Button::new("toggle-trajectory-duration")
+                            .label("◷  Duration")
                             .compact()
-                            .text_color(colors.label_tertiary)
-                            .disabled(!has_timing)
-                            .tooltip(if has_timing {
-                                "Switch equal-width and recorded-duration blocks"
+                            .ghost()
+                            .text_color(if actual_duration {
+                                colors.label_primary
                             } else {
-                                "Recorded timing is unavailable in this JSONL session"
+                                colors.label_tertiary
                             })
+                            .when(actual_duration, |button| button.bg(colors.hover))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch(Action::ToggleTrajectoryDuration, window, cx);
+                                let mode = if this.core.trajectory.mode == TimelineMode::Sequence {
+                                    TimelineMode::Duration
+                                } else {
+                                    TimelineMode::Sequence
+                                };
+                                this.dispatch(Action::SetTimelineMode(mode), window, cx);
                             })),
                     )
                     .child(
-                        Button::new("trajectory-turns")
-                            .icon(if self.core.trajectory.collapsed_turns {
-                                IconName::Plus
+                        Button::new("toggle-trajectory-turns")
+                            .label(if self.core.trajectory.collapsed_turns {
+                                "⊞  Turns"
                             } else {
-                                IconName::Minus
+                                "⊟  Turns"
                             })
-                            .label("Turns")
-                            .ghost()
                             .compact()
+                            .ghost()
                             .text_color(colors.label_tertiary)
-                            .tooltip(if self.core.trajectory.collapsed_turns {
-                                "Expand turns"
-                            } else {
-                                "Collapse turns"
-                            })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dispatch(Action::ToggleTrajectoryTurns, window, cx);
                             })),
                     )
                     .child(
-                        Button::new("trajectory-calls")
-                            .icon(if self.core.trajectory.collapsed_calls {
-                                IconName::Plus
+                        Button::new("toggle-trajectory-calls")
+                            .label(if self.core.trajectory.collapsed_calls {
+                                "⊞  Calls"
                             } else {
-                                IconName::Minus
+                                "⊟  Calls"
                             })
-                            .label("Calls")
-                            .ghost()
                             .compact()
+                            .ghost()
                             .text_color(colors.label_tertiary)
-                            .tooltip(if self.core.trajectory.collapsed_calls {
-                                "Expand calls"
-                            } else {
-                                "Collapse calls"
-                            })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dispatch(Action::ToggleTrajectoryCalls, window, cx);
                             })),
@@ -221,7 +264,7 @@ impl DesktopApp {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(match_count.map(|count| {
+                    .children(matches.map(|count| {
                         div()
                             .text_xs()
                             .text_color(colors.label_tertiary)
@@ -237,9 +280,20 @@ impl DesktopApp {
 
     fn trajectory_overview(&self, query: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = trajectory_palette(cx);
+        self.ensure_timeline_model_cache();
+        let cache = self.timeline_model_cache.borrow();
+        let model = cache.as_ref().and_then(|cache| cache.model.as_ref());
+        let entity = cx.entity().clone();
+        let selection = self
+            .core
+            .trajectory
+            .selected_range
+            .and_then(|range| model.map(|model| normalized_range(range, model.viewport)));
         div()
             .flex()
             .h(px(50.0))
+            .overflow_hidden()
+            .bg(colors.code_background)
             .border_b_1()
             .border_color(colors.border_l2)
             .child(
@@ -248,350 +302,458 @@ impl DesktopApp {
                     .flex_col()
                     .justify_center()
                     .w(px(44.0))
+                    .h_full()
                     .pr_1()
                     .items_end()
-                    .gap(px(3.0))
-                    .text_xs()
+                    .gap(px(4.0))
+                    .overflow_hidden()
+                    .text_size(px(10.0))
+                    .line_height(px(10.0))
                     .text_color(colors.label_caption)
-                    .child("Input")
-                    .child("Model")
-                    .child("Tools"),
+                    .child(timeline_lane_label("Input"))
+                    .child(timeline_lane_label("Model"))
+                    .child(timeline_lane_label("Tools")),
             )
             .child(
                 div()
+                    .id("trajectory-timeline")
+                    .relative()
                     .flex()
                     .flex_col()
                     .flex_1()
+                    .h_full()
                     .justify_center()
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .gap(px(6.0))
-                    .child(self.overview_lane(Role::User, query, cx))
-                    .child(self.overview_model_lane(query, cx))
-                    .child(self.overview_lane(Role::Tool, query, cx)),
+                    .cursor_crosshair()
+                    .children(
+                        model.map(|model| {
+                            self.timeline_lane(TrajectoryLane::Input, model, query, cx)
+                        }),
+                    )
+                    .children(
+                        model.map(|model| {
+                            self.timeline_lane(TrajectoryLane::Model, model, query, cx)
+                        }),
+                    )
+                    .children(
+                        model.map(|model| {
+                            self.timeline_lane(TrajectoryLane::Tools, model, query, cx)
+                        }),
+                    )
+                    .children(selection.map(|(left, _width)| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left_0()
+                            .w(relative(left.max(0.0) as f32))
+                            .bg(colors.background.opacity(0.62))
+                    }))
+                    .children(selection.map(|(left, width)| {
+                        let right = (left + width).clamp(0.0, 1.0);
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(right as f32))
+                            .w(relative((1.0 - right) as f32))
+                            .bg(colors.background.opacity(0.62))
+                    }))
+                    .children(selection.map(|(left, width)| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(left as f32))
+                            .w(relative(width.max(0.002) as f32))
+                            .bg(colors.primary.opacity(0.12))
+                            .border_l_2()
+                            .border_r_2()
+                            .border_color(colors.primary)
+                    }))
+                    .children(
+                        self.timeline_hover
+                            .filter(|hover| {
+                                hover.record_index.is_none() && self.timeline_drag.is_none()
+                            })
+                            .map(|hover| {
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .left(relative(hover.fraction.clamp(0.0, 1.0) as f32))
+                                    .w(px(2.0))
+                                    .bg(colors.primary)
+                            }),
+                    )
+                    .on_prepaint(move |bounds, _, cx| {
+                        entity.update(cx, |this, _| this.timeline_bounds = Some(bounds));
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.timeline_mouse_down(event, false, window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.timeline_mouse_down(event, true, window, cx)
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                        this.timeline_mouse_move(event, window, cx)
+                    }))
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if !*hovered && this.timeline_hover.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                            this.timeline_mouse_up(event, window, cx)
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                            this.timeline_mouse_up(event, window, cx)
+                        }),
+                    )
+                    .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                        this.timeline_wheel(event, window, cx)
+                    })),
             )
     }
 
-    fn overview_model_lane(&self, query: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let geometry = timeline_geometry(
-            &self.core.conversation.messages,
-            self.core.trajectory.show_duration,
-        );
-        div().relative().h(px(8.0)).children(
-            self.core
-                .conversation
-                .messages
-                .iter()
-                .enumerate()
-                .filter(|(_, message)| matches!(message.role, Role::Reasoning | Role::Assistant))
-                .map(|(index, message)| {
-                    self.overview_block(index, message, geometry[index], query, cx)
-                }),
-        )
+    fn ensure_timeline_model_cache(&self) {
+        let workspace = &self.core.workspace.cwd;
+        let session = &self.core.session.current;
+        let revision = self.core.trajectory_data.revision();
+        let mode = self.core.trajectory.mode;
+        let viewport = self.core.trajectory.visible_range;
+        let mut cache = self.timeline_model_cache.borrow_mut();
+        if cache
+            .as_ref()
+            .is_none_or(|cache| !cache.geometry_matches(workspace, session, revision, mode))
+        {
+            *cache = Some(TimelineModelCache::new(
+                workspace.clone(),
+                session.clone(),
+                revision,
+                &self.core.trajectory_data.records,
+                mode,
+                viewport,
+            ));
+        } else if cache
+            .as_ref()
+            .is_some_and(|cache| cache.viewport != viewport)
+        {
+            cache
+                .as_mut()
+                .expect("timeline cache was checked above")
+                .set_viewport(viewport);
+        }
     }
 
-    fn overview_lane(&self, role: Role, query: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let geometry = timeline_geometry(
-            &self.core.conversation.messages,
-            self.core.trajectory.show_duration,
-        );
-        div().relative().h(px(8.0)).children(
-            self.core
-                .conversation
-                .messages
-                .iter()
-                .enumerate()
-                .filter(move |(_, message)| message.role == role)
-                .map(|(index, message)| {
-                    self.overview_block(index, message, geometry[index], query, cx)
-                }),
-        )
+    fn with_timeline_model<T>(&self, project: impl FnOnce(&TimelineModel) -> T) -> Option<T> {
+        self.ensure_timeline_model_cache();
+        let cache = self.timeline_model_cache.borrow();
+        cache
+            .as_ref()
+            .and_then(|cache| cache.model.as_ref())
+            .map(project)
     }
 
-    fn overview_block(
+    fn with_timeline_geometry<T>(&self, project: impl FnOnce(&TimelineGeometry) -> T) -> Option<T> {
+        self.ensure_timeline_model_cache();
+        let cache = self.timeline_model_cache.borrow();
+        cache
+            .as_ref()
+            .and_then(|cache| cache.geometry.as_ref())
+            .map(project)
+    }
+
+    fn timeline_lane(
         &self,
-        index: usize,
-        message: &Message,
-        geometry: (f32, f32),
+        lane: TrajectoryLane,
+        model: &TimelineModel,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let hovered = self.timeline_hover.and_then(|hover| hover.record_index);
+        let selected = self.core.details.selected;
+        let mut cells = model
+            .cells
+            .iter()
+            .filter(|cell| self.core.trajectory_data.records[cell.index].lane == lane)
+            .copied()
+            .collect::<Vec<_>>();
+        cells.sort_by_key(|cell| {
+            let record = &self.core.trajectory_data.records[cell.index];
+            hovered == Some(cell.index) || selected == Some(record.id)
+        });
+        div().relative().h(px(10.0)).children(
+            cells
+                .into_iter()
+                .map(|cell| self.timeline_block(cell, model.viewport, query, cx)),
+        )
+    }
+
+    fn timeline_block(
+        &self,
+        cell: TimelineCell,
+        _viewport: (f64, f64),
         query: &str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
-        let selected = self.core.details.selected == Some(message.key);
-        let matched = query.is_empty() || message_matches(message, query);
-        let (position, width) = geometry;
-        let tooltip = format!("{}\n{}", role_label(message.role), timing_text(message));
-        let record_color = if message.failed {
-            colors.error
-        } else {
-            role_foreground(message.role, colors)
-        };
+        let record = &self.core.trajectory_data.records[cell.index];
+        let selected = self.core.details.selected == Some(record.id);
+        let hovered = self
+            .timeline_hover
+            .is_some_and(|hover| hover.record_index == Some(cell.index));
+        let focused = self
+            .core
+            .trajectory
+            .selected_range
+            .is_none_or(|range| cell_intersects_range(cell, range));
+        let matched = record.matches(query);
+        let color = record_color(record, colors);
+        let tooltip = record_tooltip(record);
+        let execution = nested_segment_geometry(cell);
         div()
-            .id(("timeline-record", index))
+            .id(("timeline-record-v1", record.source_seq))
             .absolute()
-            .left(relative(position))
-            .top_0()
-            .w(relative(width))
+            .left(relative(cell.left as f32))
+            .top(px(1.0))
+            .w(relative(cell.width.max(0.002) as f32))
             .h(px(8.0))
-            .rounded(px(1.5))
-            .bg(if matched {
-                record_color
+            .rounded(px(2.0))
+            .bg(if hovered {
+                color
+            } else if matched && focused {
+                color.opacity(0.28)
+            } else if focused {
+                color.opacity(0.1)
             } else {
-                record_color.opacity(0.18)
+                color.opacity(0.035)
             })
-            .when(selected, |block| {
-                block.border_1().border_color(colors.primary)
+            .border_1()
+            .border_color(if selected || hovered {
+                colors.code_background
+            } else if focused {
+                color
+            } else {
+                color.opacity(0.2)
             })
+            .children((selected || hovered).then(|| {
+                div()
+                    .absolute()
+                    .top(px(-2.0))
+                    .bottom(px(-2.0))
+                    .left(px(-2.0))
+                    .right(px(-2.0))
+                    .rounded(px(3.0))
+                    .border_1()
+                    .border_color(if selected {
+                        colors.primary
+                    } else {
+                        colors.primary.opacity(0.8)
+                    })
+            }))
+            .children(execution.map(|(left, width)| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative(left as f32))
+                    .w(relative(width as f32))
+                    .rounded(px(1.0))
+                    .bg(if focused || hovered {
+                        color
+                    } else {
+                        color.opacity(0.2)
+                    })
+            }))
             .cursor_pointer()
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .tooltip(move |window, cx| {
+                Tooltip::new(tooltip.clone())
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.select_trajectory(cell.index, window, cx)
+            }))
+            .into_any_element()
+    }
+
+    fn trajectory_rows(&self, query: &str) -> Vec<usize> {
+        let mut seen_turns = HashSet::new();
+        self.core
+            .trajectory_data
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(_, record)| record.matches(query))
+            .filter(|(_, record)| {
+                !self.core.trajectory.collapsed_calls || record.kind != TrajectoryKind::Tool
+            })
+            .filter(|(_, record)| {
+                if !self.core.trajectory.collapsed_turns {
+                    return true;
+                }
+                record.turn.is_none_or(|turn| seen_turns.insert(turn))
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn trajectory_ledger(&self, rows: &[usize], cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = rows.to_vec();
+        let focused = self.core.trajectory.selected_range.and_then(|range| {
+            self.with_timeline_geometry(|geometry| {
+                geometry
+                    .cells
+                    .iter()
+                    .filter(|cell| geometry_cell_intersects_range(**cell, range))
+                    .map(|cell| cell.index)
+                    .collect::<HashSet<_>>()
+            })
+        });
+        gpui::uniform_list(
+            "trajectory-ledger-v1",
+            rows.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .filter_map(|row| rows.get(row).copied())
+                    .map(|index| this.trajectory_row(index, focused.as_ref(), cx))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .size_full()
+        .track_scroll(&self.trajectory_scroll)
+    }
+
+    fn trajectory_row(
+        &self,
+        index: usize,
+        focused: Option<&HashSet<usize>>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = trajectory_palette(cx);
+        let record = &self.core.trajectory_data.records[index];
+        let selected = self.core.details.selected == Some(record.id);
+        let outside = focused.is_some_and(|focused| !focused.contains(&index));
+        let opacity = if outside { 0.24 } else { 1.0 };
+        let kind_color = record_color(record, colors);
+        let turn_start = record.turn.is_some()
+            && self
+                .core
+                .trajectory_data
+                .records
+                .get(index.wrapping_sub(1))
+                .and_then(|previous| previous.turn)
+                != record.turn;
+        let duration = format_duration(record.timing.duration_ns());
+        div()
+            .id(("trajectory-record-v1", record.source_seq))
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(metrics::LEDGER_ROW_HEIGHT))
+            .pl_2()
+            .pr_3()
+            .gap_2()
+            .border_b_1()
+            .border_color(colors.border_l1.opacity(opacity))
+            .when(selected, |row| row.bg(colors.hover))
+            .hover(|row| row.bg(colors.hover))
+            .cursor_pointer()
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .w(px(82.0))
+                    .h_full()
+                    .pl_5()
+                    .text_xs()
+                    .text_color(colors.label_caption.opacity(opacity))
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(4.0))
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(colors
+                                .label_caption
+                                .opacity(if outside { 0.12 } else { 0.7 })),
+                    )
+                    .child(if turn_start {
+                        format!("Turn {}", record.turn.unwrap_or_default())
+                    } else {
+                        String::new()
+                    }),
+            )
+            .child(
+                div().flex().w(px(104.0)).child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(6.0))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(kind_color.opacity(opacity))
+                        .bg(kind_color.opacity(if outside { 0.035 } else { 0.1 }))
+                        .child(kind_label(record.kind).to_uppercase()),
+                ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_sm()
+                    .text_color(colors.label_primary.opacity(opacity))
+                    .child(row_summary(record)),
+            )
+            .child(
+                div()
+                    .w(px(86.0))
+                    .text_right()
+                    .text_xs()
+                    .text_color(colors.label_tertiary.opacity(opacity))
+                    .child(duration),
+            )
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select_trajectory(index, window, cx)),
             )
             .into_any_element()
     }
 
-    fn ledger_rows(&self, query: &str) -> Vec<LedgerRow> {
-        if self.core.trajectory.collapsed_turns {
-            return self.collapsed_turn_rows(query);
-        }
-        if self.core.trajectory.collapsed_calls {
-            return self.collapsed_call_rows(query);
-        }
-        self.core
-            .conversation
-            .messages
-            .iter()
-            .enumerate()
-            .filter_map(|(index, message)| {
-                (query.is_empty() || message_matches(message, query)).then_some(
-                    LedgerRow::Message {
-                        index,
-                        turn: message.turn,
-                        step: message.step,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn collapsed_turn_rows(&self, query: &str) -> Vec<LedgerRow> {
-        let mut rows = Vec::new();
-        let mut turn = 0;
-        let mut index = 0;
-        while index < self.core.conversation.messages.len() {
-            let message = &self.core.conversation.messages[index];
-            if message.role != Role::User {
-                if turn == 0 && (query.is_empty() || message_matches(message, query)) {
-                    rows.push(LedgerRow::Message {
-                        index,
-                        turn: 0,
-                        step: 0,
-                    });
-                }
-                index += 1;
-                continue;
-            }
-            turn += 1;
-            let start = index;
-            index += 1;
-            while index < self.core.conversation.messages.len()
-                && self.core.conversation.messages[index].role != Role::User
-            {
-                index += 1;
-            }
-            let body = &self.core.conversation.messages[start + 1..index];
-            let steps = body
-                .iter()
-                .map(|message| message.step)
-                .filter(|step| *step > 0)
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            let calls = body
-                .iter()
-                .filter(|message| message.role == Role::Tool)
-                .count();
-            let matches = query.is_empty()
-                || self.core.conversation.messages[start..index]
-                    .iter()
-                    .any(|message| message_matches(message, query));
-            if matches {
-                rows.push(LedgerRow::Message {
-                    index: start,
-                    turn,
-                    step: 0,
-                });
-                rows.push(LedgerRow::Summary {
-                    key: start,
-                    turn,
-                    text: format!(
-                        "… {steps} {} · {calls} {}",
-                        plural(steps, "step", "steps"),
-                        plural(calls, "tool call", "tool calls")
-                    ),
-                });
-            }
-        }
-        rows
-    }
-
-    fn collapsed_call_rows(&self, query: &str) -> Vec<LedgerRow> {
-        let mut rows = Vec::new();
-        let mut calls = 0;
-        let mut summary_key = 0;
-        for (index, message) in self.core.conversation.messages.iter().enumerate() {
-            if calls > 0 && matches!(message.role, Role::User | Role::Reasoning | Role::Assistant) {
-                rows.push(call_summary(
-                    summary_key,
-                    self.core.conversation.messages[summary_key].turn,
-                    calls,
-                ));
-                calls = 0;
-            }
-            if message.role == Role::Tool {
-                if calls == 0 {
-                    summary_key = index;
-                }
-                calls += 1;
-            } else if query.is_empty() || message_matches(message, query) {
-                rows.push(LedgerRow::Message {
-                    index,
-                    turn: message.turn,
-                    step: message.step,
-                });
-            }
-        }
-        if calls > 0 {
-            let turn = self
-                .core
-                .conversation
-                .messages
-                .last()
-                .map(|message| message.turn)
-                .unwrap_or_default();
-            rows.push(call_summary(summary_key, turn, calls));
-        }
-        if query.is_empty() {
-            rows
+    fn trajectory_details(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let colors = trajectory_palette(cx);
+        let record = &self.core.trajectory_data.records[index];
+        let tabs = relevant_tabs(record);
+        let active = if tabs.contains(&self.core.details.tab) {
+            self.core.details.tab
         } else {
-            rows.into_iter()
-                .filter(|row| match row {
-                    LedgerRow::Message { .. } => true,
-                    LedgerRow::Summary { text, .. } => text.to_lowercase().contains(query),
-                })
-                .collect()
-        }
-    }
-
-    fn ledger_row(&self, row: &LedgerRow, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let colors = trajectory_palette(cx);
-        match row {
-            LedgerRow::Message { index, turn, step } => {
-                let index = *index;
-                let message = &self.core.conversation.messages[index];
-                let selected = self.core.details.selected == Some(message.key);
-                div()
-                    .id(("trajectory-row", index))
-                    .flex()
-                    .w_full()
-                    .items_center()
-                    .h(px(metrics::LEDGER_ROW_HEIGHT))
-                    .px_3()
-                    .border_b_1()
-                    .border_color(colors.border_l1)
-                    .when(selected, |item| item.bg(colors.active))
-                    .hover(move |item| item.bg(colors.hover))
-                    .cursor_pointer()
-                    .tab_index(0)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_trajectory(index, window, cx)
-                    }))
-                    .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                this.select_trajectory(index, window, cx);
-                            }
-                        },
-                    ))
-                    .child(turn_marker(*turn, *step, message.role, colors))
-                    .child(role_chip(message.role, colors))
-                    .children(message.title.clone().map(|title| {
-                        div()
-                            .w(px(72.0))
-                            .flex_none()
-                            .truncate()
-                            .font_family("SF Mono")
-                            .text_sm()
-                            .text_color(colors.label_primary)
-                            .child(title)
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .truncate()
-                            .text_sm()
-                            .text_color(if message.failed {
-                                colors.error
-                            } else {
-                                colors.label_primary
-                            })
-                            .child(message_summary(message)),
-                    )
-                    .into_any_element()
-            }
-            LedgerRow::Summary { key, turn, text } => div()
-                .id(("trajectory-summary", *key))
-                .flex()
-                .w_full()
-                .items_center()
-                .h(px(metrics::LEDGER_ROW_HEIGHT))
-                .px_3()
-                .border_b_1()
-                .border_color(colors.border_l1)
-                .cursor_pointer()
-                .tab_index(0)
-                .hover(move |item| item.bg(colors.hover))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.dispatch(Action::ExpandTrajectoryGroups, window, cx);
-                }))
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        this.dispatch(Action::ExpandTrajectoryGroups, window, cx);
-                    }
-                }))
-                .child(turn_marker(*turn, 0, Role::Notice, colors))
-                .child(
-                    div()
-                        .pl(px(8.0))
-                        .text_sm()
-                        .text_color(colors.label_secondary)
-                        .child(text.clone()),
-                )
-                .into_any_element(),
-        }
-    }
-
-    fn details_panel(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let colors = trajectory_palette(cx);
-        let message = &self.core.conversation.messages[index];
-        let tabs = detail_tabs(message).iter().copied().fold(
-            div()
-                .flex()
-                .h(px(metrics::TAB_HEIGHT))
-                .overflow_hidden()
-                .border_b_1()
-                .border_color(colors.border_l2),
-            |tabs, tab| tabs.child(details_tab(tab, self.core.details.tab == tab, colors, cx)),
-        );
+            DetailsTab::Summary
+        };
         div()
             .flex()
             .flex_col()
-            .w_full()
-            .h_full()
-            .border_l_1()
-            .border_color(colors.border_l2)
+            .size_full()
             .bg(colors.background)
-            .text_color(colors.label_primary)
+            .border_l_1()
+            .border_color(colors.border_l1)
             .child(
                 div()
                     .flex()
@@ -599,982 +761,1258 @@ impl DesktopApp {
                     .justify_between()
                     .h(px(metrics::DETAILS_HEADER_HEIGHT))
                     .px_4()
-                    .border_b_1()
-                    .border_color(colors.border_l2)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(role_chip(message.role, colors))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(colors.label_tertiary)
-                                    .child(detail_location(message)),
-                            ),
+                        div().flex().flex_col().child(record.title.clone()).child(
+                            div()
+                                .text_xs()
+                                .text_color(colors.label_tertiary)
+                                .child(format!(
+                                    "{} · {}",
+                                    record_location(record),
+                                    status_label(record.status)
+                                )),
+                        ),
                     )
                     .child(
-                        Button::new("close-trajectory-details")
+                        Button::new("close-trajectory-v1-details")
                             .icon(IconName::Close)
                             .ghost()
                             .compact()
-                            .text_color(colors.label_secondary)
-                            .tooltip("Close details")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.dispatch(Action::SelectDetails(None), window, cx);
                             })),
                     ),
             )
-            .child(tabs)
             .child(
                 div()
-                    .id("trajectory-details-scroll")
+                    .flex()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(colors.border_l2)
+                    .children(tabs.into_iter().enumerate().map(|(index, tab)| {
+                        Button::new(("trajectory-detail-tab-v1", index))
+                            .label(tab_label(tab))
+                            .compact()
+                            .ghost()
+                            .text_color(if tab == active {
+                                colors.primary
+                            } else {
+                                colors.label_secondary
+                            })
+                            .when(tab == active, |button| button.bg(colors.hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(Action::SetDetailsTab(tab), window, cx);
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .id("trajectory-details-v1-scroll")
                     .flex()
                     .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
                     .p_4()
+                    .gap_4()
                     .track_scroll(&self.details_scroll)
                     .overflow_y_scrollbar()
-                    .child(self.details_body(index, message, cx)),
+                    .child(self.trajectory_details_body(index, active, cx)),
             )
             .into_any_element()
     }
 
-    fn details_body(
+    fn trajectory_details_body(
         &self,
         index: usize,
-        message: &Message,
+        tab: DetailsTab,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = trajectory_palette(cx);
-        match self.core.details.tab {
-            DetailsTab::Summary => match message.role {
-                Role::Tool => div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(summary_pair(
-                        "Hierarchy",
-                        hierarchy_label(message.role),
-                        colors,
-                    ))
-                    .child(summary_pair("Status", status_label(message), colors))
-                    .children(message.payload.as_deref().map(|value| {
-                        details_linked_section(
-                            ("detail-summary-payload-link", index),
-                            "Payload",
-                            details_markdown(
-                                detail_content_id("detail-summary-payload", message),
-                                pretty_json(value),
-                                Some("json"),
-                                cx,
-                            ),
-                            colors,
-                            cx.listener(|this, _, _, cx| {
-                                this.open_details_tab(DetailsTab::Payload, cx);
-                            }),
-                        )
-                    }))
-                    .child(details_linked_section(
-                        ("detail-summary-result-link", index),
-                        "Result",
-                        details_markdown(
-                            detail_content_id("detail-summary-result", message),
-                            result_text(message),
-                            result_language(message),
-                            cx,
-                        ),
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.open_details_tab(DetailsTab::Result, cx);
-                        }),
-                    ))
-                    .child(details_linked_section(
-                        ("detail-summary-schema-link", index),
-                        "Schema",
-                        details_schema(("detail-summary-schema", index), message, colors),
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.open_details_tab(DetailsTab::Schema, cx);
-                        }),
-                    ))
-                    .child(details_linked_section(
-                        ("detail-summary-timing-link", index),
-                        "Timing",
-                        details_timing(message, colors),
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.open_details_tab(DetailsTab::Timing, cx);
-                        }),
-                    ))
-                    .into_any_element(),
-                _ => div()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .child(summary_pair("Status", status_label(message), colors))
-                    .when(matches!(message.role, Role::User | Role::Notice), |body| {
-                        body.child(summary_pair(
-                            "Duration",
-                            &format_duration(message.duration_ms),
-                            colors,
-                        ))
-                    })
-                    .child(details_linked_section(
-                        ("detail-summary-preview-link", index),
-                        "Preview",
-                        details_markdown(
-                            detail_content_id("detail-summary-preview", message),
-                            message.text.clone(),
-                            None,
-                            cx,
-                        ),
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.open_details_tab(DetailsTab::Preview, cx);
-                        }),
-                    ))
-                    .into_any_element(),
-            },
-            DetailsTab::Preview => details_markdown(
-                detail_content_id("detail-preview", message),
-                message.text.clone(),
-                None,
-                cx,
-            ),
-            DetailsTab::Raw => {
-                details_plain_code(("detail-raw", index).into(), message.text.clone(), colors)
-            }
-            DetailsTab::Payload => details_markdown(
-                detail_content_id("detail-payload", message),
-                message
+        let record = &self.core.trajectory_data.records[index];
+        match tab {
+            DetailsTab::Timing => self.timing_details(record, colors, cx),
+            DetailsTab::Payload => code_panel(
+                record
                     .payload
                     .as_deref()
-                    .map(pretty_json)
-                    .unwrap_or_else(|| "This record has no tool payload.".into()),
-                message.payload.as_ref().map(|_| "json"),
-                cx,
+                    .unwrap_or("This record has no payload."),
+                colors,
             ),
-            DetailsTab::Result => details_markdown(
-                detail_content_id("detail-result", message),
-                result_text(message),
-                result_language(message),
-                cx,
-            ),
-            DetailsTab::Schema => details_schema(("detail-schema", index), message, colors),
-            DetailsTab::Timing => details_timing(message, colors),
+            DetailsTab::Raw => code_panel(&record.raw, colors),
+            DetailsTab::Result | DetailsTab::Preview => code_panel(&record.text, colors),
+            DetailsTab::Summary => div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(detail_pair("Kind", kind_label(record.kind), colors))
+                .child(detail_pair("Status", status_label(record.status), colors))
+                .child(detail_pair(
+                    "Source event",
+                    &record.source_seq.to_string(),
+                    colors,
+                ))
+                .children(
+                    record
+                        .call_id
+                        .as_deref()
+                        .map(|call_id| detail_pair("Call ID", call_id, colors)),
+                )
+                .children(record.usage.map(|usage| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(detail_pair(
+                            "Input tokens",
+                            &usage.input_tokens.to_string(),
+                            colors,
+                        ))
+                        .child(detail_pair(
+                            "Output tokens",
+                            &usage.output_tokens.to_string(),
+                            colors,
+                        ))
+                        .child(detail_pair(
+                            "Cached tokens",
+                            &usage.cached_tokens.to_string(),
+                            colors,
+                        ))
+                }))
+                .child(code_panel(&record.text, colors))
+                .into_any_element(),
         }
     }
 
+    fn timing_details(
+        &self,
+        record: &TrajectoryRecord,
+        colors: TrajectoryPalette,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let started = format_started(record, self.core.trajectory.unix_time);
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .id("toggle-timing-clock-format")
+                    .cursor_pointer()
+                    .child(detail_pair("Started", &started, colors))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.dispatch(Action::ToggleTimelineUnixTime, window, cx);
+                    })),
+            )
+            .child(detail_pair("Duration", &timing_duration(record), colors));
+        if record.kind == TrajectoryKind::Assistant {
+            body = body
+                .child(detail_pair("TTFT", &assistant_ttft(record), colors))
+                .child(detail_pair(
+                    "Generation",
+                    &assistant_generation(record),
+                    colors,
+                ))
+                .child(detail_pair(
+                    "Throughput",
+                    &assistant_throughput(record),
+                    colors,
+                ));
+        }
+        if record.kind == TrajectoryKind::Tool {
+            body = body
+                .child(detail_pair("Timing source", "Session timestamps", colors))
+                .child(section_title("Execution breakdown", colors))
+                .child(detail_pair(
+                    "Execution started",
+                    &record
+                        .timing
+                        .execution_started
+                        .as_ref()
+                        .map(|time| format_wall(time.wall_time_ms, self.core.trajectory.unix_time))
+                        .unwrap_or_else(|| execution_missing(record)),
+                    colors,
+                ))
+                .child(detail_pair(
+                    "Execution duration",
+                    &record
+                        .timing
+                        .execution_ns()
+                        .map(|ns| format_duration(Some(ns)))
+                        .unwrap_or_else(|| execution_missing(record)),
+                    colors,
+                ))
+                .child(detail_pair(
+                    "Pre-execution",
+                    &format_duration(record.timing.pre_execution_ns()),
+                    colors,
+                ))
+                .child(detail_pair(
+                    "Post/commit wait",
+                    &format_duration(record.timing.post_execution_ns()),
+                    colors,
+                ))
+                .child(detail_pair(
+                    "Execution source",
+                    "Monotonic execution timestamps",
+                    colors,
+                ));
+        }
+        if record.kind == TrajectoryKind::Compaction {
+            body = body.child(detail_pair(
+                "Timing source",
+                if record.status == TrajectoryStatus::Running {
+                    "Session timestamps (running)"
+                } else {
+                    "Session timestamps"
+                },
+                colors,
+            ));
+        }
+        body.into_any_element()
+    }
+
     fn select_trajectory(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.dispatch(
-            Action::SelectDetails(Some(self.core.conversation.messages[index].key)),
-            window,
-            cx,
-        );
-        self.dispatch_local(Action::SetDetailsTab(DetailsTab::Summary), cx);
-        self.dispatch_local(Action::ExpandTrajectoryGroups, cx);
+        let Some(record_id) = self
+            .core
+            .trajectory_data
+            .records
+            .get(index)
+            .map(|record| record.id)
+        else {
+            return;
+        };
+        self.dispatch(Action::SetTimelineSelection(None), window, cx);
+        self.dispatch(Action::SelectDetails(Some(record_id)), window, cx);
         self.details_scroll
             .set_offset(gpui::point(px(0.0), px(0.0)));
         self.scroll_trajectory_to_record(index, cx);
-        cx.notify();
     }
 
-    fn open_details_tab(&mut self, tab: DetailsTab, cx: &mut Context<Self>) {
-        self.dispatch_local(Action::SetDetailsTab(tab), cx);
-        self.details_scroll
-            .set_offset(gpui::point(px(0.0), px(0.0)));
-        cx.notify();
-    }
-
-    pub(crate) fn scroll_trajectory_to_record(&self, record_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn scroll_trajectory_to_record(&self, index: usize, cx: &mut Context<Self>) {
         let query = self
             .trajectory_search
             .read(cx)
             .value()
             .trim()
             .to_lowercase();
-        if let Some(row_index) = self.ledger_rows(&query).iter().position(
-            |row| matches!(row, LedgerRow::Message { index, .. } if *index == record_index),
-        ) {
+        let rows = self.trajectory_rows(&query);
+        if let Some(row) = rows.iter().position(|candidate| *candidate == index) {
             self.trajectory_scroll
-                .scroll_to_item(row_index, ScrollStrategy::Center);
+                .scroll_to_item(row, ScrollStrategy::Center);
+            cx.notify();
         }
     }
-}
 
-const MARKDOWN_DETAIL_TABS: [DetailsTab; 3] =
-    [DetailsTab::Summary, DetailsTab::Preview, DetailsTab::Raw];
-
-const TOOL_DETAIL_TABS: [DetailsTab; 5] = [
-    DetailsTab::Summary,
-    DetailsTab::Payload,
-    DetailsTab::Result,
-    DetailsTab::Schema,
-    DetailsTab::Timing,
-];
-
-fn detail_tabs(message: &Message) -> &'static [DetailsTab] {
-    match message.role {
-        Role::Tool => &TOOL_DETAIL_TABS,
-        Role::User | Role::Reasoning | Role::Assistant | Role::Notice => &MARKDOWN_DETAIL_TABS,
-    }
-}
-
-fn details_tab(
-    tab: DetailsTab,
-    selected: bool,
-    colors: TrajectoryPalette,
-    cx: &mut Context<DesktopApp>,
-) -> impl IntoElement {
-    let (id, label, width) = match tab {
-        DetailsTab::Summary => ("details-summary", "Summary", 76.0),
-        DetailsTab::Preview => ("details-preview", "Preview", 72.0),
-        DetailsTab::Raw => ("details-raw", "Raw", 48.0),
-        DetailsTab::Payload => ("details-payload", "Payload", 72.0),
-        DetailsTab::Result => ("details-result", "Result", 62.0),
-        DetailsTab::Schema => ("details-schema", "Schema", 70.0),
-        DetailsTab::Timing => ("details-timing", "Timing", 65.0),
-    };
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(width))
-        .h_full()
-        .border_b_2()
-        .border_color(if selected {
-            colors.primary
-        } else {
-            rgba(0x00000000).into()
-        })
-        .text_sm()
-        .text_color(if selected {
-            colors.primary
-        } else {
-            colors.label_tertiary
-        })
-        .cursor_pointer()
-        .hover(move |item| {
-            item.text_color(if selected {
-                colors.primary
-            } else {
-                colors.label_secondary
-            })
-        })
-        .tab_index(0)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.open_details_tab(tab, cx);
-        }))
-        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, _, cx| {
-            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                this.open_details_tab(tab, cx);
-            }
-        }))
-        .child(label)
-}
-
-fn call_summary(key: usize, turn: usize, calls: usize) -> LedgerRow {
-    LedgerRow::Summary {
-        key,
-        turn,
-        text: format!("… {calls} {}", plural(calls, "tool call", "tool calls")),
-    }
-}
-
-fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
-    if count == 1 { singular } else { plural }
-}
-
-fn message_matches(message: &Message, query: &str) -> bool {
-    role_search_label(message.role).contains(query) || message.search_text.contains(query)
-}
-
-fn role_search_label(role: Role) -> &'static str {
-    match role {
-        Role::User => "user input",
-        Role::Reasoning | Role::Assistant => "assistant model reasoning",
-        Role::Tool => "tool call tools",
-        Role::Notice => "context notice",
-    }
-}
-
-fn message_summary(message: &Message) -> String {
-    match message.role {
-        Role::Tool => {
-            let payload = message.payload.as_deref().unwrap_or("{}");
-            let result = if message.pending {
-                "Running…"
-            } else {
-                message
-                    .text
-                    .lines()
-                    .next()
-                    .filter(|line| !line.is_empty())
-                    .unwrap_or("(no output)")
-            };
-            format!("{payload}  →  {result}")
-        }
-        _ => message
-            .text
-            .lines()
-            .next()
-            .filter(|line| !line.is_empty())
-            .unwrap_or("(empty)")
-            .to_owned(),
-    }
-}
-
-fn turn_marker(
-    turn: usize,
-    _step: usize,
-    role: Role,
-    colors: TrajectoryPalette,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .w(px(54.0))
-        .flex_none()
-        .text_xs()
-        .text_color(if role == Role::User {
-            colors.primary
-        } else {
-            colors.label_caption
-        })
-        .child(if turn == 0 {
-            String::new()
-        } else if role == Role::User {
-            format!("Turn {turn}")
-        } else {
-            "•".into()
-        })
-}
-
-fn role_chip(role: Role, colors: TrajectoryPalette) -> impl IntoElement {
-    let (foreground, background) = role_colors(role, colors);
-    div().w(px(88.0)).mr(px(12.0)).flex_none().child(
-        div()
-            .flex()
-            .px_2()
-            .py(px(2.0))
-            .rounded_md()
-            .bg(background)
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_xs()
-            .text_color(foreground)
-            .child(role_label(role)),
-    )
-}
-
-fn role_label(role: Role) -> &'static str {
-    match role {
-        Role::User => "USER",
-        Role::Reasoning | Role::Assistant => "ASSISTANT",
-        Role::Tool => "TOOL",
-        Role::Notice => "CONTEXT",
-    }
-}
-
-fn hierarchy_label(role: Role) -> &'static str {
-    match role {
-        Role::User => "User Message",
-        Role::Reasoning => "Assistant Message › Reasoning",
-        Role::Assistant => "Assistant Message",
-        Role::Tool => "Assistant Message › Tool Call",
-        Role::Notice => "Session Context",
-    }
-}
-
-fn detail_location(message: &Message) -> String {
-    let section = if message.turn == 0 {
-        "Session".to_owned()
-    } else {
-        format!("Turn {}", message.turn)
-    };
-    let group = match message.role {
-        Role::User | Role::Notice => "Message".to_owned(),
-        Role::Reasoning | Role::Assistant | Role::Tool => {
-            format!("Step {}", message.step.max(1))
-        }
-    };
-    format!("{section} · {group}")
-}
-
-fn role_foreground(role: Role, colors: TrajectoryPalette) -> gpui::Hsla {
-    role_colors(role, colors).0
-}
-
-fn role_colors(role: Role, colors: TrajectoryPalette) -> (gpui::Hsla, gpui::Hsla) {
-    match role {
-        Role::User => (colors.user_foreground, colors.user_background),
-        Role::Reasoning | Role::Assistant => {
-            (colors.assistant_foreground, colors.assistant_background)
-        }
-        Role::Tool => (colors.tool_foreground, colors.tool_background),
-        Role::Notice => (colors.context_foreground, colors.context_background),
-    }
-}
-
-fn pretty_json(value: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(value)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| value.to_owned())
-}
-
-fn status_label(message: &Message) -> &'static str {
-    if message.pending {
-        "Running"
-    } else if message.failed {
-        "Failed"
-    } else {
-        "Completed"
-    }
-}
-
-fn format_duration(duration_ms: Option<u128>) -> String {
-    duration_ms
-        .map(|duration| format!("{duration} ms"))
-        .unwrap_or_else(|| "—".into())
-}
-
-fn format_started_at(started_at_ms: Option<u128>) -> String {
-    let Some(started_at_ms) = started_at_ms else {
-        return "Not available".into();
-    };
-    let Ok(nanoseconds) = i128::try_from(started_at_ms.saturating_mul(1_000_000)) else {
-        return "Not available".into();
-    };
-    let Ok(timestamp) = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds) else {
-        return "Not available".into();
-    };
-    let local = UtcOffset::current_local_offset()
-        .map(|offset| timestamp.to_offset(offset))
-        .unwrap_or(timestamp);
-    local
-        .format(format_description!(
-            "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
-        ))
-        .unwrap_or_else(|_| "Not available".into())
-}
-
-fn details_timing(message: &Message, colors: TrajectoryPalette) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(summary_pair(
-            "Started",
-            &format_started_at(message.started_at_ms),
-            colors,
-        ))
-        .child(summary_pair(
-            "Duration",
-            &format_duration(message.duration_ms),
-            colors,
-        ))
-        .child(summary_pair(
-            "Timing source",
-            if message.started_at_ms.is_some() {
-                "Session timestamps"
-            } else {
-                "Not available"
-            },
-            colors,
-        ))
-        .into_any_element()
-}
-
-fn result_text(message: &Message) -> String {
-    if message.pending {
-        "Tool call is still running.".into()
-    } else if message.text.is_empty() {
-        "(no output)".into()
-    } else {
-        message.text.clone()
-    }
-}
-
-fn timing_text(message: &Message) -> String {
-    match (message.started_at_ms, message.duration_ms) {
-        (Some(_), Some(duration)) => format!("{duration} ms · Live desktop events"),
-        (Some(_), None) => "Running · Live desktop events".into(),
-        _ => "Timing unavailable · Not recorded in JSONL".into(),
-    }
-}
-
-fn timeline_geometry(messages: &[Message], by_duration: bool) -> Vec<(f32, f32)> {
-    if by_duration {
-        let first = messages
-            .iter()
-            .filter_map(|message| message.started_at_ms)
-            .min();
-        let last = messages
-            .iter()
-            .filter_map(|message| {
-                message
-                    .started_at_ms
-                    .map(|started| started + message.duration_ms.unwrap_or_default())
-            })
-            .max();
-        if let (Some(first), Some(last)) = (first, last)
-            && last > first
-        {
-            let span = (last - first) as f32;
-            return messages
+    fn scroll_trajectory_range_into_view(&self, range: (f64, f64), cx: &mut Context<Self>) {
+        let Some(focused) = self.with_timeline_geometry(|geometry| {
+            geometry
+                .cells
                 .iter()
-                .enumerate()
-                .map(|(index, message)| {
-                    let start = message
-                        .started_at_ms
-                        .map(|started| ((started - first) as f32 / span * 0.95 + 0.01).min(0.96))
-                        .unwrap_or_else(|| sequence_position(index, messages.len()));
-                    let width = message
-                        .duration_ms
-                        .map(|duration| (duration as f32 / span * 0.95).clamp(0.006, 0.24))
-                        .unwrap_or(0.006)
-                        .min(0.99 - start);
-                    (start, width)
-                })
-                .collect();
+                .filter(|cell| geometry_cell_intersects_range(**cell, range))
+                .map(|cell| cell.index)
+                .collect::<HashSet<_>>()
+        }) else {
+            return;
+        };
+        if focused.is_empty() {
+            return;
+        }
+        let query = self
+            .trajectory_search
+            .read(cx)
+            .value()
+            .trim()
+            .to_lowercase();
+        let rows = self.trajectory_rows(&query);
+        let positions = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(position, index)| focused.contains(index).then_some(position))
+            .collect::<Vec<_>>();
+        let Some((target, strategy)) = focus_scroll_target(&positions) else {
+            return;
+        };
+        self.trajectory_scroll.scroll_to_item(target, strategy);
+        cx.notify();
+    }
+
+    fn timeline_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        pan: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count >= 2 {
+            self.dispatch(Action::SetTimelineSelection(None), window, cx);
+            return;
+        }
+        let Some(value) = self.timeline_value(event.position.x) else {
+            return;
+        };
+        self.timeline_drag = Some(TimelineDragState {
+            pan,
+            start_value: value,
+            initial_viewport: self.core.trajectory.visible_range,
+        });
+        if pan {
+            self.dispatch(Action::SetTimelineSelection(None), window, cx);
+        } else {
+            self.dispatch(
+                Action::SetTimelineSelection(Some((value, value))),
+                window,
+                cx,
+            );
+        }
+        cx.stop_propagation();
+    }
+
+    fn timeline_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_timeline_hover(event.position, cx);
+        let Some(drag) = self.timeline_drag else {
+            return;
+        };
+        let Some(value) = self.timeline_value(event.position.x) else {
+            return;
+        };
+        if drag.pan {
+            let Some(domain) = self.with_timeline_model(|model| model.domain) else {
+                return;
+            };
+            let initial = drag.initial_viewport.unwrap_or(domain);
+            let delta = drag.start_value - value;
+            self.dispatch(
+                Action::SetTimelineViewport(Some(clamp_range(
+                    (initial.0 + delta, initial.1 + delta),
+                    domain,
+                ))),
+                window,
+                cx,
+            );
+        } else {
+            self.dispatch(
+                Action::SetTimelineSelection(Some(ordered((drag.start_value, value)))),
+                window,
+                cx,
+            );
         }
     }
-    (0..messages.len())
-        .map(|index| (sequence_position(index, messages.len()), 0.006))
-        .collect()
-}
 
-fn sequence_position(index: usize, count: usize) -> f32 {
-    0.01 + index as f32 / count.saturating_sub(1).max(1) as f32 * 0.95
-}
+    fn timeline_mouse_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.timeline_drag.take() else {
+            return;
+        };
+        if drag.pan {
+            cx.notify();
+            return;
+        }
+        let Some(end) = self.timeline_value(event.position.x) else {
+            return;
+        };
+        let Some((viewport, domain)) =
+            self.with_timeline_model(|model| (model.viewport, model.domain))
+        else {
+            return;
+        };
+        let minimum = ((viewport.1 - viewport.0)
+            / self.core.trajectory_data.records.len().max(1) as f64)
+            .max(f64::EPSILON);
+        let mut range = ordered((drag.start_value, end));
+        if range.1 - range.0 < minimum {
+            let center = (range.0 + range.1) / 2.0;
+            range = clamp_range((center - minimum / 2.0, center + minimum / 2.0), domain);
+        }
+        self.dispatch(Action::SetTimelineSelection(Some(range)), window, cx);
+        self.scroll_trajectory_range_into_view(range, cx);
+        if event.modifiers.shift {
+            self.zoom_to_timeline_selection(window, cx);
+        }
+        cx.notify();
+    }
 
-fn summary_pair(label: &'static str, value: &str, colors: TrajectoryPalette) -> impl IntoElement {
-    div()
-        .flex()
-        .items_start()
-        .child(
-            div()
-                .w(px(112.0))
-                .flex_none()
-                .text_color(colors.label_tertiary)
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.0))
-                .text_color(colors.label_primary)
-                .child(value.to_owned()),
-        )
-}
+    fn timeline_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((viewport, domain)) =
+            self.with_timeline_model(|model| (model.viewport, model.domain))
+        else {
+            return;
+        };
+        let Some(anchor) = self.timeline_value(event.position.x) else {
+            return;
+        };
+        let delta = event.delta.pixel_delta(window.line_height()).y;
+        if delta == px(0.0) {
+            return;
+        }
+        let factor = if delta > px(0.0) { 1.25 } else { 0.8 };
+        let span = viewport.1 - viewport.0;
+        let minimum = if self.core.trajectory.mode == TimelineMode::Sequence {
+            4.0_f64.min(domain.1 - domain.0)
+        } else {
+            20.0_f64.min(domain.1 - domain.0)
+        };
+        let new_span = (span * factor).clamp(minimum.max(f64::EPSILON), domain.1 - domain.0);
+        let ratio = ((anchor - viewport.0) / span.max(f64::EPSILON)).clamp(0.0, 1.0);
+        let range = (anchor - new_span * ratio, anchor + new_span * (1.0 - ratio));
+        self.dispatch(
+            Action::SetTimelineViewport(Some(clamp_range(range, domain))),
+            window,
+            cx,
+        );
+        cx.stop_propagation();
+    }
 
-fn details_linked_section(
-    id: impl Into<gpui::ElementId>,
-    label: &'static str,
-    content: gpui::AnyElement,
-    colors: TrajectoryPalette,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .child(
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap_1()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(colors.label_secondary)
-                .cursor_pointer()
-                .hover(move |heading| heading.text_color(colors.label_primary))
-                .on_click(on_click)
-                .child(label)
-                .child("›"),
-        )
-        .child(content)
-}
+    fn zoom_to_timeline_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(range) = self.core.trajectory.selected_range.map(ordered) else {
+            return;
+        };
+        if range.1 - range.0 <= f64::EPSILON {
+            return;
+        }
+        self.dispatch(Action::SetTimelineViewport(Some(range)), window, cx);
+    }
 
-fn detail_content_id(prefix: &str, message: &Message) -> SharedString {
-    SharedString::from(format!(
-        "{prefix}-{}-{}",
-        message.key,
-        if message.pending { message.revision } else { 0 }
-    ))
-}
+    fn timeline_value(&self, x: gpui::Pixels) -> Option<f64> {
+        let bounds = self.timeline_bounds?;
+        let fraction = ((x - bounds.origin.x) / bounds.size.width).clamp(0.0, 1.0);
+        self.with_timeline_model(|model| {
+            model.viewport.0 + f64::from(fraction) * (model.viewport.1 - model.viewport.0)
+        })
+    }
 
-fn details_markdown(
-    id: impl Into<gpui::ElementId>,
-    value: String,
-    language: Option<&str>,
-    cx: &mut Context<DesktopApp>,
-) -> gpui::AnyElement {
-    let colors = trajectory_palette(cx);
-    let id = id.into();
-    match language {
-        Some("json") => details_json_code(id, value, colors),
-        Some(_) => details_plain_code(id, value, colors),
-        None => TextView::markdown(id, value)
-            .text_color(colors.label_primary)
-            .into_any_element(),
+    fn update_timeline_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(bounds) = self.timeline_bounds else {
+            return;
+        };
+        let fraction =
+            f64::from(((position.x - bounds.origin.x) / bounds.size.width).clamp(0.0, 1.0));
+        let local_y = f32::from(position.y - bounds.origin.y);
+        let record_index = self
+            .with_timeline_model(|model| {
+                timeline_record_at(model, &self.core.trajectory_data.records, fraction, local_y)
+            })
+            .flatten();
+        let hover = Some(TimelineHoverState {
+            fraction,
+            record_index,
+        });
+        if self.timeline_hover != hover {
+            self.timeline_hover = hover;
+            cx.notify();
+        }
     }
 }
 
-fn details_plain_code(
-    id: gpui::ElementId,
-    value: String,
-    colors: TrajectoryPalette,
-) -> gpui::AnyElement {
+fn timeline_lane_label(label: &'static str) -> gpui::AnyElement {
     div()
-        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_end()
+        .h(px(10.0))
         .w_full()
-        .p_2()
-        .rounded_md()
-        .bg(colors.code_background)
-        .font_family("SF Mono")
-        .text_sm()
-        .text_color(colors.label_primary)
-        .child(value)
+        .overflow_hidden()
+        .child(label)
         .into_any_element()
 }
 
-fn details_json_code(
-    id: gpui::ElementId,
-    value: String,
-    colors: TrajectoryPalette,
-) -> gpui::AnyElement {
-    let highlights = json_token_ranges(&value).into_iter().map(|(range, kind)| {
-        let color = match kind {
-            JsonTokenKind::Property => colors.json_property,
-            JsonTokenKind::String => colors.json_string,
-            JsonTokenKind::Keyword => colors.json_keyword,
-        };
-        (
-            range,
-            HighlightStyle {
-                color: Some(color),
-                ..Default::default()
-            },
-        )
-    });
-    div()
-        .id(id)
-        .w_full()
-        .p_2()
-        .rounded_md()
-        .bg(colors.code_background)
-        .font_family("SF Mono")
-        .text_sm()
-        .text_color(colors.json_punctuation)
-        .child(StyledText::new(value).with_highlights(highlights))
-        .into_any_element()
+fn timeline_lane_at(local_y: f32) -> Option<TrajectoryLane> {
+    match local_y {
+        7.0..=15.0 => Some(TrajectoryLane::Input),
+        21.0..=29.0 => Some(TrajectoryLane::Model),
+        35.0..=43.0 => Some(TrajectoryLane::Tools),
+        _ => None,
+    }
 }
 
-struct ParsedToolSchema {
-    name: String,
-    description: String,
-    parameters: serde_json::Value,
-}
-
-fn parse_tool_schema(value: &str) -> Option<ParsedToolSchema> {
-    let value = serde_json::from_str::<serde_json::Value>(value).ok()?;
-    let object = value.as_object()?;
-    Some(ParsedToolSchema {
-        name: object.get("name")?.as_str()?.to_owned(),
-        description: object
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        parameters: object.get("parameters")?.clone(),
+fn timeline_record_at(
+    model: &TimelineModel,
+    records: &[TrajectoryRecord],
+    fraction: f64,
+    local_y: f32,
+) -> Option<usize> {
+    let lane = timeline_lane_at(local_y)?;
+    model.cells.iter().rev().find_map(|cell| {
+        let right = (cell.left + cell.width.max(0.002)).min(1.0);
+        (records[cell.index].lane == lane && fraction >= cell.left && fraction <= right)
+            .then_some(cell.index)
     })
 }
 
-fn details_schema(
-    id: impl Into<gpui::ElementId>,
-    message: &Message,
-    colors: TrajectoryPalette,
-) -> gpui::AnyElement {
-    let Some(schema) = message.schema.as_deref() else {
-        return div()
-            .text_sm()
-            .text_color(colors.label_secondary)
-            .child("Schema metadata is unavailable for this record.")
-            .into_any_element();
+fn nested_segment_geometry(cell: TimelineCell) -> Option<(f64, f64)> {
+    let (left, width) = cell.execution_left.zip(cell.execution_width)?;
+    let cell_width = cell.width.max(0.000_001);
+    let local_left = ((left - cell.left) / cell_width).clamp(0.0, 1.0);
+    let available = 1.0 - local_left;
+    if available <= 0.0 {
+        return None;
+    }
+    let local_width = (width / cell_width).max(0.002).min(available);
+    (local_width > 0.0).then_some((local_left, local_width))
+}
+
+fn cell_intersects_range(cell: TimelineCell, range: (f64, f64)) -> bool {
+    let range = ordered(range);
+    cell.start <= range.1 && cell.end >= range.0
+}
+
+fn geometry_cell_intersects_range(cell: TimelineGeometryCell, range: (f64, f64)) -> bool {
+    let range = ordered(range);
+    cell.start <= range.1 && cell.end >= range.0
+}
+
+fn focus_scroll_target(positions: &[usize]) -> Option<(usize, ScrollStrategy)> {
+    let first = positions.first().copied()?;
+    Some(if positions.len() > 12 {
+        (first, ScrollStrategy::Top)
+    } else {
+        (positions[positions.len() / 2], ScrollStrategy::Center)
+    })
+}
+
+#[cfg(test)]
+fn timeline_model(
+    records: &[TrajectoryRecord],
+    mode: TimelineMode,
+    viewport: Option<(f64, f64)>,
+) -> Option<TimelineModel> {
+    timeline_geometry(records, mode).map(|geometry| project_timeline(&geometry, viewport))
+}
+
+fn timeline_geometry(records: &[TrajectoryRecord], mode: TimelineMode) -> Option<TimelineGeometry> {
+    if records.is_empty() {
+        return None;
+    }
+    let raw = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let start = record
+                .timing
+                .started
+                .as_ref()
+                .map(|time| time.wall_time_ms as f64);
+            let duration = record
+                .timing
+                .duration_ns()
+                .map(|ns| ns as f64 / 1_000_000.0);
+            let end = start
+                .zip(duration)
+                .map(|(start, duration)| start + duration)
+                .or(start);
+            (index, start, end, duration)
+        })
+        .collect::<Vec<_>>();
+    let busy_timeline = (mode == TimelineMode::Duration).then(|| {
+        BusyTimeline::new(
+            raw.iter()
+                .filter_map(|(_, start, end, duration)| {
+                    (duration.unwrap_or_default() > 0.0).then_some(((*start)?, (*end)?))
+                })
+                .collect(),
+        )
+    });
+
+    let (domain, coordinates) = match mode {
+        TimelineMode::Sequence => {
+            let coordinates = raw
+                .iter()
+                .enumerate()
+                .map(|(sequence, (index, _, _, _))| {
+                    (*index, sequence as f64, sequence as f64 + 1.0)
+                })
+                .collect::<Vec<_>>();
+            ((0.0, records.len() as f64), coordinates)
+        }
+        TimelineMode::Actual => {
+            let start = raw
+                .iter()
+                .filter_map(|(_, start, _, _)| *start)
+                .reduce(f64::min)?;
+            let mut end = raw
+                .iter()
+                .filter_map(|(_, _, end, _)| *end)
+                .reduce(f64::max)?;
+            if end <= start {
+                end = start + 1.0;
+            }
+            let coordinates = raw
+                .iter()
+                .filter_map(|(index, start, end, _)| Some((*index, (*start)?, (*end)?)))
+                .collect::<Vec<_>>();
+            ((start, end), coordinates)
+        }
+        TimelineMode::Duration => {
+            let busy = busy_timeline
+                .as_ref()
+                .expect("duration mode builds a busy timeline");
+            let domain = (0.0, busy.total().max(1.0));
+            let coordinates = raw
+                .iter()
+                .filter_map(|(index, start, end, duration)| {
+                    let start = busy.compressed_time((*start)?);
+                    let width = duration.unwrap_or_default();
+                    let end = if width > 0.0 {
+                        start + width
+                    } else {
+                        busy.compressed_time((*end)?)
+                    };
+                    Some((*index, start, end))
+                })
+                .collect::<Vec<_>>();
+            (domain, coordinates)
+        }
     };
-    let Some(schema) = parse_tool_schema(schema) else {
-        return details_json_code(id.into(), pretty_json(schema), colors);
+    let mut cells = Vec::new();
+    for (index, start, end) in coordinates {
+        let record = &records[index];
+        let inner_segment = match record.kind {
+            TrajectoryKind::Tool => record
+                .timing
+                .execution_started
+                .as_ref()
+                .zip(record.timing.execution_finished.as_ref()),
+            TrajectoryKind::Assistant => record
+                .timing
+                .first_token
+                .as_ref()
+                .zip(record.timing.completed.as_ref()),
+            _ => None,
+        };
+        let execution = inner_segment.and_then(|(start, finish)| {
+            let start = start.wall_time_ms as f64;
+            let raw_finish = start
+                + finish.duration_since(match record.kind {
+                    TrajectoryKind::Tool => record.timing.execution_started.as_ref()?,
+                    TrajectoryKind::Assistant => record.timing.first_token.as_ref()?,
+                    _ => return None,
+                })? as f64
+                    / 1_000_000.0;
+            let (start, finish) = if mode == TimelineMode::Duration {
+                let busy = busy_timeline
+                    .as_ref()
+                    .expect("duration mode builds a busy timeline");
+                (
+                    busy.compressed_time(start),
+                    busy.compressed_time(raw_finish),
+                )
+            } else if mode == TimelineMode::Sequence {
+                return None;
+            } else {
+                (start, raw_finish)
+            };
+            Some((start, finish))
+        });
+        cells.push(TimelineGeometryCell {
+            index,
+            start,
+            end,
+            execution,
+        });
+    }
+    Some(TimelineGeometry { domain, cells })
+}
+
+fn project_timeline(geometry: &TimelineGeometry, viewport: Option<(f64, f64)>) -> TimelineModel {
+    let viewport = clamp_range(viewport.unwrap_or(geometry.domain), geometry.domain);
+    let span = (viewport.1 - viewport.0).max(f64::EPSILON);
+    let cells = geometry
+        .cells
+        .iter()
+        .filter(|cell| cell.end >= viewport.0 && cell.start <= viewport.1)
+        .map(|cell| {
+            let left = ((cell.start - viewport.0) / span).clamp(0.0, 1.0);
+            let right = ((cell.end - viewport.0) / span).clamp(0.0, 1.0);
+            let execution = cell.execution.map(|(start, finish)| {
+                (
+                    ((start - viewport.0) / span).clamp(0.0, 1.0),
+                    ((finish - start) / span).max(0.002),
+                )
+            });
+            TimelineCell {
+                index: cell.index,
+                start: cell.start,
+                end: cell.end,
+                left,
+                width: (right - left).max(0.002),
+                execution_left: execution.map(|value| value.0),
+                execution_width: execution.map(|value| value.1),
+            }
+        })
+        .collect();
+    TimelineModel {
+        domain: geometry.domain,
+        viewport,
+        cells,
+    }
+}
+
+fn merge_intervals(mut intervals: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    intervals.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in intervals {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    merged
+}
+
+#[derive(Clone, Debug)]
+struct BusyTimeline {
+    intervals: Vec<(f64, f64)>,
+    elapsed_before: Vec<f64>,
+    total: f64,
+}
+
+impl BusyTimeline {
+    fn new(intervals: Vec<(f64, f64)>) -> Self {
+        let intervals = merge_intervals(intervals);
+        let mut elapsed_before = Vec::with_capacity(intervals.len());
+        let mut total = 0.0;
+        for (start, end) in &intervals {
+            elapsed_before.push(total);
+            total += end - start;
+        }
+        Self {
+            intervals,
+            elapsed_before,
+            total,
+        }
+    }
+
+    fn total(&self) -> f64 {
+        self.total
+    }
+
+    fn compressed_time(&self, time: f64) -> f64 {
+        let index = self.intervals.partition_point(|(_, end)| *end <= time);
+        let Some((start, _)) = self.intervals.get(index) else {
+            return self.total;
+        };
+        let elapsed = self.elapsed_before[index];
+        if time <= *start {
+            elapsed
+        } else {
+            elapsed + time - start
+        }
+    }
+}
+
+fn ordered(range: (f64, f64)) -> (f64, f64) {
+    (range.0.min(range.1), range.0.max(range.1))
+}
+
+fn clamp_range(range: (f64, f64), domain: (f64, f64)) -> (f64, f64) {
+    let range = ordered(range);
+    let domain = ordered(domain);
+    let span = (range.1 - range.0).min(domain.1 - domain.0);
+    let start = range.0.clamp(domain.0, domain.1 - span);
+    (start, start + span)
+}
+
+fn normalized_range(range: (f64, f64), viewport: (f64, f64)) -> (f64, f64) {
+    let range = ordered(range);
+    let span = (viewport.1 - viewport.0).max(f64::EPSILON);
+    let left = ((range.0 - viewport.0) / span).clamp(0.0, 1.0);
+    let right = ((range.1 - viewport.0) / span).clamp(0.0, 1.0);
+    (left, (right - left).max(0.002))
+}
+
+fn record_color(record: &TrajectoryRecord, colors: TrajectoryPalette) -> gpui::Hsla {
+    if matches!(
+        record.status,
+        TrajectoryStatus::Failed | TrajectoryStatus::Unknown
+    ) {
+        return colors.error;
+    }
+    match record.kind {
+        TrajectoryKind::System => colors.system_foreground,
+        TrajectoryKind::User | TrajectoryKind::Steering => colors.user_foreground,
+        TrajectoryKind::Context => colors.context_foreground,
+        TrajectoryKind::Assistant | TrajectoryKind::Compaction => colors.assistant_foreground,
+        TrajectoryKind::Tool => colors.tool_foreground,
+        TrajectoryKind::RequestFailure => colors.error,
+    }
+}
+
+fn kind_label(kind: TrajectoryKind) -> &'static str {
+    match kind {
+        TrajectoryKind::System => "System",
+        TrajectoryKind::User => "User",
+        TrajectoryKind::Context => "Context",
+        TrajectoryKind::Steering => "Steering",
+        TrajectoryKind::Assistant => "Assistant",
+        TrajectoryKind::Tool => "Tool",
+        TrajectoryKind::Compaction => "Compaction",
+        TrajectoryKind::RequestFailure => "Failure",
+    }
+}
+
+fn status_label(status: TrajectoryStatus) -> &'static str {
+    match status {
+        TrajectoryStatus::Running => "Running",
+        TrajectoryStatus::Completed => "Completed",
+        TrajectoryStatus::Failed => "Error",
+        TrajectoryStatus::Denied => "Denied",
+        TrajectoryStatus::NotExecuted => "Not executed",
+        TrajectoryStatus::Unknown => "Unknown side effects",
+    }
+}
+
+fn record_location(record: &TrajectoryRecord) -> String {
+    match (record.turn, record.step) {
+        (Some(turn), Some(step)) => format!("T{turn} · S{step}"),
+        (Some(turn), None) => format!("T{turn}"),
+        _ => "Session".into(),
+    }
+}
+
+fn row_summary(record: &TrajectoryRecord) -> String {
+    let first_line = |value: &str| value.lines().next().unwrap_or_default().trim().to_owned();
+    match record.kind {
+        TrajectoryKind::Tool => {
+            let arguments = record
+                .payload
+                .as_deref()
+                .map(first_line)
+                .unwrap_or_default();
+            let output = first_line(&record.text);
+            match (arguments.is_empty(), output.is_empty()) {
+                (false, false) => format!("{} {}  →  {}", record.title, arguments, output),
+                (false, true) => format!("{} {}", record.title, arguments),
+                (true, false) => format!("{}  →  {}", record.title, output),
+                (true, true) => record.title.clone(),
+            }
+        }
+        TrajectoryKind::Assistant if record.text.trim().is_empty() => "(tool call only)".into(),
+        _ if record.text.trim().is_empty() => record.title.clone(),
+        _ => first_line(&record.text),
+    }
+}
+
+fn record_tooltip(record: &TrajectoryRecord) -> String {
+    let mut parts = vec![kind_label(record.kind).to_uppercase()];
+    if let Some(started) = record.timing.started.as_ref() {
+        let started_at = format_clock(started.wall_time_ms);
+        parts.push(if let Some(duration) = record.timing.duration_ns() {
+            let completed_at = started
+                .wall_time_ms
+                .saturating_add((duration / 1_000_000) as i64);
+            format!("{started_at} → {}", format_clock(completed_at))
+        } else {
+            format!("Started {started_at}")
+        });
+    }
+    let mut timing = record
+        .timing
+        .duration_ns()
+        .map(|duration| format!("Total {}", format_duration(Some(duration))))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if record.kind == TrajectoryKind::Assistant
+        && let (Some(ttft), Some(decoding)) =
+            (record.timing.ttft_ns(), record.timing.generation_ns())
+    {
+        timing.push(format!(
+            "TTFT {} · Decoding {}",
+            format_duration(Some(ttft)),
+            format_duration(Some(decoding))
+        ));
+    }
+    if !timing.is_empty() {
+        parts.push(timing.join(" · "));
+    }
+    parts.join("\n")
+}
+
+fn format_clock(wall_time_ms: i64) -> String {
+    let Ok(nanoseconds) = i128::from(wall_time_ms).checked_mul(1_000_000).ok_or(()) else {
+        return "Not recorded".into();
     };
-    let parameters = serde_json::to_string_pretty(&schema.parameters)
-        .unwrap_or_else(|_| schema.parameters.to_string());
+    let Ok(timestamp) = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds) else {
+        return "Not recorded".into();
+    };
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    timestamp
+        .to_offset(offset)
+        .format(format_description!(
+            "[hour]:[minute]:[second].[subsecond digits:3]"
+        ))
+        .unwrap_or_else(|_| "Not recorded".into())
+}
+
+fn relevant_tabs(record: &TrajectoryRecord) -> Vec<DetailsTab> {
+    match record.kind {
+        TrajectoryKind::Tool => vec![
+            DetailsTab::Summary,
+            DetailsTab::Payload,
+            DetailsTab::Result,
+            DetailsTab::Raw,
+            DetailsTab::Timing,
+        ],
+        _ => vec![
+            DetailsTab::Summary,
+            DetailsTab::Preview,
+            DetailsTab::Raw,
+            DetailsTab::Timing,
+        ],
+    }
+}
+
+fn tab_label(tab: DetailsTab) -> &'static str {
+    match tab {
+        DetailsTab::Summary => "Summary",
+        DetailsTab::Preview => "Preview",
+        DetailsTab::Raw => "Raw",
+        DetailsTab::Payload => "Payload",
+        DetailsTab::Result => "Result",
+        DetailsTab::Timing => "Timing",
+    }
+}
+
+fn detail_pair(label: &str, value: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
     div()
         .flex()
-        .flex_col()
-        .gap_3()
+        .justify_between()
+        .gap_4()
+        .text_sm()
         .child(
             div()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(colors.label_primary)
-                .child(schema.name),
+                .text_color(colors.label_tertiary)
+                .child(label.to_owned()),
         )
-        .when(!schema.description.is_empty(), |body| {
-            body.child(
-                div()
-                    .text_sm()
-                    .text_color(colors.label_secondary)
-                    .child(schema.description),
-            )
-        })
-        .child(
-            div()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(colors.label_secondary)
-                .child("Parameters"),
-        )
-        .child(details_json_code(id.into(), parameters, colors))
+        .child(div().text_right().child(value.to_owned()))
         .into_any_element()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum JsonTokenKind {
-    Property,
-    String,
-    Keyword,
+fn section_title(title: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+    div()
+        .mt_3()
+        .pt_3()
+        .border_t_1()
+        .border_color(colors.border_l2)
+        .text_sm()
+        .text_color(colors.label_secondary)
+        .child(title.to_owned())
+        .into_any_element()
 }
 
-fn json_token_ranges(value: &str) -> Vec<(std::ops::Range<usize>, JsonTokenKind)> {
-    let bytes = value.as_bytes();
-    let mut ranges = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'"' => {
-                let start = index;
-                index += 1;
-                while index < bytes.len() {
-                    match bytes[index] {
-                        b'\\' => index = (index + 2).min(bytes.len()),
-                        b'"' => {
-                            index += 1;
-                            break;
-                        }
-                        _ => index += 1,
-                    }
-                }
-                let mut cursor = index;
-                while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-                    cursor += 1;
-                }
-                ranges.push((
-                    start..index,
-                    if bytes.get(cursor) == Some(&b':') {
-                        JsonTokenKind::Property
-                    } else {
-                        JsonTokenKind::String
-                    },
-                ));
-            }
-            b'-' | b'0'..=b'9' => {
-                let start = index;
-                index += 1;
-                while index < bytes.len()
-                    && matches!(bytes[index], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-                {
-                    index += 1;
-                }
-                ranges.push((start..index, JsonTokenKind::Keyword));
-            }
-            b't' if bytes[index..].starts_with(b"true") => {
-                ranges.push((index..index + 4, JsonTokenKind::Keyword));
-                index += 4;
-            }
-            b'n' if bytes[index..].starts_with(b"null") => {
-                ranges.push((index..index + 4, JsonTokenKind::Keyword));
-                index += 4;
-            }
-            b'f' if bytes[index..].starts_with(b"false") => {
-                ranges.push((index..index + 5, JsonTokenKind::Keyword));
-                index += 5;
-            }
-            _ => index += 1,
-        }
+fn code_panel(text: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+    div()
+        .p_3()
+        .rounded(px(6.0))
+        .bg(colors.code_background)
+        .text_sm()
+        .child(text.to_owned())
+        .into_any_element()
+}
+
+fn format_duration(nanoseconds: Option<u64>) -> String {
+    let Some(nanoseconds) = nanoseconds else {
+        return "Not recorded".into();
+    };
+    let milliseconds = nanoseconds as f64 / 1_000_000.0;
+    if milliseconds < 1.0 {
+        format!("{:.0} µs", nanoseconds as f64 / 1_000.0)
+    } else if milliseconds < 1_000.0 {
+        format!("{milliseconds:.1} ms")
+    } else {
+        format!("{:.2} s", milliseconds / 1_000.0)
     }
-    ranges
 }
 
-fn result_language(message: &Message) -> Option<&'static str> {
-    match message.role {
-        Role::Assistant | Role::Reasoning | Role::User | Role::Notice => None,
-        Role::Tool => {
-            let title = message
-                .title
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if title.contains("shell") || title.contains("bash") || title.contains("terminal") {
-                Some("bash")
-            } else if serde_json::from_str::<serde_json::Value>(&message.text).is_ok() {
-                Some("json")
-            } else {
-                Some("text")
-            }
-        }
+fn format_started(record: &TrajectoryRecord, unix: bool) -> String {
+    record
+        .timing
+        .started
+        .as_ref()
+        .map(|time| format_wall(time.wall_time_ms, unix))
+        .unwrap_or_else(|| "Not recorded".into())
+}
+
+fn format_wall(wall_time_ms: i64, unix: bool) -> String {
+    if unix {
+        return format!("{:.3}", wall_time_ms as f64 / 1_000.0);
+    }
+    let Ok(nanoseconds) = i128::from(wall_time_ms).checked_mul(1_000_000).ok_or(()) else {
+        return "Not recorded".into();
+    };
+    let Ok(timestamp) = OffsetDateTime::from_unix_timestamp_nanos(nanoseconds) else {
+        return "Not recorded".into();
+    };
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    timestamp
+        .to_offset(offset)
+        .format(format_description!(
+            "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3]"
+        ))
+        .unwrap_or_else(|_| "Not recorded".into())
+}
+
+fn timing_duration(record: &TrajectoryRecord) -> String {
+    if record.timing.started.is_none() {
+        return "Not recorded".into();
+    }
+    if record.timing.completed.is_none() {
+        return "Pending".into();
+    }
+    format_duration(record.timing.duration_ns())
+}
+
+fn assistant_ttft(record: &TrajectoryRecord) -> String {
+    if record.timing.started.is_none() {
+        "Step start unavailable".into()
+    } else if record.timing.first_token.is_none() {
+        "First token unavailable".into()
+    } else {
+        format_duration(record.timing.ttft_ns())
+    }
+}
+
+fn assistant_generation(record: &TrajectoryRecord) -> String {
+    if record.timing.completed.is_none() {
+        "Pending".into()
+    } else if record.timing.first_token.is_none() {
+        "First token unavailable".into()
+    } else {
+        format_duration(record.timing.generation_ns())
+    }
+}
+
+fn assistant_throughput(record: &TrajectoryRecord) -> String {
+    let Some(usage) = record.usage else {
+        return "Usage unavailable".into();
+    };
+    if usage.output_tokens == 0 {
+        return "Output tokens unavailable".into();
+    }
+    let Some(generation) = record.timing.generation_ns() else {
+        return "First token unavailable".into();
+    };
+    if generation == 0 {
+        return "Duration too short".into();
+    }
+    format!(
+        "{:.1} tok/s",
+        usage.output_tokens as f64 / (generation as f64 / 1_000_000_000.0)
+    )
+}
+
+fn execution_missing(record: &TrajectoryRecord) -> String {
+    match record.status {
+        TrajectoryStatus::Denied | TrajectoryStatus::NotExecuted => "Not executed".into(),
+        TrajectoryStatus::Unknown => "Unknown".into(),
+        _ => "Not recorded".into(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::path::PathBuf;
 
-    fn record(role: Role, text: &str) -> Message {
-        Message {
-            key: crate::domain::next_message_id(),
-            revision: 0,
-            role,
-            tool_call_id: None,
-            title: None,
-            text: text.into(),
+    use kcastle_agent::EventTime;
+    use proptest::prelude::*;
+
+    use crate::domain::{
+        MessageId, RecordTiming, TimelineMode, TrajectoryKind, TrajectoryLane, TrajectoryRecord,
+        TrajectoryStatus,
+    };
+
+    use super::{
+        BusyTimeline, ScrollStrategy, TimelineCell, TimelineModelCache, cell_intersects_range,
+        clamp_range, focus_scroll_target, nested_segment_geometry, normalized_range,
+        record_tooltip, timeline_lane_at, timeline_model, timeline_record_at,
+    };
+
+    fn time(ms: u64) -> EventTime {
+        EventTime {
+            wall_time_ms: 1_000 + ms as i64,
+            clock_id: "timeline-test".into(),
+            monotonic_ns: ms * 1_000_000,
+        }
+    }
+
+    fn record(id: u64, start: u64, end: u64) -> TrajectoryRecord {
+        let timing = RecordTiming {
+            started: Some(time(start)),
+            execution_started: Some(time(start + 20)),
+            execution_finished: Some(time(end - 20)),
+            completed: Some(time(end)),
+            ..RecordTiming::default()
+        };
+        TrajectoryRecord {
+            id: MessageId(id),
+            source_seq: id,
+            kind: TrajectoryKind::Tool,
+            lane: TrajectoryLane::Tools,
+            title: "tool".into(),
+            text: String::new(),
             payload: None,
-            schema: None,
-            pending: false,
-            failed: false,
-            expanded: false,
-            rating: None,
-            started_at_ms: None,
-            duration_ms: None,
-            turn: 0,
-            step: 0,
-            request_id: None,
-            search_text: text.to_lowercase(),
+            raw: String::new(),
+            turn: Some(1),
+            step: Some(1),
+            call_id: Some(format!("call-{id}")),
+            status: TrajectoryStatus::Completed,
+            timing,
+            usage: None,
         }
     }
 
     #[test]
-    fn tool_payload_result_and_turn_position_stay_independent() {
-        let user = record(Role::User, "inspect project");
-        let mut tool = record(Role::Tool, "exit_code=0\ndone");
-        tool.title = Some("shell".into());
-        tool.payload = Some(r#"{"command":"cargo test"}"#.into());
-        let mut messages = vec![user, record(Role::Assistant, "running checks"), tool];
-        crate::domain::reindex_messages(&mut messages);
+    fn duration_axis_removes_only_idle_gaps() {
+        let timeline = BusyTimeline::new(vec![(0.0, 10.0), (5.0, 20.0), (30.0, 35.0)]);
+        assert_eq!(timeline.intervals, [(0.0, 20.0), (30.0, 35.0)]);
+        assert_eq!(timeline.compressed_time(15.0), 15.0);
+        assert_eq!(timeline.compressed_time(32.0), 22.0);
+    }
 
-        assert!(message_matches(&messages[2], "cargo test"));
-        assert!(message_summary(&messages[2]).contains("exit_code=0"));
-        assert_eq!(detail_location(&messages[2]), "Turn 1 · Step 1");
-        assert_eq!(result_text(&messages[2]), "exit_code=0\ndone");
+    proptest! {
+        #[test]
+        fn busy_timeline_binary_lookup_matches_the_linear_definition(
+            input in prop::collection::vec((0_u32..10_000, 1_u32..1_000), 0..100),
+            query in 0_u32..12_000,
+        ) {
+            let intervals = input
+                .into_iter()
+                .map(|(start, duration)| (f64::from(start), f64::from(start + duration)))
+                .collect::<Vec<_>>();
+            let timeline = BusyTimeline::new(intervals);
+            let query = f64::from(query);
+            let mut expected = 0.0;
+            for (start, end) in &timeline.intervals {
+                if query <= *start {
+                    break;
+                }
+                if query < *end {
+                    expected += query - start;
+                    break;
+                }
+                expected += end - start;
+            }
+            prop_assert!((timeline.compressed_time(query) - expected).abs() < f64::EPSILON);
+        }
     }
 
     #[test]
-    fn timeline_spreads_records_across_the_available_width() {
-        let messages = vec![
-            record(Role::User, "first"),
-            record(Role::Tool, "middle"),
-            record(Role::Assistant, "last"),
-        ];
-        let geometry = timeline_geometry(&messages, false);
-        assert!((geometry[0].0 - 0.01).abs() < f32::EPSILON);
-        assert!((geometry[1].0 - 0.485).abs() < 0.000_001);
-        assert!((geometry[2].0 - 0.96).abs() < f32::EPSILON);
-        assert!(geometry.iter().all(|(_, width)| *width >= 0.006));
+    fn timeline_cache_reuses_geometry_when_only_the_viewport_changes() {
+        let workspace = PathBuf::from("workspace");
+        let session = PathBuf::from("session.jsonl");
+        let records = [record(1, 0, 100)];
+        let mut cache = TimelineModelCache::new(
+            workspace.clone(),
+            session.clone(),
+            4,
+            &records,
+            TimelineMode::Duration,
+            Some((0.0, 100.0)),
+        );
+        assert!(cache.geometry_matches(&workspace, &session, 4, TimelineMode::Duration));
+        assert!(!cache.geometry_matches(&workspace, &session, 5, TimelineMode::Duration));
+
+        let geometry_before = cache.geometry.as_ref().unwrap().cells.clone();
+        cache.set_viewport(Some((10.0, 60.0)));
+        assert_eq!(cache.viewport, Some((10.0, 60.0)));
+        assert_eq!(cache.geometry.as_ref().unwrap().cells, geometry_before);
+        assert_eq!(cache.model.as_ref().unwrap().viewport, (10.0, 60.0));
     }
 
     #[test]
-    fn json_tokens_use_dsh_property_string_and_keyword_groups() {
-        let value = r#"{"command":"pwd","ok":true,"count":2}"#;
-        let tokens = json_token_ranges(value)
-            .into_iter()
-            .map(|(range, kind)| (&value[range], kind))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            tokens,
-            vec![
-                (r#""command""#, JsonTokenKind::Property),
-                (r#""pwd""#, JsonTokenKind::String),
-                (r#""ok""#, JsonTokenKind::Property),
-                ("true", JsonTokenKind::Keyword),
-                (r#""count""#, JsonTokenKind::Property),
-                ("2", JsonTokenKind::Keyword),
-            ]
-        );
+    fn viewport_and_selection_are_clamped_and_normalized() {
+        assert_eq!(clamp_range((-5.0, 5.0), (0.0, 20.0)), (0.0, 10.0));
+        assert_eq!(normalized_range((5.0, 10.0), (0.0, 20.0)), (0.25, 0.25));
     }
 
     #[test]
-    fn detail_tabs_follow_the_selected_cell_kind() {
-        assert_eq!(
-            detail_tabs(&record(Role::User, "hello")),
-            &[DetailsTab::Summary, DetailsTab::Preview, DetailsTab::Raw]
-        );
-        assert_eq!(
-            detail_tabs(&record(Role::Assistant, "answer")),
-            &[DetailsTab::Summary, DetailsTab::Preview, DetailsTab::Raw]
-        );
-        assert_eq!(
-            detail_tabs(&record(Role::Reasoning, "thinking")),
-            &[DetailsTab::Summary, DetailsTab::Preview, DetailsTab::Raw]
-        );
-        assert_eq!(
-            detail_tabs(&record(Role::Notice, "context")),
-            &[DetailsTab::Summary, DetailsTab::Preview, DetailsTab::Raw]
-        );
-
-        let mut tool = record(Role::Tool, "exit_code=0");
-        tool.payload = Some(r#"{"command":"pwd"}"#.into());
-        assert_eq!(
-            detail_tabs(&tool),
-            &[
-                DetailsTab::Summary,
-                DetailsTab::Payload,
-                DetailsTab::Result,
-                DetailsTab::Schema,
-                DetailsTab::Timing,
-            ]
-        );
+    fn timeline_modes_keep_distinct_coordinate_semantics() {
+        let records = [record(1, 0, 100), record(2, 200, 250)];
+        let sequence = timeline_model(&records, TimelineMode::Sequence, None).unwrap();
+        assert_eq!(sequence.domain, (0.0, 2.0));
+        let actual = timeline_model(&records, TimelineMode::Actual, None).unwrap();
+        assert_eq!(actual.domain, (1_000.0, 1_250.0));
+        let duration = timeline_model(&records, TimelineMode::Duration, None).unwrap();
+        assert_eq!(duration.domain, (0.0, 150.0));
     }
 
     #[test]
-    fn tool_schema_uses_dsh_name_description_and_parameters_shape() {
-        let schema = parse_tool_schema(
-            r#"{"name":"shell","description":"Run a command","parameters":{"type":"object"}}"#,
-        )
-        .expect("valid function schema");
-        assert_eq!(schema.name, "shell");
-        assert_eq!(schema.description, "Run a command");
-        assert_eq!(schema.parameters["type"], "object");
+    fn actual_timeline_nests_execution_inside_tool_lifecycle() {
+        let model = timeline_model(&[record(1, 0, 100)], TimelineMode::Actual, None).unwrap();
+        let cell = model.cells[0];
+        assert!((cell.left - 0.0).abs() < 0.000_001);
+        assert!((cell.width - 1.0).abs() < 0.000_001);
+        assert!((cell.execution_left.unwrap() - 0.2).abs() < 0.000_001);
+        assert!((cell.execution_width.unwrap() - 0.6).abs() < 0.000_001);
     }
 
     #[test]
-    fn detail_location_uses_message_and_step_groups() {
-        let mut user = record(Role::User, "hello");
-        user.turn = 2;
-        assert_eq!(detail_location(&user), "Turn 2 · Message");
+    fn timeline_hover_hits_only_bars_and_prefers_the_topmost_record() {
+        let records = [record(1, 0, 100), record(2, 0, 100)];
+        let model = timeline_model(&records, TimelineMode::Actual, None).unwrap();
 
-        let mut tool = record(Role::Tool, "done");
-        tool.turn = 2;
-        tool.step = 3;
-        assert_eq!(detail_location(&tool), "Turn 2 · Step 3");
+        assert_eq!(timeline_lane_at(7.0), Some(TrajectoryLane::Input));
+        assert_eq!(timeline_lane_at(20.0), None);
+        assert_eq!(timeline_lane_at(35.0), Some(TrajectoryLane::Tools));
+        assert_eq!(timeline_record_at(&model, &records, 0.5, 36.0), Some(1));
+        assert_eq!(timeline_record_at(&model, &records, 0.5, 22.0), None);
     }
 
     #[test]
-    fn duration_geometry_uses_one_time_domain_and_stays_in_bounds() {
-        let mut first = record(Role::Assistant, "first");
-        first.started_at_ms = Some(1_000);
-        first.duration_ms = Some(100);
-        let mut second = record(Role::Tool, "second");
-        second.started_at_ms = Some(1_500);
-        second.duration_ms = Some(500);
-        let geometry = timeline_geometry(&[first, second], true);
+    fn assistant_hover_tooltip_uses_dsh_timing_shape() {
+        let mut assistant = record(1, 0, 100);
+        assistant.kind = TrajectoryKind::Assistant;
+        assistant.lane = TrajectoryLane::Model;
+        assistant.timing.first_token = Some(time(20));
 
-        assert!(geometry[1].1 > geometry[0].1);
-        assert!(
-            geometry
-                .iter()
-                .all(|(position, width)| *position >= 0.0 && position + width <= 0.99)
+        let tooltip = record_tooltip(&assistant);
+        assert!(tooltip.starts_with("ASSISTANT\n"));
+        assert!(tooltip.contains(" → "));
+        assert!(tooltip.contains("Total 100.0 ms"));
+        assert!(tooltip.contains("TTFT 20.0 ms · Decoding 80.0 ms"));
+    }
+
+    #[test]
+    fn clipped_nested_segment_does_not_create_an_invalid_width_range() {
+        let cell = TimelineCell {
+            index: 0,
+            start: 10.0,
+            end: 20.0,
+            left: 0.0,
+            width: 1.0,
+            execution_left: Some(1.0),
+            execution_width: Some(0.2),
+        };
+        assert_eq!(nested_segment_geometry(cell), None);
+        assert!(cell_intersects_range(cell, (15.0, 30.0)));
+        assert!(!cell_intersects_range(cell, (21.0, 30.0)));
+    }
+
+    #[test]
+    fn focused_rows_center_small_ranges_and_anchor_large_ranges() {
+        assert_eq!(
+            focus_scroll_target(&[4, 5, 6]),
+            Some((5, ScrollStrategy::Center))
+        );
+        assert_eq!(
+            focus_scroll_target(&(10..24).collect::<Vec<_>>()),
+            Some((10, ScrollStrategy::Top))
         );
     }
 }

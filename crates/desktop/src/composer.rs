@@ -7,6 +7,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Textarea;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable, Icon, IconName};
 
 use crate::app::{DesktopApp, composer_model_indices};
@@ -92,6 +93,8 @@ impl DesktopApp {
 
     pub(crate) fn docked_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
+        let status = composer_status(&self.core);
+        let full_status = status.clone();
         div()
             .flex()
             .flex_col()
@@ -103,13 +106,15 @@ impl DesktopApp {
             .child(self.composer_card(false, cx))
             .child(
                 div()
+                    .id("composer-session-stats")
                     .w_full()
                     .max_w(px(self.core.layout.composer_max_width))
                     .text_center()
                     .text_xs()
                     .truncate()
                     .text_color(colors.muted_text)
-                    .child(composer_status(&self.core)),
+                    .child(status)
+                    .tooltip(move |window, cx| Tooltip::new(full_status.clone()).build(window, cx)),
             )
     }
 

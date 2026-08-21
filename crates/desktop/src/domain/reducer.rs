@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::domain::{Action, AppState, Effect, ScrollIntent, Surface, reduce_conversation};
 use crate::layout::resolve_layout;
 
@@ -87,8 +89,15 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::ExpandProject(path) => {
             state.workspace.expanded_projects.insert(path);
         }
-        Action::ToggleTrajectoryDuration => {
-            state.trajectory.show_duration = !state.trajectory.show_duration;
+        Action::SetTimelineMode(mode) => {
+            state.trajectory.mode = mode;
+            state.trajectory.selected_range = None;
+            state.trajectory.visible_range = None;
+        }
+        Action::SetTimelineSelection(range) => state.trajectory.selected_range = range,
+        Action::SetTimelineViewport(range) => state.trajectory.visible_range = range,
+        Action::ToggleTimelineUnixTime => {
+            state.trajectory.unix_time = !state.trajectory.unix_time;
         }
         Action::ToggleTrajectoryTurns => {
             state.trajectory.collapsed_turns = !state.trajectory.collapsed_turns;
@@ -129,7 +138,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetActiveProject(index) => state.workspace.active_project = index,
         Action::RefreshSessions(sessions) => state.session.sessions = sessions,
         Action::Conversation(action) => {
-            let expanded = reduce_conversation(&mut state.conversation, *action);
+            let expanded = reduce_conversation(Arc::make_mut(&mut state.conversation), *action);
             if expanded && state.follow_chat_tail {
                 effects.push(Effect::ApplyChatTail);
             }

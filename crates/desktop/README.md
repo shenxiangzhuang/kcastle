@@ -33,6 +33,24 @@ In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
 
+The desktop trajectory surface is projected directly from session events rather than chat rows. It
+has fixed Input, Model, and Tools swimlanes. Duration switches equal-width operations to recorded
+durations with idle time compressed, matching the DSH desktop surface; complete wall-clock timing
+remains an internal projection. Dragging across the overview focuses the interval, dims operations
+outside it, and scrolls the ledger to the focused records. Scroll to zoom around the pointer,
+right-drag to pan, double-click to clear the focus, or Shift-drag to focus and zoom together. Tool
+bars distinguish the full call lifecycle from nested execution time; assistant bars distinguish
+TTFT from generation. Hovering a bar restores its full color, outlines it, and reveals the DSH
+timing tooltip after a short delay; hovering empty lane space shows a vertical time cursor. The
+Timing tab uses the same recorded timestamps and can toggle Started
+between local and Unix time. The composer footer summarizes whole-session turn/step counts, LLM and
+tool wall time, average TTFT, decode throughput, cache hit rate, and token usage. Session catalog
+entries that fail validation are ignored by the desktop UI. Timeline mode, focus, viewport, and
+scroll positions are retained independently for each session. Timeline statistics update
+incrementally, while geometry is cached by session, event revision, and mode and then cheaply
+reprojected for the current viewport; Duration coordinates use a merged busy-time index rather
+than rescanning every interval for every item.
+
 DMG, AppImage, and Setup EXE builds check `updates.kcastle.mathewshen.me` hourly and download a
 newer release in the background. After the complete package passes its checksum, a compact update
 button appears beside Settings. Restart is blocked while any session is active; otherwise the
@@ -90,7 +108,7 @@ For native UI changes, also exercise the signed release bundle manually:
 - Confirm a background session uses a spinning ring while running, changes to a blue unread dot
   after it finishes, and clears the dot when selected; the relative time label must remain visible.
 - Open a running session read-only, verify a second writer is rejected, and confirm a damaged log
-  keeps valid catalog entries visible and reports its recovery state.
+  is omitted while valid catalog entries remain visible.
 - Hover a session row and confirm rename appears before archive without selecting the row; restore
   or permanently delete archived sessions from the matching project in Settings.
 - Resize through compact, regular, split, and overlay layouts and confirm the composer never

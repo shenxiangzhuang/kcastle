@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use kcastle_agent::SessionInfo;
 
-use crate::domain::{ComposerMenu, ConversationAction, DetailsTab, MessageId};
+use crate::domain::{ComposerMenu, ConversationAction, DetailsTab, MessageId, TimelineMode};
 use crate::layout::LayoutInput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +33,10 @@ pub(crate) enum Action {
     ShowMoreSessions(PathBuf),
     ToggleProjectExpanded(PathBuf),
     ExpandProject(PathBuf),
-    ToggleTrajectoryDuration,
+    SetTimelineMode(TimelineMode),
+    SetTimelineSelection(Option<(f64, f64)>),
+    SetTimelineViewport(Option<(f64, f64)>),
+    ToggleTimelineUnixTime,
     ToggleTrajectoryTurns,
     ToggleTrajectoryCalls,
     ExpandTrajectoryGroups,
