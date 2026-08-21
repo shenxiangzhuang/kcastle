@@ -271,6 +271,7 @@ async fn tui_loop(
             draw_ui(terminal, &mut fullscreen_overlay, app, false)?;
             dirty = false;
         }
+        #[allow(clippy::large_enum_variant)]
         enum Next {
             Terminal(Option<Result<Event, io::Error>>),
             Agent(Option<AgentEvent>),

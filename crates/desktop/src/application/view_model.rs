@@ -36,15 +36,56 @@ pub(crate) fn empty_conversation_view_model(state: &AppState) -> EmptyConversati
 }
 
 pub(crate) fn composer_status(state: &AppState) -> String {
-    let view = conversation_view_model(state);
-    format!(
-        "{} turns · {} steps   |   input {} · cached {} · output {} tokens",
-        view.turns,
-        view.steps,
-        compact_number(state.conversation.input_tokens),
-        compact_number(state.conversation.cached_tokens),
-        compact_number(state.conversation.output_tokens),
-    )
+    let stats = state.trajectory_data.stats();
+    let mut groups = vec![format!(
+        "{} {} · {} {}",
+        stats.turns,
+        if stats.turns == 1 { "turn" } else { "turns" },
+        stats.steps,
+        if stats.steps == 1 { "step" } else { "steps" },
+    )];
+    let mut durations = Vec::new();
+    if stats.llm_ns > 0 {
+        durations.push(format!("LLM {}", compact_duration(stats.llm_ns)));
+    }
+    if stats.tool_ns > 0 {
+        durations.push(format!("Tools {}", compact_duration(stats.tool_ns)));
+    }
+    if !durations.is_empty() {
+        groups.push(durations.join(" · "));
+    }
+    let mut speeds = Vec::new();
+    if stats.ttft_steps > 0 {
+        speeds.push(format!(
+            "Avg TTFT {}",
+            compact_duration(stats.ttft_ns / stats.ttft_steps as u64)
+        ));
+    }
+    if stats.decode_ns > 0 {
+        speeds.push(format!(
+            "{} tok/s",
+            compact_rate(stats.decode_tokens as f64 / (stats.decode_ns as f64 / 1_000_000_000.0))
+        ));
+    }
+    if !speeds.is_empty() {
+        groups.push(speeds.join(" · "));
+    }
+    if stats.input_tokens > 0 || stats.output_tokens > 0 {
+        if let Some(percent) = stats
+            .cached_tokens
+            .saturating_mul(100)
+            .saturating_add(stats.input_tokens / 2)
+            .checked_div(stats.input_tokens)
+        {
+            groups.push(format!("Cache hit {percent}%"));
+        }
+        groups.push(format!(
+            "Input {} tok · Output {} tok",
+            compact_number(stats.input_tokens),
+            compact_number(stats.output_tokens),
+        ));
+    }
+    groups.join(" | ")
 }
 
 pub(crate) fn step_count(messages: &[Message]) -> usize {
@@ -56,13 +97,30 @@ pub(crate) fn step_count(messages: &[Message]) -> usize {
         .len()
 }
 
-fn compact_number(value: u32) -> String {
+fn compact_number(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}M", value as f32 / 1_000_000.0)
     } else if value >= 1_000 {
         format!("{:.1}K", value as f32 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+fn compact_duration(nanoseconds: u64) -> String {
+    let seconds = nanoseconds as f64 / 1_000_000_000.0;
+    if seconds < 60.0 {
+        return format!("{:.1}s", (seconds * 10.0).round() / 10.0);
+    }
+    let seconds = seconds.round() as u64;
+    format!("{}m{}s", seconds / 60, seconds % 60)
+}
+
+fn compact_rate(value: f64) -> String {
+    if value >= 100.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{:.1}", (value * 10.0).round() / 10.0)
     }
 }
 
@@ -77,10 +135,7 @@ mod tests {
         let view = conversation_view_model(&state);
         assert!(view.empty);
         assert_eq!(view.title, "New chat");
-        assert_eq!(
-            composer_status(&state),
-            "0 turns · 0 steps   |   input 0 · cached 0 · output 0 tokens"
-        );
+        assert_eq!(composer_status(&state), "0 turns · 0 steps");
     }
 
     #[test]

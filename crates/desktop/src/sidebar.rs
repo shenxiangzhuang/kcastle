@@ -403,10 +403,6 @@ impl DesktopApp {
                 let preview_project_name = project.name.clone();
                 let show_more_project_path = project.path.clone();
                 let show_more_keyboard_project_path = project.path.clone();
-                let issue_count = self
-                    .project_session_issues
-                    .get(&project.sessions_dir)
-                    .map_or(0, Vec::len);
                 let project_missing = project.missing;
                 let project_group = SharedString::from(format!("workspace-{index}"));
                 div()
@@ -481,12 +477,6 @@ impl DesktopApp {
                                     )
                                     .children(project_missing.then(|| {
                                         div().text_xs().text_color(colors.danger).child("Missing")
-                                    }))
-                                    .children((issue_count > 0).then(|| {
-                                        div()
-                                            .text_xs()
-                                            .text_color(colors.danger)
-                                            .child(format!("{issue_count} unreadable"))
                                     })),
                             )
                             .child(
@@ -535,14 +525,6 @@ impl DesktopApp {
                         div()
                             .flex()
                             .flex_col()
-                            .children((issue_count > 0).then(|| {
-                                div()
-                                    .px_7()
-                                    .py_1()
-                                    .text_xs()
-                                    .text_color(colors.danger)
-                                    .child("Some session files could not be read; valid sessions remain available.")
-                            }))
                             .children(sessions.into_iter().take(visible_session_count).enumerate().filter_map(|(session_index, session)| {
                                 let path = session.path.clone();
                                 let keyboard_path = path.clone();

@@ -253,11 +253,7 @@ fn archived_sessions_view(
             .get(&project.sessions_dir)
             .cloned()
             .unwrap_or_default();
-        let issue_count = app
-            .project_archived_session_issues
-            .get(&project.sessions_dir)
-            .map_or(0, Vec::len);
-        if sessions.is_empty() && issue_count == 0 {
+        if sessions.is_empty() {
             continue;
         }
         let count = sessions.len();
@@ -355,19 +351,7 @@ fn archived_sessions_view(
                         .border_1()
                         .border_color(colors.border)
                         .children(rows),
-                )
-                .children((issue_count > 0).then(|| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_xs()
-                        .text_color(colors.warning)
-                        .child(Icon::new(IconName::TriangleAlert).size_4())
-                        .child(format!(
-                            "{issue_count} archived session files could not be read"
-                        ))
-                })),
+                ),
         );
     }
 

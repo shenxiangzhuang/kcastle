@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{Context, Window};
 use kcastle_agent::{
@@ -10,8 +11,8 @@ use kcastle_agent::{
 
 use crate::application::{MAX_EVENTS_PER_FRAME, StreamBatch, is_frame_stream_event};
 use crate::domain::{
-    ApprovalState, ConversationAction, ConversationState, Message, Role, RunId, UsageSnapshot,
-    next_message_id, reduce_conversation, reindex_messages,
+    ApprovalState, ConversationAction, ConversationState, Message, Role, RunId,
+    TrajectoryProjection, UsageSnapshot, next_message_id, reduce_conversation, reindex_messages,
 };
 use crate::platform::gpui::arm_next_frame;
 use crate::settings::EnterBehavior;
@@ -28,15 +29,52 @@ pub(crate) enum SessionRuntimeStatus {
 #[derive(Clone, Debug)]
 pub(crate) struct SessionRuntimeSnapshot {
     pub(crate) session: SessionInfo,
-    pub(crate) conversation: ConversationState,
+    pub(crate) conversation: Arc<ConversationState>,
+    pub(crate) trajectory: Arc<TrajectoryProjection>,
     pub(crate) status: SessionRuntimeStatus,
     pub(crate) approval: Option<ApprovalState>,
     pub(crate) started_at: Option<Instant>,
     pub(crate) allow_all_tools: bool,
     pub(crate) config: SessionConfig,
     pub(crate) active_run: Option<RunId>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SessionRuntimeObservation {
+    pub(crate) session: SessionInfo,
+    pub(crate) status: SessionRuntimeStatus,
+    pub(crate) approval_needed: bool,
     pub(crate) completed_runs: u64,
     pub(crate) transcript_updates: u64,
+}
+
+enum PendingConversationDelta {
+    Reasoning(String),
+    Text(String),
+}
+
+fn merge_pending_delta(
+    pending: &mut Option<PendingConversationDelta>,
+    next: PendingConversationDelta,
+    runtime: &mut SessionRuntime,
+    conversation_changed: &mut bool,
+) {
+    match (pending.as_mut(), &next) {
+        (
+            Some(PendingConversationDelta::Reasoning(previous)),
+            PendingConversationDelta::Reasoning(next),
+        )
+        | (Some(PendingConversationDelta::Text(previous)), PendingConversationDelta::Text(next)) => {
+            previous.push_str(next)
+        }
+        _ => {
+            if let Some(previous) = pending.take() {
+                runtime.apply_pending_delta(previous);
+                *conversation_changed = true;
+            }
+            *pending = Some(next);
+        }
+    }
 }
 
 /// The complete GPUI-owned execution boundary for one session.
@@ -53,7 +91,8 @@ pub(crate) struct SessionRuntime {
     next_run: RunId,
     completed_runs: u64,
     transcript_updates: u64,
-    conversation: ConversationState,
+    conversation: Arc<ConversationState>,
+    trajectory: Arc<TrajectoryProjection>,
     approval: Option<ApprovalState>,
     status: SessionRuntimeStatus,
     started_at: Option<Instant>,
@@ -68,6 +107,7 @@ impl SessionRuntime {
         project_id: String,
         sessions_dir: PathBuf,
         conversation: ConversationState,
+        trajectory: TrajectoryProjection,
         config: SessionConfig,
     ) -> Self {
         let session = agent.session_info().clone();
@@ -92,7 +132,8 @@ impl SessionRuntime {
             next_run: RunId::default(),
             completed_runs: 0,
             transcript_updates: 0,
-            conversation,
+            conversation: Arc::new(conversation),
+            trajectory: Arc::new(trajectory),
             approval: None,
             status: SessionRuntimeStatus::Idle,
             started_at: None,
@@ -106,12 +147,21 @@ impl SessionRuntime {
         SessionRuntimeSnapshot {
             session: self.session.clone(),
             conversation: self.conversation.clone(),
+            trajectory: self.trajectory.clone(),
             status: self.status.clone(),
             approval: self.approval.clone(),
             started_at: self.started_at,
             allow_all_tools: self.allow_all_tools,
             config: self.config.clone(),
             active_run: self.active_run,
+        }
+    }
+
+    pub(crate) fn observation(&self) -> SessionRuntimeObservation {
+        SessionRuntimeObservation {
+            session: self.session.clone(),
+            status: self.status.clone(),
+            approval_needed: self.approval.is_some(),
             completed_runs: self.completed_runs,
             transcript_updates: self.transcript_updates,
         }
@@ -140,7 +190,7 @@ impl SessionRuntime {
             return;
         }
         reduce_conversation(
-            &mut self.conversation,
+            Arc::make_mut(&mut self.conversation),
             ConversationAction::ToggleExpanded { index, role },
         );
         cx.notify();
@@ -274,7 +324,8 @@ impl SessionRuntime {
                 match result {
                     Ok(()) => {
                         runtime.session = agent.session_info().clone();
-                        runtime.conversation.title = runtime.session.title.clone();
+                        Arc::make_mut(&mut runtime.conversation).title =
+                            runtime.session.title.clone();
                         runtime.status = SessionRuntimeStatus::Idle;
                     }
                     Err(error) => {
@@ -416,9 +467,7 @@ impl SessionRuntime {
                         if runtime.active_run != Some(run) {
                             return;
                         }
-                        for event in batch.into_events() {
-                            runtime.apply_event(event);
-                        }
+                        runtime.apply_events(batch.into_events());
                         cx.notify();
                     })
                 });
@@ -477,42 +526,97 @@ impl SessionRuntime {
         cx.notify();
     }
 
-    fn apply_event(&mut self, event: AgentEvent) {
-        let changes_transcript = matches!(
-            &event,
-            AgentEvent::ReasoningDelta(_)
-                | AgentEvent::TextDelta(_)
-                | AgentEvent::ToolStarted(_)
-                | AgentEvent::ToolFinished { .. }
-                | AgentEvent::RunFinished(_)
-                | AgentEvent::RunStarted(_)
-                | AgentEvent::InputAdmitted { .. }
-        );
-        match event {
-            AgentEvent::ReasoningDelta(delta) => {
+    fn apply_events(&mut self, events: Vec<AgentEvent>) {
+        let mut pending_delta = None;
+        let mut conversation_changed = false;
+        let mut transcript_updates = 0_u64;
+        for event in events {
+            match event {
+                AgentEvent::SessionEvent(recorded) => {
+                    Arc::make_mut(&mut self.trajectory).apply(&recorded);
+                }
+                AgentEvent::ReasoningDelta(delta) => {
+                    merge_pending_delta(
+                        &mut pending_delta,
+                        PendingConversationDelta::Reasoning(delta),
+                        self,
+                        &mut conversation_changed,
+                    );
+                    transcript_updates = transcript_updates.saturating_add(1);
+                }
+                AgentEvent::TextDelta(delta) => {
+                    merge_pending_delta(
+                        &mut pending_delta,
+                        PendingConversationDelta::Text(delta),
+                        self,
+                        &mut conversation_changed,
+                    );
+                    transcript_updates = transcript_updates.saturating_add(1);
+                }
+                event => {
+                    if let Some(delta) = pending_delta.take() {
+                        self.apply_pending_delta(delta);
+                        conversation_changed = true;
+                    }
+                    let (changed, transcript) = self.apply_structural_event(event);
+                    conversation_changed |= changed;
+                    transcript_updates = transcript_updates.saturating_add(u64::from(transcript));
+                }
+            }
+        }
+        if let Some(delta) = pending_delta {
+            self.apply_pending_delta(delta);
+            conversation_changed = true;
+        }
+        self.transcript_updates = self.transcript_updates.saturating_add(transcript_updates);
+        if conversation_changed {
+            reindex_messages(&mut Arc::make_mut(&mut self.conversation).messages);
+        }
+    }
+
+    fn apply_pending_delta(&mut self, delta: PendingConversationDelta) {
+        let conversation = Arc::make_mut(&mut self.conversation);
+        match delta {
+            PendingConversationDelta::Reasoning(delta) => {
                 reduce_conversation(
-                    &mut self.conversation,
+                    conversation,
                     ConversationAction::ReasoningDelta {
                         new_message: message(Role::Reasoning, delta.clone()),
                         delta,
                     },
                 );
             }
-            AgentEvent::TextDelta(delta) => {
+            PendingConversationDelta::Text(delta) => {
                 reduce_conversation(
-                    &mut self.conversation,
+                    conversation,
                     ConversationAction::TextDelta {
                         new_message: message(Role::Assistant, delta.clone()),
                         delta,
                     },
                 );
             }
+        }
+    }
+
+    fn apply_structural_event(&mut self, event: AgentEvent) -> (bool, bool) {
+        let changes_transcript = matches!(
+            &event,
+            AgentEvent::ToolStarted(_)
+                | AgentEvent::ToolFinished { .. }
+                | AgentEvent::RunFinished(_)
+                | AgentEvent::RunStarted(_)
+                | AgentEvent::InputAdmitted { .. }
+        );
+        let mut conversation_changed = true;
+        match event {
             AgentEvent::ApprovalRequired(call) => {
+                conversation_changed = false;
                 if self.allow_all_tools {
                     if let Some(control) = &self.control
                         && let Err(error) = control.approve(call.call_id, true)
                     {
                         self.notice(error.to_string());
+                        conversation_changed = true;
                     }
                 } else {
                     self.approval = Some(ApprovalState {
@@ -525,7 +629,7 @@ impl SessionRuntime {
             AgentEvent::ToolStarted(call) => {
                 let schema = self.tool_schemas.get(&call.name).cloned();
                 reduce_conversation(
-                    &mut self.conversation,
+                    Arc::make_mut(&mut self.conversation),
                     ConversationAction::ToolStarted(Message {
                         key: next_message_id(),
                         revision: 0,
@@ -539,7 +643,7 @@ impl SessionRuntime {
                         failed: false,
                         expanded: false,
                         rating: None,
-                        started_at_ms: Some(now_ms()),
+                        started_at_ms: None,
                         duration_ms: None,
                         turn: 0,
                         step: 0,
@@ -556,7 +660,7 @@ impl SessionRuntime {
                     cached_tokens: usage.input_tokens_details.cached_tokens,
                 });
                 reduce_conversation(
-                    &mut self.conversation,
+                    Arc::make_mut(&mut self.conversation),
                     ConversationAction::RunFinished {
                         response_id: summary.response_id,
                         usage,
@@ -579,60 +683,54 @@ impl SessionRuntime {
             AgentEvent::CompactionFinished { .. } => self.notice("Context compacted"),
             AgentEvent::RunStarted(input) => {
                 reduce_conversation(
-                    &mut self.conversation,
+                    Arc::make_mut(&mut self.conversation),
                     ConversationAction::SubmitUser(message(Role::User, input)),
                 );
             }
             AgentEvent::InputAdmitted { input, .. } => {
                 reduce_conversation(
-                    &mut self.conversation,
+                    Arc::make_mut(&mut self.conversation),
                     ConversationAction::SubmitUser(message(Role::User, input)),
                 );
             }
-            AgentEvent::ModelStarted(_) => {}
+            AgentEvent::ModelStarted(_) => conversation_changed = false,
+            AgentEvent::SessionEvent(_)
+            | AgentEvent::ReasoningDelta(_)
+            | AgentEvent::TextDelta(_) => {
+                unreachable!("stream events are handled before structural reduction")
+            }
         }
-        if changes_transcript {
-            self.transcript_updates = self.transcript_updates.saturating_add(1);
-        }
-        reindex_messages(&mut self.conversation.messages);
+        (conversation_changed, changes_transcript)
     }
 
     #[cfg(test)]
     pub(crate) fn apply_test_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
-        self.apply_event(event);
+        self.apply_events(vec![event]);
         cx.notify();
     }
 
     fn finish_reasoning(&mut self) {
-        reduce_conversation(&mut self.conversation, ConversationAction::FinishReasoning);
+        reduce_conversation(
+            Arc::make_mut(&mut self.conversation),
+            ConversationAction::FinishReasoning,
+        );
     }
 
     fn tool_result(&mut self, call_id: &str, result: ToolResult) {
-        let duration_ms = self
-            .conversation
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.tool_call_id.as_deref() == Some(call_id))
-            .and_then(|message| {
-                message
-                    .started_at_ms
-                    .map(|started| now_ms().saturating_sub(started))
-            });
         reduce_conversation(
-            &mut self.conversation,
+            Arc::make_mut(&mut self.conversation),
             ConversationAction::ToolFinished {
                 call_id: call_id.to_owned(),
                 output: result.output,
                 is_error: result.is_error,
-                duration_ms,
+                duration_ms: None,
             },
         );
     }
 
     fn notice(&mut self, text: impl Into<String>) {
         reduce_conversation(
-            &mut self.conversation,
+            Arc::make_mut(&mut self.conversation),
             ConversationAction::AppendNotice(message(Role::Notice, text.into())),
         );
         self.transcript_updates = self.transcript_updates.saturating_add(1);
@@ -670,12 +768,6 @@ fn message(role: Role, text: String) -> Message {
     }
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis())
-}
-
 fn reasoning_key(effort: &ReasoningEffort) -> String {
     serde_json::to_value(effort)
         .ok()
@@ -701,6 +793,7 @@ mod tests {
             "default".into(),
             PathBuf::from("sessions"),
             ConversationState::default(),
+            TrajectoryProjection::default(),
             SessionConfig::default(),
         )
     }
@@ -710,8 +803,8 @@ mod tests {
         let mut first = runtime();
         let mut second = runtime();
 
-        first.apply_event(AgentEvent::TextDelta("first".into()));
-        second.apply_event(AgentEvent::RunFailed("second failed".into()));
+        first.apply_events(vec![AgentEvent::TextDelta("first".into())]);
+        second.apply_events(vec![AgentEvent::RunFailed("second failed".into())]);
 
         assert_eq!(first.conversation.messages.len(), 1);
         assert_eq!(first.conversation.messages[0].text, "first");
@@ -731,7 +824,7 @@ mod tests {
         first.active_run = Some(RunId(1));
         second.active_run = Some(RunId(1));
 
-        first.apply_event(AgentEvent::TextDelta("only first".into()));
+        first.apply_events(vec![AgentEvent::TextDelta("only first".into())]);
 
         assert_eq!(first.conversation.messages.len(), 1);
         assert!(second.conversation.messages.is_empty());
@@ -739,18 +832,64 @@ mod tests {
     }
 
     #[test]
+    fn one_frame_merges_visible_deltas_across_durable_chunk_events() {
+        let mut runtime = runtime();
+        runtime.apply_events(vec![
+            AgentEvent::TextDelta("hello ".into()),
+            AgentEvent::SessionEvent(kcastle_agent::RecordedEvent {
+                seq: 0,
+                time: kcastle_agent::EventTime {
+                    wall_time_ms: 1,
+                    clock_id: "runtime-batch".into(),
+                    monotonic_ns: 1,
+                },
+                source_event_seqs: Vec::new(),
+                surface_op: None,
+                event: kcastle_agent::SessionEvent::AssistantChunk {
+                    turn: 1,
+                    step: 1,
+                    chunk: kcastle_agent::AssistantChunk::OutputTextDelta {
+                        delta: "hello ".into(),
+                    },
+                },
+            }),
+            AgentEvent::TextDelta("world".into()),
+        ]);
+
+        assert_eq!(runtime.conversation.messages.len(), 1);
+        assert_eq!(runtime.conversation.messages[0].text, "hello world");
+        assert_eq!(runtime.transcript_updates, 2);
+        assert_eq!(runtime.trajectory.revision(), 1);
+    }
+
+    #[test]
+    fn snapshots_share_projection_storage_until_the_runtime_mutates() {
+        let mut runtime = runtime();
+        let before = runtime.snapshot();
+        assert!(Arc::ptr_eq(&before.conversation, &runtime.conversation));
+        assert!(Arc::ptr_eq(&before.trajectory, &runtime.trajectory));
+
+        runtime.apply_events(vec![AgentEvent::TextDelta("new".into())]);
+        let after = runtime.snapshot();
+        assert!(before.conversation.messages.is_empty());
+        assert_eq!(after.conversation.messages[0].text, "new");
+        assert!(!Arc::ptr_eq(&before.conversation, &after.conversation));
+        assert!(Arc::ptr_eq(&before.trajectory, &after.trajectory));
+    }
+
+    #[test]
     fn completion_generation_advances_only_for_a_finished_response() {
         let mut runtime = runtime();
 
-        runtime.apply_event(AgentEvent::RunAborted);
+        runtime.apply_events(vec![AgentEvent::RunAborted]);
         assert_eq!(runtime.completed_runs, 0);
         assert_eq!(runtime.transcript_updates, 1);
 
-        runtime.apply_event(AgentEvent::RunFinished(kcastle_agent::RunSummary {
+        runtime.apply_events(vec![AgentEvent::RunFinished(kcastle_agent::RunSummary {
             output: "done".into(),
             response_id: "response-1".into(),
             usage: None,
-        }));
+        })]);
         assert_eq!(runtime.completed_runs, 1);
         assert_eq!(runtime.transcript_updates, 2);
     }
@@ -777,14 +916,14 @@ mod tests {
         assert!(snapshot.approval.is_none());
 
         runtime.update(cx, |runtime, _| {
-            runtime.apply_event(AgentEvent::ApprovalRequired(
+            runtime.apply_events(vec![AgentEvent::ApprovalRequired(
                 serde_json::from_value(serde_json::json!({
                     "arguments": "{}",
                     "call_id": "call-2",
                     "name": "shell"
                 }))
                 .unwrap(),
-            ));
+            )]);
         });
         assert!(cx.read_entity(&runtime, |runtime, _| runtime.approval.is_none()));
     }

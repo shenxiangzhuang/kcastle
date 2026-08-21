@@ -412,6 +412,7 @@ impl App {
 
     pub fn apply_event(&mut self, event: AgentEvent) -> Option<(String, bool)> {
         match event {
+            AgentEvent::SessionEvent(_) => {}
             AgentEvent::RunStarted(input) => self.push_user(input),
             AgentEvent::InputAdmitted { input, .. } => self.push_user(input),
             AgentEvent::ModelStarted(_) => {}

@@ -1,4 +1,4 @@
-use kcastle_agent::AgentEvent;
+use kcastle_agent::{AgentEvent, SessionEvent};
 
 pub(crate) const MAX_EVENTS_PER_FRAME: usize = 128;
 
@@ -24,10 +24,13 @@ impl StreamTelemetry {
 }
 
 pub(crate) fn is_frame_stream_event(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::ReasoningDelta(_) | AgentEvent::TextDelta(_)
-    )
+    match event {
+        AgentEvent::ReasoningDelta(_) | AgentEvent::TextDelta(_) => true,
+        AgentEvent::SessionEvent(recorded) => {
+            matches!(recorded.event, SessionEvent::AssistantChunk { .. })
+        }
+        _ => false,
+    }
 }
 
 pub(crate) struct StreamBatch {
@@ -74,6 +77,7 @@ impl StreamBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kcastle_agent::{AssistantChunk, EventTime, RecordedEvent};
     use proptest::prelude::*;
 
     fn event(tag: u8, value: String) -> AgentEvent {
@@ -91,6 +95,32 @@ mod tests {
             AgentEvent::ModelStarted(value) => (2, value.to_string()),
             _ => unreachable!("property strategy only generates stream and boundary events"),
         }
+    }
+
+    fn assistant_chunk(seq: u64, delta: &str) -> AgentEvent {
+        AgentEvent::SessionEvent(RecordedEvent {
+            seq,
+            time: EventTime {
+                wall_time_ms: seq as i64,
+                clock_id: "stream-frame-test".into(),
+                monotonic_ns: seq,
+            },
+            source_event_seqs: Vec::new(),
+            surface_op: None,
+            event: SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: AssistantChunk::OutputTextDelta {
+                    delta: delta.into(),
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn durable_assistant_chunks_share_the_stream_frame_gate() {
+        assert!(is_frame_stream_event(&assistant_chunk(1, "hello")));
+        assert!(!is_frame_stream_event(&AgentEvent::ModelStarted(1)));
     }
 
     #[test]

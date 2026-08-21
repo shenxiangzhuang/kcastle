@@ -1,16 +1,18 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AppContext, Context, Entity, FocusHandle, PathPromptOptions, Pixels, Point, ScrollHandle,
-    ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, point, px,
+    AppContext, Bounds, Context, Entity, FocusHandle, PathPromptOptions, Pixels, Point,
+    ScrollHandle, ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, point, px,
 };
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::{Theme, ThemeMode};
 use kcastle_agent::{
-    ARCHIVE_DIRECTORY, Agent, Model, Session, SessionConfig, SessionEvent, SessionId, SessionInfo,
-    SessionIssue, TranscriptItem,
+    ARCHIVE_DIRECTORY, Agent, AssistantChunk, Model, RecordedEvent, Session, SessionConfig,
+    SessionEvent, SessionId, SessionInfo, StepOutcome, TranscriptItem,
 };
 
 #[cfg(test)]
@@ -21,8 +23,8 @@ use crate::application::is_frame_stream_event;
 use crate::dialogs::Modal;
 use crate::domain::{
     Action, AppState, ComposerMenu, ConversationAction, ConversationState, DetailsTab, Effect,
-    Message, MessageId, Role, RunState, ScrollIntent, Surface, next_message_id, reduce,
-    reindex_messages,
+    Message, MessageId, Role, RunState, ScrollIntent, Surface, TimelineMode, next_message_id,
+    reduce, reindex_messages,
 };
 use crate::layout::{LayoutInput, ScrollAnchor, ScrollRestore, resolve_scroll_restore};
 use crate::platform::NativeTitlebarController;
@@ -34,6 +36,7 @@ use crate::platform::gpui::{
 };
 use crate::project::{ProjectId, ProjectStore};
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
+use crate::trajectory::TimelineModelCache;
 use crate::updater::AvailableUpdate;
 
 #[derive(Clone)]
@@ -99,6 +102,9 @@ struct SessionViewState {
     details_offset: Point<Pixels>,
     selected_trajectory: Option<MessageId>,
     details_tab: DetailsTab,
+    timeline_mode: TimelineMode,
+    timeline_selection: Option<(f64, f64)>,
+    timeline_viewport: Option<(f64, f64)>,
 }
 
 impl Default for SessionViewState {
@@ -109,15 +115,18 @@ impl Default for SessionViewState {
             details_offset: point(px(0.0), px(0.0)),
             selected_trajectory: None,
             details_tab: DetailsTab::Summary,
+            timeline_mode: TimelineMode::Sequence,
+            timeline_selection: None,
+            timeline_viewport: None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionSearchDocument {
-    pub(crate) searchable: String,
+    pub(crate) searchable: Arc<str>,
     pub(crate) summary: String,
-    pub(crate) snippets: Vec<String>,
+    pub(crate) snippets: Arc<[String]>,
 }
 
 pub(crate) struct DesktopStartup {
@@ -138,6 +147,19 @@ struct ProjectSessionRuntimes {
 struct RuntimeObservation {
     completed_runs: u64,
     transcript_updates: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TimelineDragState {
+    pub(crate) pan: bool,
+    pub(crate) start_value: f64,
+    pub(crate) initial_viewport: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TimelineHoverState {
+    pub(crate) fraction: f64,
+    pub(crate) record_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +187,10 @@ pub(crate) struct DesktopApp {
     chat_tail_alignment: DeferredScrollAlignment,
     pub(crate) trajectory_scroll: UniformListScrollHandle,
     pub(crate) details_scroll: ScrollHandle,
+    pub(crate) timeline_bounds: Option<Bounds<Pixels>>,
+    pub(crate) timeline_drag: Option<TimelineDragState>,
+    pub(crate) timeline_hover: Option<TimelineHoverState>,
+    pub(crate) timeline_model_cache: RefCell<Option<TimelineModelCache>>,
     pub(crate) models: Vec<ConfiguredModel>,
     pub(crate) selected_model: usize,
     pub(crate) selected_reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
@@ -174,9 +200,7 @@ pub(crate) struct DesktopApp {
     pub(crate) selected_started_at: Option<Instant>,
     pub(crate) tool_schemas: HashMap<String, String>,
     pub(crate) project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
-    pub(crate) project_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) project_archived_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
-    pub(crate) project_archived_session_issues: HashMap<PathBuf, Vec<SessionIssue>>,
     pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     pub(crate) available_update: Option<AvailableUpdate>,
@@ -220,6 +244,7 @@ impl DesktopApp {
                 project.id.as_str().to_owned(),
                 project.sessions_dir.clone(),
                 ConversationState::default(),
+                crate::domain::TrajectoryProjection::default(),
                 runtime_config,
             )
         });
@@ -234,9 +259,8 @@ impl DesktopApp {
                 sessions: HashMap::from([(current_session_id, runtime.clone())]),
             },
         );
-        let (project_sessions, project_session_issues) = load_project_sessions(&project_store);
-        let (project_archived_sessions, project_archived_session_issues) =
-            load_project_archived_sessions(&project_store);
+        let project_sessions = load_project_sessions(&project_store);
+        let project_archived_sessions = load_project_archived_sessions(&project_store);
         let session_activity = load_session_activity(&project_sessions);
         let sessions = project_sessions
             .get(&project.sessions_dir)
@@ -255,8 +279,7 @@ impl DesktopApp {
         core.workspace.sessions_dir = project.sessions_dir.clone();
         core.session.current = current_session.clone();
         core.session.sessions = sessions;
-        let session_search_documents =
-            build_session_search_documents(&project_store, &project_sessions);
+        let session_search_documents = build_session_search_documents(&project_store);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 14)
@@ -331,6 +354,10 @@ impl DesktopApp {
             chat_tail_alignment: DeferredScrollAlignment::default(),
             trajectory_scroll: UniformListScrollHandle::new(),
             details_scroll: ScrollHandle::new(),
+            timeline_bounds: None,
+            timeline_drag: None,
+            timeline_hover: None,
+            timeline_model_cache: RefCell::new(None),
             models,
             selected_model,
             selected_reasoning_effort,
@@ -340,9 +367,7 @@ impl DesktopApp {
             selected_started_at: None,
             tool_schemas,
             project_sessions,
-            project_session_issues,
             project_archived_sessions,
-            project_archived_session_issues,
             session_activity,
             session_search_documents,
             available_update: None,
@@ -365,7 +390,7 @@ impl DesktopApp {
     }
 
     fn sync_runtime_snapshot(&mut self, runtime: &Entity<SessionRuntime>, cx: &mut Context<Self>) {
-        let snapshot = runtime.read(cx).snapshot();
+        let observation = runtime.read(cx).observation();
         let location = self.runtime_location(runtime);
         let selected = runtime.entity_id() == self.selected_runtime.entity_id();
         let mut selected_transcript_updates = 0;
@@ -374,17 +399,17 @@ impl DesktopApp {
             let previous = self.runtime_observations.entry(key.clone()).or_default();
             let unread_completion = has_new_unread_completion(
                 previous.completed_runs,
-                snapshot.completed_runs,
+                observation.completed_runs,
                 selected,
             );
             selected_transcript_updates = visible_transcript_update_count(
                 previous.transcript_updates,
-                snapshot.transcript_updates,
+                observation.transcript_updates,
                 selected,
             );
             *previous = RuntimeObservation {
-                completed_runs: snapshot.completed_runs,
-                transcript_updates: snapshot.transcript_updates,
+                completed_runs: observation.completed_runs,
+                transcript_updates: observation.transcript_updates,
             };
             if unread_completion {
                 self.unread_sessions.insert(key.clone());
@@ -394,14 +419,18 @@ impl DesktopApp {
             }
         }
         if let Some((project_id, _)) = &location
-            && !snapshot.session.path.as_os_str().is_empty()
+            && !observation.session.path.as_os_str().is_empty()
             && !self
                 .project_store
                 .projects()
                 .iter()
                 .find(|project| &project.id == project_id)
                 .and_then(|project| self.project_sessions.get(&project.sessions_dir))
-                .is_some_and(|sessions| sessions.iter().any(|info| info.id == snapshot.session.id))
+                .is_some_and(|sessions| {
+                    sessions
+                        .iter()
+                        .any(|info| info.id == observation.session.id)
+                })
         {
             self.refresh_project_session_cache();
             self.refresh_session_search_documents();
@@ -410,6 +439,7 @@ impl DesktopApp {
             cx.notify();
             return;
         }
+        let snapshot = runtime.read(cx).snapshot();
         self.apply_selected_runtime_snapshot(snapshot);
         self.sync_message_presentations();
         if selected_transcript_updates > 0 {
@@ -454,6 +484,7 @@ impl DesktopApp {
             });
         let previous_path = self.core.session.current.clone();
         self.core.conversation = snapshot.conversation;
+        self.core.trajectory_data = snapshot.trajectory;
         self.core.approval = snapshot.approval;
         self.core.session.current = snapshot.session.path.clone();
         self.selected_started_at = snapshot.started_at;
@@ -487,7 +518,7 @@ impl DesktopApp {
         runtime: Entity<SessionRuntime>,
         cx: &mut Context<Self>,
     ) {
-        let session_id = runtime.read(cx).snapshot().session.id;
+        let session_id = runtime.read(cx).observation().session.id;
         let subscription = cx.observe(&runtime, |this, runtime, cx| {
             this.sync_runtime_snapshot(&runtime, cx);
         });
@@ -510,6 +541,7 @@ impl DesktopApp {
     ) -> Option<Entity<SessionRuntime>> {
         let project = self.project_store.project(project_index)?.clone();
         let mut conversation = conversation_from_session(&session, &self.tool_schemas);
+        let trajectory = crate::domain::TrajectoryProjection::from_events(session.events());
         if session.recovery_needed() {
             conversation.messages.push(restored_message(
                 Role::Notice,
@@ -541,6 +573,7 @@ impl DesktopApp {
                 project.id.as_str().to_owned(),
                 project.sessions_dir,
                 conversation,
+                trajectory,
                 config,
             )
         });
@@ -585,14 +618,14 @@ impl DesktopApp {
         cx: &Context<Self>,
     ) -> Option<SidebarSessionStatus> {
         let project_id = self.project_store.project(project_index)?.id.clone();
-        let snapshot = self
+        let observation = self
             .project_runtime(project_index, path)?
             .read(cx)
-            .snapshot();
+            .observation();
         let unread = self
             .unread_sessions
-            .contains(&(project_id, snapshot.session.id));
-        resolve_sidebar_session_status(&snapshot.status, snapshot.approval.is_some(), unread)
+            .contains(&(project_id, observation.session.id));
+        resolve_sidebar_session_status(&observation.status, observation.approval_needed, unread)
     }
 
     pub(crate) fn project_has_active_sessions(
@@ -637,6 +670,8 @@ impl DesktopApp {
             self.unread_sessions.remove(&key);
         }
         self.selected_runtime = runtime.clone();
+        self.timeline_drag = None;
+        self.timeline_hover = None;
         let snapshot = runtime.read(cx).snapshot();
         if let Some(project) = self
             .project_store
@@ -664,7 +699,7 @@ impl DesktopApp {
                 runtimes.sessions.values().find(|runtime| {
                     runtime
                         .read(cx)
-                        .snapshot()
+                        .observation()
                         .session
                         .path
                         .as_os_str()
@@ -965,6 +1000,9 @@ impl DesktopApp {
             state.selected_trajectory = self.core.details.selected;
             state.details_tab = self.core.details.tab;
             state.details_offset = self.details_scroll.offset();
+            state.timeline_mode = self.core.trajectory.mode;
+            state.timeline_selection = self.core.trajectory.selected_range;
+            state.timeline_viewport = self.core.trajectory.visible_range;
         } else {
             state.chat_anchor = self
                 .layout_runtime
@@ -979,6 +1017,11 @@ impl DesktopApp {
             .copied()
             .unwrap_or_default();
         if self.core.surface == Surface::Trajectory {
+            let _ = self.transition(Action::SetTimelineMode(state.timeline_mode));
+            let _ = self.transition(Action::SetTimelineSelection(state.timeline_selection));
+            let _ = self.transition(Action::SetTimelineViewport(state.timeline_viewport));
+            self.timeline_drag = None;
+            self.timeline_hover = None;
             self.trajectory_scroll
                 .0
                 .borrow()
@@ -986,10 +1029,10 @@ impl DesktopApp {
                 .set_offset(state.trajectory_offset);
             let selected = state.selected_trajectory.filter(|selected| {
                 self.core
-                    .conversation
-                    .messages
+                    .trajectory_data
+                    .records
                     .iter()
-                    .any(|message| message.key == *selected)
+                    .any(|record| record.id == *selected)
             });
             let _ = self.transition(Action::RestoreSessionView {
                 selected,
@@ -999,10 +1042,10 @@ impl DesktopApp {
             if let Some(selected) = selected
                 && let Some(index) = self
                     .core
-                    .conversation
-                    .messages
+                    .trajectory_data
+                    .records
                     .iter()
-                    .position(|message| message.key == selected)
+                    .position(|record| record.id == selected)
             {
                 self.scroll_trajectory_to_record(index, cx);
             }
@@ -1151,14 +1194,30 @@ impl DesktopApp {
             .is_some_and(|message| message.role == Role::Tool)
         {
             self.save_current_view_state();
-            let message_id = self.core.conversation.messages[index].key;
+            let Some(call_id) = self.core.conversation.messages[index]
+                .tool_call_id
+                .as_deref()
+            else {
+                return;
+            };
+            let Some((trajectory_index, record)) = self
+                .core
+                .trajectory_data
+                .records
+                .iter()
+                .enumerate()
+                .find(|(_, record)| record.call_id.as_deref() == Some(call_id))
+            else {
+                return;
+            };
+            let message_id = record.id;
             let mut effects = self.transition(Action::ShowTrajectory);
             effects.extend(self.transition(Action::SelectDetails(Some(message_id))));
             run_effects(self, effects, window, cx);
             self.dispatch_local(Action::SetDetailsTab(DetailsTab::Summary), cx);
             self.details_scroll.set_offset(point(px(0.0), px(0.0)));
             self.dispatch_local(Action::ExpandTrajectoryGroups, cx);
-            self.scroll_trajectory_to_record(index, cx);
+            self.scroll_trajectory_to_record(trajectory_index, cx);
             cx.notify();
         }
     }
@@ -1760,19 +1819,10 @@ impl DesktopApp {
             Ok(catalog) => {
                 self.project_archived_sessions
                     .insert(sessions_dir.clone(), catalog.sessions);
-                self.project_archived_session_issues
-                    .insert(sessions_dir, catalog.issues);
             }
-            Err(error) => {
+            Err(_) => {
                 self.project_archived_sessions
-                    .insert(sessions_dir.clone(), Vec::new());
-                self.project_archived_session_issues.insert(
-                    sessions_dir,
-                    vec![SessionIssue {
-                        path: directory,
-                        message: error.to_string(),
-                    }],
-                );
+                    .insert(sessions_dir, Vec::new());
             }
         }
     }
@@ -1891,8 +1941,7 @@ impl DesktopApp {
     }
 
     fn refresh_session_search_documents(&mut self) {
-        self.session_search_documents =
-            build_session_search_documents(&self.project_store, &self.project_sessions);
+        self.session_search_documents = build_session_search_documents(&self.project_store);
     }
 
     fn reload_sessions(&mut self, sessions_dir: &Path) -> Vec<SessionInfo> {
@@ -1903,22 +1952,13 @@ impl DesktopApp {
             .find(|project| project.sessions_dir == sessions_dir)
             .map(|project| project.id.as_str())
             .unwrap_or(kcastle_agent::DEFAULT_PROJECT_ID);
-        let (sessions, issues) = match Session::catalog_in_project(sessions_dir, project_id) {
-            Ok(catalog) => (catalog.sessions, catalog.issues),
-            Err(error) => {
-                let sessions = self
-                    .project_sessions
-                    .get(sessions_dir)
-                    .cloned()
-                    .unwrap_or_default();
-                (
-                    sessions,
-                    vec![SessionIssue {
-                        path: sessions_dir.to_owned(),
-                        message: error.to_string(),
-                    }],
-                )
-            }
+        let sessions = match Session::catalog_in_project(sessions_dir, project_id) {
+            Ok(catalog) => catalog.sessions,
+            Err(_) => self
+                .project_sessions
+                .get(sessions_dir)
+                .cloned()
+                .unwrap_or_default(),
         };
         if let Some(previous) = self.project_sessions.get(sessions_dir) {
             for session in previous {
@@ -1931,8 +1971,6 @@ impl DesktopApp {
         }
         self.project_sessions
             .insert(sessions_dir.to_owned(), sessions.clone());
-        self.project_session_issues
-            .insert(sessions_dir.to_owned(), issues);
         sessions
     }
 
@@ -1942,14 +1980,11 @@ impl DesktopApp {
     }
 
     fn refresh_project_session_cache(&mut self) {
-        let (sessions, issues) = load_project_sessions(&self.project_store);
-        let (archived_sessions, archived_issues) =
-            load_project_archived_sessions(&self.project_store);
+        let sessions = load_project_sessions(&self.project_store);
+        let archived_sessions = load_project_archived_sessions(&self.project_store);
         self.session_activity = load_session_activity(&sessions);
         self.project_sessions = sessions;
-        self.project_session_issues = issues;
         self.project_archived_sessions = archived_sessions;
-        self.project_archived_session_issues = archived_issues;
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
@@ -2134,43 +2169,29 @@ fn conversation_from_session(
     }
 }
 
-fn append_interrupted_stream(messages: &mut Vec<Message>, events: &[SessionEvent]) {
-    let mut reasoning = String::new();
-    let mut answer = String::new();
-    let mut active = false;
-    let mut current_input = None;
+fn append_interrupted_stream(messages: &mut Vec<Message>, events: &[RecordedEvent]) {
+    let mut partials = HashMap::<(u32, u32), (String, String)>::new();
     let mut admitted = Vec::<(String, String)>::new();
-    let mut interruption = None;
-    for event in events {
-        match event {
-            SessionEvent::RunStarted { input } => {
-                reasoning.clear();
-                answer.clear();
-                active = true;
-                current_input = Some(input.clone());
-                interruption = Some("Run interrupted before completion");
+    for recorded in events {
+        match &recorded.event {
+            SessionEvent::AssistantChunk { turn, step, chunk } => {
+                let partial = partials.entry((*turn, *step)).or_default();
+                match chunk {
+                    AssistantChunk::ReasoningTextDelta { delta } => partial.0.push_str(delta),
+                    AssistantChunk::OutputTextDelta { delta } => partial.1.push_str(delta),
+                    _ => {}
+                }
             }
-            SessionEvent::ReasoningDelta { delta } if active => reasoning.push_str(delta),
-            SessionEvent::TextDelta { delta } if active => answer.push_str(delta),
-            SessionEvent::ResponseCommitted => {
-                reasoning.clear();
-                answer.clear();
-                current_input = None;
+            SessionEvent::AssistantMessage { turn, step, .. } => {
+                partials.remove(&(*turn, *step));
             }
-            SessionEvent::RunFinished => {
-                active = false;
-                reasoning.clear();
-                answer.clear();
-                interruption = None;
-                current_input = None;
-            }
-            SessionEvent::RunAborted => {
-                active = false;
-                interruption = Some("Run stopped; partial output was preserved");
-            }
-            SessionEvent::RunFailed { .. } => {
-                active = false;
-                interruption = Some("Run failed; partial output was preserved");
+            SessionEvent::StepEnd {
+                turn,
+                step,
+                outcome: StepOutcome::Completed,
+                ..
+            } => {
+                partials.remove(&(*turn, *step));
             }
             SessionEvent::InputAdmitted { id, input, .. } => {
                 admitted.push((id.clone(), input.clone()));
@@ -2178,27 +2199,63 @@ fn append_interrupted_stream(messages: &mut Vec<Message>, events: &[SessionEvent
             SessionEvent::InputConsumed { id } => {
                 admitted.retain(|(candidate, _)| candidate != id);
             }
-            SessionEvent::ReasoningDelta { .. } | SessionEvent::TextDelta { .. } => {}
+            _ => {}
         }
     }
-    if let Some(input) = current_input
-        && !messages
-            .last()
-            .is_some_and(|message| message.role == Role::User && message.text == input)
-    {
-        messages.push(restored_message(Role::User, input));
-    }
-    let had_partial = !reasoning.is_empty() || !answer.is_empty();
-    if !reasoning.is_empty() {
-        let mut message = restored_message(Role::Reasoning, reasoning);
-        message.title = Some("Think · interrupted".into());
-        messages.push(message);
-    }
-    if !answer.is_empty() {
-        messages.push(restored_message(Role::Assistant, answer));
-    }
-    if had_partial && let Some(interruption) = interruption {
-        messages.push(restored_message(Role::Notice, interruption.into()));
+    let user_steps = events
+        .iter()
+        .filter_map(|recorded| match recorded.event {
+            SessionEvent::UserMessage { turn, step, .. } => Some((turn, step)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let user_indices = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (message.role == Role::User).then_some(index))
+        .collect::<Vec<_>>();
+    let active_user_count = user_indices.len().min(user_steps.len());
+    let anchors = user_steps[user_steps.len().saturating_sub(active_user_count)..]
+        .iter()
+        .copied()
+        .zip(
+            user_indices[user_indices.len().saturating_sub(active_user_count)..]
+                .iter()
+                .copied(),
+        )
+        .collect::<Vec<_>>();
+    let mut partials = partials.into_iter().collect::<Vec<_>>();
+    partials.sort_by_key(|((turn, step), _)| std::cmp::Reverse((*turn, *step)));
+    for ((turn, step), (reasoning, answer)) in partials {
+        if !anchors
+            .iter()
+            .any(|((anchor_turn, anchor_step), _)| *anchor_turn == turn && *anchor_step <= step)
+        {
+            continue;
+        }
+        let had_partial = !reasoning.is_empty() || !answer.is_empty();
+        let mut recovered = Vec::new();
+        if !reasoning.is_empty() {
+            let mut message = restored_message(Role::Reasoning, reasoning);
+            message.title = Some("Think · interrupted".into());
+            recovered.push(message);
+        }
+        if !answer.is_empty() {
+            recovered.push(restored_message(Role::Assistant, answer));
+        }
+        if had_partial {
+            recovered.push(restored_message(
+                Role::Notice,
+                "Run interrupted; partial output was preserved".into(),
+            ));
+        }
+        let insert_at = anchors
+            .iter()
+            .find_map(|((anchor_turn, anchor_step), index)| {
+                ((*anchor_turn, *anchor_step) > (turn, step)).then_some(*index)
+            })
+            .unwrap_or(messages.len());
+        messages.splice(insert_at..insert_at, recovered);
     }
     for (_, input) in admitted {
         if !messages
@@ -2363,32 +2420,24 @@ pub(crate) fn same_path(left: &Path, right: &Path) -> bool {
 
 fn build_session_search_documents(
     project_store: &ProjectStore,
-    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
 ) -> HashMap<PathBuf, SessionSearchDocument> {
     let mut documents = HashMap::new();
     for project in project_store.projects() {
-        let Some(sessions) = project_sessions.get(&project.sessions_dir) else {
+        let Ok(catalog) = Session::catalog_in_project(&project.sessions_dir, project.id.as_str())
+        else {
             continue;
         };
-        for session in sessions {
-            let Ok(contents) = std::fs::read_to_string(&session.path) else {
-                continue;
-            };
-            let mut values = Vec::new();
-            for line in contents.lines() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                    collect_search_strings(&value, &mut values);
-                }
-            }
+        for (path, search) in catalog.search {
+            let values = search.values;
             let summary = values
                 .iter()
                 .find(|value| value.chars().count() >= 4 && !value.starts_with("resp_"))
                 .map(|value| truncate_chars(value, 88))
                 .unwrap_or_default();
             documents.insert(
-                session.path.clone(),
+                path,
                 SessionSearchDocument {
-                    searchable: values.join("\n").to_lowercase(),
+                    searchable: search.searchable,
                     summary,
                     snippets: values,
                 },
@@ -2398,63 +2447,37 @@ fn build_session_search_documents(
     documents
 }
 
-fn load_project_sessions(
-    project_store: &ProjectStore,
-) -> (
-    HashMap<PathBuf, Vec<SessionInfo>>,
-    HashMap<PathBuf, Vec<SessionIssue>>,
-) {
+fn load_project_sessions(project_store: &ProjectStore) -> HashMap<PathBuf, Vec<SessionInfo>> {
     let mut sessions = HashMap::new();
-    let mut issues = HashMap::new();
     for project in project_store.projects() {
         match Session::catalog_in_project(&project.sessions_dir, project.id.as_str()) {
             Ok(catalog) => {
                 sessions.insert(project.sessions_dir.clone(), catalog.sessions);
-                issues.insert(project.sessions_dir.clone(), catalog.issues);
             }
-            Err(error) => {
+            Err(_) => {
                 sessions.insert(project.sessions_dir.clone(), Vec::new());
-                issues.insert(
-                    project.sessions_dir.clone(),
-                    vec![SessionIssue {
-                        path: project.sessions_dir.clone(),
-                        message: error.to_string(),
-                    }],
-                );
             }
         }
     }
-    (sessions, issues)
+    sessions
 }
 
 fn load_project_archived_sessions(
     project_store: &ProjectStore,
-) -> (
-    HashMap<PathBuf, Vec<SessionInfo>>,
-    HashMap<PathBuf, Vec<SessionIssue>>,
-) {
+) -> HashMap<PathBuf, Vec<SessionInfo>> {
     let mut sessions = HashMap::new();
-    let mut issues = HashMap::new();
     for project in project_store.projects() {
         let directory = project.sessions_dir.join(ARCHIVE_DIRECTORY);
         match Session::catalog_in_project(&directory, project.id.as_str()) {
             Ok(catalog) => {
                 sessions.insert(project.sessions_dir.clone(), catalog.sessions);
-                issues.insert(project.sessions_dir.clone(), catalog.issues);
             }
-            Err(error) => {
+            Err(_) => {
                 sessions.insert(project.sessions_dir.clone(), Vec::new());
-                issues.insert(
-                    project.sessions_dir.clone(),
-                    vec![SessionIssue {
-                        path: directory,
-                        message: error.to_string(),
-                    }],
-                );
             }
         }
     }
-    (sessions, issues)
+    sessions
 }
 
 fn load_session_activity(
@@ -2474,29 +2497,6 @@ fn session_modified_at_from_disk(session: &SessionInfo) -> u64 {
         .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
         .unwrap_or(session.created_at)
-}
-
-fn collect_search_strings(value: &serde_json::Value, output: &mut Vec<String>) {
-    match value {
-        serde_json::Value::String(value) => {
-            if !value.trim().is_empty() {
-                output.push(value.clone());
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_search_strings(value, output);
-            }
-        }
-        serde_json::Value::Object(values) => {
-            for (key, value) in values {
-                if !matches!(key.as_str(), "id" | "call_id" | "created_at" | "model") {
-                    collect_search_strings(value, output);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -2520,6 +2520,20 @@ fn matching_search_snippet(values: &[String], query: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recorded(seq: u64, event: SessionEvent) -> RecordedEvent {
+        RecordedEvent {
+            seq,
+            time: kcastle_agent::EventTime {
+                wall_time_ms: 1_000 + seq as i64,
+                clock_id: "test-clock".into(),
+                monotonic_ns: seq * 1_000_000,
+            },
+            source_event_seqs: Vec::new(),
+            surface_op: None,
+            event,
+        }
+    }
 
     fn update_messages(messages: &mut Vec<Message>, action: impl FnOnce(&mut ConversationState)) {
         let mut state = ConversationState {
@@ -2791,12 +2805,22 @@ mod tests {
             view.update(app, |this, cx| {
                 let mut snapshot = this.selected_runtime.read(cx).snapshot();
                 let path = this.core.workspace.sessions_dir.join("created.jsonl");
+                let project_id = this
+                    .project_store
+                    .project(this.core.workspace.active_project)
+                    .unwrap()
+                    .id
+                    .as_str()
+                    .to_owned();
                 std::fs::create_dir_all(&this.core.workspace.sessions_dir).unwrap();
                 std::fs::write(
                     &path,
                     format!(
-                        "{{\"record\":\"session\",\"title\":\"Untitled session\",\"created_at\":{}}}\n",
-                        snapshot.session.created_at
+                        "{{\"record\":\"session\",\"format_version\":{},\"title\":\"Untitled session\",\"created_at_ms\":{},\"session_id\":\"{}\",\"project_id\":\"{}\",\"config\":{{\"allow_all_tools\":false}}}}\n",
+                        kcastle_agent::SESSION_FORMAT_VERSION,
+                        snapshot.session.created_at * 1_000,
+                        snapshot.session.id.as_str(),
+                        project_id,
                     ),
                 )
                 .unwrap();
@@ -2831,8 +2855,9 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "{{\"record\":\"session\",\"title\":\"Archive me\",\"created_at\":1,\"project_id\":\"{}\"}}\n",
-                project.id.as_str()
+                "{{\"record\":\"session\",\"format_version\":{},\"title\":\"Archive me\",\"created_at_ms\":1000,\"session_id\":\"archive-test\",\"project_id\":\"{}\",\"config\":{{\"allow_all_tools\":false}}}}\n",
+                kcastle_agent::SESSION_FORMAT_VERSION,
+                project.id.as_str(),
             ),
         )
         .unwrap();
@@ -3241,27 +3266,144 @@ mod tests {
 
     #[test]
     fn interrupted_stream_replay_preserves_durable_input_and_partial_output() {
-        let mut messages = Vec::new();
+        let mut messages = vec![restored_message(Role::User, "question".into())];
         append_interrupted_stream(
             &mut messages,
             &[
-                SessionEvent::RunStarted {
-                    input: "question".into(),
-                },
-                SessionEvent::ReasoningDelta {
-                    delta: "partial thought".into(),
-                },
-                SessionEvent::TextDelta {
-                    delta: "partial answer".into(),
-                },
-                SessionEvent::RunAborted,
+                recorded(0, SessionEvent::StepStart { turn: 1, step: 1 }),
+                recorded(
+                    1,
+                    SessionEvent::UserMessage {
+                        turn: 1,
+                        step: 1,
+                        input_id: None,
+                        mode: kcastle_agent::UserMessageMode::Initial,
+                        items: vec![kcastle_agent::InputItem::from(
+                            kcastle_agent::EasyInputMessage::from("question"),
+                        )],
+                    },
+                ),
+                recorded(
+                    2,
+                    SessionEvent::AssistantChunk {
+                        turn: 1,
+                        step: 1,
+                        chunk: AssistantChunk::ReasoningTextDelta {
+                            delta: "partial thought".into(),
+                        },
+                    },
+                ),
+                recorded(
+                    3,
+                    SessionEvent::AssistantChunk {
+                        turn: 1,
+                        step: 1,
+                        chunk: AssistantChunk::OutputTextDelta {
+                            delta: "partial answer".into(),
+                        },
+                    },
+                ),
+                recorded(
+                    4,
+                    SessionEvent::StepEnd {
+                        turn: 1,
+                        step: 1,
+                        outcome: StepOutcome::Aborted,
+                        error: None,
+                    },
+                ),
             ],
         );
         assert_eq!(messages[0].role, Role::User);
-        assert_eq!(messages[0].text, "question");
         assert_eq!(messages[1].role, Role::Reasoning);
         assert_eq!(messages[2].text, "partial answer");
         assert_eq!(messages[3].role, Role::Notice);
+    }
+
+    #[test]
+    fn interrupted_stream_is_inserted_before_later_completed_turns() {
+        let mut messages = vec![
+            restored_message(Role::User, "first".into()),
+            restored_message(Role::User, "second".into()),
+            restored_message(Role::Assistant, "second answer".into()),
+        ];
+        append_interrupted_stream(
+            &mut messages,
+            &[
+                recorded(
+                    0,
+                    SessionEvent::UserMessage {
+                        turn: 1,
+                        step: 1,
+                        input_id: None,
+                        mode: kcastle_agent::UserMessageMode::Initial,
+                        items: vec![kcastle_agent::InputItem::from(
+                            kcastle_agent::EasyInputMessage::from("first"),
+                        )],
+                    },
+                ),
+                recorded(
+                    1,
+                    SessionEvent::AssistantChunk {
+                        turn: 1,
+                        step: 1,
+                        chunk: AssistantChunk::OutputTextDelta {
+                            delta: "partial first answer".into(),
+                        },
+                    },
+                ),
+                recorded(
+                    2,
+                    SessionEvent::StepEnd {
+                        turn: 1,
+                        step: 1,
+                        outcome: StepOutcome::Aborted,
+                        error: None,
+                    },
+                ),
+                recorded(
+                    3,
+                    SessionEvent::UserMessage {
+                        turn: 2,
+                        step: 1,
+                        input_id: None,
+                        mode: kcastle_agent::UserMessageMode::Initial,
+                        items: vec![kcastle_agent::InputItem::from(
+                            kcastle_agent::EasyInputMessage::from("second"),
+                        )],
+                    },
+                ),
+                recorded(
+                    4,
+                    SessionEvent::AssistantMessage {
+                        turn: 2,
+                        step: 1,
+                        items: vec![kcastle_agent::InputItem::from(
+                            kcastle_agent::EasyInputMessage::from("second answer"),
+                        )],
+                        response: kcastle_agent::ResponseMetadata {
+                            id: "response-2".into(),
+                            model: "test".into(),
+                            usage: None,
+                        },
+                    },
+                ),
+            ],
+        );
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "first",
+                "partial first answer",
+                "Run interrupted; partial output was preserved",
+                "second",
+                "second answer",
+            ]
+        );
     }
 
     #[test]
@@ -3270,14 +3412,20 @@ mod tests {
         append_interrupted_stream(
             &mut messages,
             &[
-                SessionEvent::InputAdmitted {
-                    id: "input-1".into(),
-                    input: "later".into(),
-                    mode: kcastle_agent::InputMode::Queue,
-                },
-                SessionEvent::InputConsumed {
-                    id: "input-1".into(),
-                },
+                recorded(
+                    0,
+                    SessionEvent::InputAdmitted {
+                        id: "input-1".into(),
+                        input: "later".into(),
+                        mode: kcastle_agent::InputMode::Queue,
+                    },
+                ),
+                recorded(
+                    1,
+                    SessionEvent::InputConsumed {
+                        id: "input-1".into(),
+                    },
+                ),
             ],
         );
         assert!(messages.is_empty());
