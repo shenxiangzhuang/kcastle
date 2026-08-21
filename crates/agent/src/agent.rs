@@ -32,6 +32,7 @@ use crate::state::{ResponseMetadata, State, TranscriptItem};
 use crate::tool::{AgentTool, Env, ShellTool, ToolResult};
 
 const DEFAULT_MAX_TURNS: usize = 100;
+const STREAM_EVENT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelPreset {
@@ -833,9 +834,16 @@ impl Agent {
             };
             let mut completed = None;
             let mut chunk_seqs = Vec::new();
+            let mut event_flush = tokio::time::interval(STREAM_EVENT_FLUSH_INTERVAL);
+            event_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            event_flush.tick().await;
             loop {
                 let event = tokio::select! {
                     _ = channels.cancel.cancelled() => return Err(AgentError::Aborted),
+                    _ = event_flush.tick() => {
+                        self.commit.flush_events().await?;
+                        continue;
+                    }
                     message = channels.steer.recv() => {
                         if let Some(message) = message {
                             self.admit_input(&message, InputMode::Steer, events).await?;
@@ -2003,7 +2011,7 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::Barrier;
+    use tokio::sync::{Barrier, Notify};
 
     use super::{ActiveAgent, Agent, AgentEvent, Model, ReasoningEffort, RunControl};
     use crate::{
@@ -2065,6 +2073,120 @@ mod tests {
             ),
             server,
         )
+    }
+
+    async fn stalled_stream_model(
+        delta_sent: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> (Model, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let (body_start, content_length) = loop {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..bytes]);
+                let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                break (header_end + 4, content_length);
+            };
+            while request.len() < body_start + content_length {
+                let mut chunk = [0; 4096];
+                let bytes = socket.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..bytes]);
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            socket
+                .write_all(b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"partial\"}\n\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            delta_sent.notify_one();
+            release.notified().await;
+            socket
+                .write_all(b"data: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"created_at\":0,\"id\":\"resp_1\",\"model\":\"test-model\",\"object\":\"response\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"annotations\":[],\"text\":\"partial\"}],\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\"}],\"status\":\"completed\"}}\n\n")
+                .await
+                .unwrap();
+        });
+        (
+            Model::new(
+                "test",
+                "test-key",
+                format!("http://{address}"),
+                "test-model",
+                128_000,
+            ),
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn assistant_chunk_is_flushed_while_the_provider_stream_is_stalled() {
+        let directory = std::env::temp_dir().join(format!(
+            "kcastle-stalled-stream-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session = Session::create(&directory).await.unwrap();
+        let path = session.info().path.clone();
+        let delta_sent = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let (model, server) = stalled_stream_model(delta_sent.clone(), release.clone()).await;
+        let mut active = Agent::new(model, "test", session, ".").start("hello");
+
+        delta_sent.notified().await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if matches!(active.next_event().await, Some(AgentEvent::TextDelta(_))) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the stalled provider delta should reach the agent");
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        assert!(
+            Session::inspect(&path)
+                .unwrap()
+                .events()
+                .iter()
+                .any(|recorded| {
+                    matches!(
+                        recorded.event,
+                        SessionEvent::AssistantChunk {
+                            chunk: crate::AssistantChunk::OutputTextDelta { .. },
+                            ..
+                        }
+                    )
+                })
+        );
+
+        release.notify_one();
+        active.finish().await.unwrap();
+        server.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -2423,6 +2545,10 @@ mod tests {
                     .event_at(time, event, source_event_seqs, surface_op)
                     .await
             })
+        }
+
+        fn flush_events(&mut self) -> BoxFuture<'_, Result<(), SessionError>> {
+            self.inner.flush_events()
         }
 
         fn set_config<'a>(

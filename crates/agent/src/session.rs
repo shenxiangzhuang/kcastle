@@ -242,6 +242,10 @@ pub trait StateCommit: Send + Sync {
         self.event(event, source_event_seqs, surface_op)
     }
 
+    fn flush_events(&mut self) -> BoxFuture<'_, Result<(), SessionError>> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn set_config<'a>(
         &'a mut self,
         config: &'a SessionConfig,
@@ -269,6 +273,7 @@ struct SessionCommit {
     needs_project_binding: bool,
     clock: EventClock,
     known_stamp: Option<CatalogFileStamp>,
+    recovery_needed: bool,
     pending_event_bytes: Vec<u8>,
     last_event_flush: Instant,
 }
@@ -693,6 +698,7 @@ impl Session {
                 needs_project_binding: self.needs_project_binding,
                 clock: EventClock::new(),
                 known_stamp,
+                recovery_needed: self.recovery_needed,
                 pending_event_bytes: Vec::new(),
                 last_event_flush: Instant::now(),
             }),
@@ -1138,7 +1144,7 @@ impl StateCommit for SessionCommit {
             };
             let writer_lock = acquire_writer_lock(&path)?;
             let current_stamp = catalog_file_stamp(&path)?;
-            if self.known_stamp.as_ref() != Some(&current_stamp) {
+            if self.recovery_needed || self.known_stamp.as_ref() != Some(&current_stamp) {
                 let parsed = read_session(&path)?;
                 let parsed_state = state_from_events(&parsed.events)?;
                 if parsed_state.entries() != state.entries()
@@ -1168,6 +1174,7 @@ impl StateCommit for SessionCommit {
                         .open(&path)?
                         .write_all(b"\n")?;
                 }
+                self.recovery_needed = false;
             }
             self.file = Some(OpenOptions::new().append(true).open(&path).await?);
             self._writer_lock = Some(writer_lock);
@@ -1232,6 +1239,10 @@ impl StateCommit for SessionCommit {
             self.next_seq = self.next_seq.saturating_add(1);
             Ok(event)
         })
+    }
+
+    fn flush_events(&mut self) -> BoxFuture<'_, Result<(), SessionError>> {
+        Box::pin(self.flush_pending_events())
     }
 
     fn set_config<'a>(
@@ -2839,6 +2850,70 @@ mod tests {
         assert_eq!(session_parse_count(&path), before + 1);
 
         drop(commit);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn readonly_commit_repairs_a_torn_tail_before_appending() {
+        let directory = test_directory("readonly-repair-tail");
+        let session = Session::create(&directory).await.unwrap();
+        let path = session.info().path.clone();
+        drop(session);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"record":"event""#)
+            .unwrap();
+
+        let readonly = Session::open_readonly(&path).unwrap();
+        assert!(readonly.recovery_needed());
+        let (state, mut commit) = readonly.into_parts();
+        commit.prepare(&state).await.unwrap();
+        commit
+            .event(SessionEvent::TurnStart { turn: 1 }, vec![], None)
+            .await
+            .unwrap();
+        drop(commit);
+
+        let snapshot = Session::inspect(&path).unwrap();
+        assert_eq!(snapshot.events().len(), 1);
+        assert!(matches!(
+            snapshot.events()[0].event,
+            SessionEvent::TurnStart { turn: 1 }
+        ));
+        assert!(
+            std::fs::read_dir(&directory)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains(".recovery-"))
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn readonly_commit_restores_a_missing_newline_before_appending() {
+        let directory = test_directory("readonly-repair-newline");
+        let session = Session::create(&directory).await.unwrap();
+        let path = session.info().path.clone();
+        drop(session);
+        let mut bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        std::fs::write(&path, bytes).unwrap();
+
+        let readonly = Session::open_readonly(&path).unwrap();
+        assert!(readonly.recovery_needed());
+        let (state, mut commit) = readonly.into_parts();
+        commit.prepare(&state).await.unwrap();
+        commit
+            .event(SessionEvent::TurnStart { turn: 1 }, vec![], None)
+            .await
+            .unwrap();
+        drop(commit);
+
+        let snapshot = Session::inspect(&path).unwrap();
+        assert_eq!(snapshot.events().len(), 1);
+        assert!(!snapshot.recovery_needed());
         std::fs::remove_dir_all(directory).unwrap();
     }
 
