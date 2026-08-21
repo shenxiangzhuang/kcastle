@@ -12,7 +12,8 @@ use kcastle_agent::{
 use crate::application::{MAX_EVENTS_PER_FRAME, StreamBatch, is_frame_stream_event};
 use crate::domain::{
     ApprovalState, ConversationAction, ConversationState, Message, Role, RunId,
-    TrajectoryProjection, UsageSnapshot, next_message_id, reduce_conversation, reindex_messages,
+    TrajectoryProjection, UsageSnapshot, next_message_id, reduce_conversation,
+    reindex_shared_messages_from,
 };
 use crate::platform::gpui::arm_next_frame;
 use crate::settings::EnterBehavior;
@@ -527,6 +528,7 @@ impl SessionRuntime {
     }
 
     fn apply_events(&mut self, events: Vec<AgentEvent>) {
+        let conversation_dirty_from = self.conversation.messages.len().saturating_sub(1);
         let mut pending_delta = None;
         let mut conversation_changed = false;
         let mut transcript_updates = 0_u64;
@@ -570,7 +572,10 @@ impl SessionRuntime {
         }
         self.transcript_updates = self.transcript_updates.saturating_add(transcript_updates);
         if conversation_changed {
-            reindex_messages(&mut Arc::make_mut(&mut self.conversation).messages);
+            reindex_shared_messages_from(
+                &mut Arc::make_mut(&mut self.conversation).messages,
+                conversation_dirty_from,
+            );
         }
     }
 
@@ -717,13 +722,14 @@ impl SessionRuntime {
     }
 
     fn tool_result(&mut self, call_id: &str, result: ToolResult) {
+        let duration_ms = self.trajectory.tool_duration_ms(call_id);
         reduce_conversation(
             Arc::make_mut(&mut self.conversation),
             ConversationAction::ToolFinished {
                 call_id: call_id.to_owned(),
                 output: result.output,
                 is_error: result.is_error,
-                duration_ms: None,
+                duration_ms,
             },
         );
     }
@@ -859,7 +865,78 @@ mod tests {
         assert_eq!(runtime.conversation.messages.len(), 1);
         assert_eq!(runtime.conversation.messages[0].text, "hello world");
         assert_eq!(runtime.transcript_updates, 2);
-        assert_eq!(runtime.trajectory.revision(), 1);
+        assert_eq!(runtime.trajectory.revision(), 2);
+    }
+
+    #[test]
+    fn live_tool_result_uses_the_durable_full_call_duration() {
+        let mut runtime = runtime();
+        let mut tool_message = message(Role::Tool, String::new());
+        tool_message.tool_call_id = Some("call-1".into());
+        tool_message.pending = true;
+        Arc::make_mut(&mut runtime.conversation)
+            .messages
+            .push(Arc::new(tool_message));
+        let recorded = |seq, millis, event| kcastle_agent::RecordedEvent {
+            seq,
+            time: kcastle_agent::EventTime {
+                wall_time_ms: millis,
+                clock_id: "runtime-tool".into(),
+                monotonic_ns: u64::try_from(millis).unwrap() * 1_000_000,
+            },
+            source_event_seqs: Vec::new(),
+            surface_op: None,
+            event,
+        };
+        runtime.apply_events(vec![
+            AgentEvent::SessionEvent(recorded(
+                0,
+                100,
+                kcastle_agent::SessionEvent::ToolCall {
+                    turn: 1,
+                    step: 1,
+                    call_id: "call-1".into(),
+                    parent_call_id: None,
+                    name: "shell".into(),
+                    arguments: "{}".into(),
+                },
+            )),
+            AgentEvent::SessionEvent(recorded(
+                1,
+                110,
+                kcastle_agent::SessionEvent::ToolExecutionStart {
+                    call_id: "call-1".into(),
+                },
+            )),
+            AgentEvent::SessionEvent(recorded(
+                2,
+                150,
+                kcastle_agent::SessionEvent::ToolExecutionFinish {
+                    call_id: "call-1".into(),
+                    outcome: kcastle_agent::ToolExecutionOutcome::Success,
+                },
+            )),
+            AgentEvent::SessionEvent(recorded(
+                3,
+                160,
+                kcastle_agent::SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: "call-1".into(),
+                    output: "ok".into(),
+                    status: kcastle_agent::ToolResultStatus::Success,
+                    item: kcastle_agent::InputItem::from(kcastle_agent::EasyInputMessage::from(
+                        "ok",
+                    )),
+                },
+            )),
+        ]);
+
+        runtime.tool_result("call-1", ToolResult::ok("ok"));
+
+        let message = &runtime.conversation.messages[0];
+        assert!(!message.pending);
+        assert_eq!(message.duration_ms, Some(60));
     }
 
     #[test]
@@ -875,6 +952,30 @@ mod tests {
         assert_eq!(after.conversation.messages[0].text, "new");
         assert!(!Arc::ptr_eq(&before.conversation, &after.conversation));
         assert!(Arc::ptr_eq(&before.trajectory, &after.trajectory));
+    }
+
+    #[test]
+    fn snapshot_cow_reuses_unchanged_messages_instead_of_cloning_the_transcript() {
+        let mut runtime = runtime();
+        runtime.apply_events(vec![
+            AgentEvent::RunStarted("question".into()),
+            AgentEvent::TextDelta("first".into()),
+        ]);
+        let before = runtime.snapshot();
+
+        runtime.apply_events(vec![AgentEvent::TextDelta(" second".into())]);
+        let after = runtime.snapshot();
+
+        assert!(Arc::ptr_eq(
+            &before.conversation.messages[0],
+            &after.conversation.messages[0]
+        ));
+        assert!(!Arc::ptr_eq(
+            &before.conversation.messages[1],
+            &after.conversation.messages[1]
+        ));
+        assert_eq!(before.conversation.messages[1].text, "first");
+        assert_eq!(after.conversation.messages[1].text, "first second");
     }
 
     #[test]

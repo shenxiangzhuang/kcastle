@@ -153,6 +153,8 @@ struct RuntimeObservation {
 pub(crate) struct TimelineDragState {
     pub(crate) pan: bool,
     pub(crate) start_value: f64,
+    pub(crate) start_x: f32,
+    pub(crate) record_index: Option<usize>,
     pub(crate) initial_viewport: Option<(f64, f64)>,
 }
 
@@ -540,16 +542,8 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> Option<Entity<SessionRuntime>> {
         let project = self.project_store.project(project_index)?.clone();
-        let mut conversation = conversation_from_session(&session, &self.tool_schemas);
+        let conversation = conversation_from_session(&session, &self.tool_schemas);
         let trajectory = crate::domain::TrajectoryProjection::from_events(session.events());
-        if session.recovery_needed() {
-            conversation.messages.push(restored_message(
-                Role::Notice,
-                "The session log has an incomplete tail. It will be backed up and repaired when this session next writes."
-                    .into(),
-            ));
-            reindex_messages(&mut conversation.messages);
-        }
         let mut config = session.config().clone();
         let model_index = active_model_index(&self.models, config.model_id.as_deref())
             .unwrap_or(self.selected_model);
@@ -2159,7 +2153,7 @@ fn conversation_from_session(
         })
         .unwrap_or_default();
     ConversationState {
-        messages,
+        messages: messages.into_iter().map(Arc::new).collect(),
         title,
         turns,
         tool_calls,
@@ -2537,11 +2531,15 @@ mod tests {
 
     fn update_messages(messages: &mut Vec<Message>, action: impl FnOnce(&mut ConversationState)) {
         let mut state = ConversationState {
-            messages: std::mem::take(messages),
+            messages: std::mem::take(messages).into_iter().map(Arc::new).collect(),
             ..ConversationState::default()
         };
         action(&mut state);
-        *messages = state.messages;
+        *messages = state
+            .messages
+            .into_iter()
+            .map(Arc::unwrap_or_clone)
+            .collect();
     }
 
     fn push_delta(messages: &mut Vec<Message>, delta: &str) {

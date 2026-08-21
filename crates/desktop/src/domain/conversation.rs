@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::domain::MessageId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +35,7 @@ pub(crate) struct Message {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ConversationState {
-    pub(crate) messages: Vec<Message>,
+    pub(crate) messages: Vec<Arc<Message>>,
     pub(crate) title: String,
     pub(crate) turns: usize,
     pub(crate) tool_calls: usize,
@@ -108,8 +110,8 @@ pub(crate) fn reduce_conversation(
     match action {
         ConversationAction::SubmitUser(message) => {
             let title = (state.title == "New chat").then(|| short_title(&message.text));
-            state.messages.push(message);
-            reindex_messages(&mut state.messages);
+            state.messages.push(Arc::new(message));
+            reindex_shared_messages(&mut state.messages);
             state.turns = state
                 .messages
                 .iter()
@@ -126,7 +128,7 @@ pub(crate) fn reduce_conversation(
                 .is_some_and(|message| message.role == Role::User)
             {
                 state.messages.pop();
-                reindex_messages(&mut state.messages);
+                reindex_shared_messages(&mut state.messages);
                 state.turns = state
                     .messages
                     .iter()
@@ -138,8 +140,8 @@ pub(crate) fn reduce_conversation(
             }
         }
         ConversationAction::AppendNotice(message) => {
-            state.messages.push(message);
-            reindex_messages(&mut state.messages);
+            state.messages.push(Arc::new(message));
+            reindex_shared_messages(&mut state.messages);
         }
         ConversationAction::TextDelta {
             delta,
@@ -150,18 +152,19 @@ pub(crate) fn reduce_conversation(
                 .last_mut()
                 .filter(|message| message.role == Role::Reasoning)
             {
-                reasoning.pending = false;
+                Arc::make_mut(reasoning).pending = false;
             }
             if let Some(message) = state
                 .messages
                 .last_mut()
                 .filter(|message| message.role == Role::Assistant)
             {
+                let message = Arc::make_mut(message);
                 message.text.push_str(&delta);
                 message.revision = message.revision.saturating_add(1);
             } else {
                 new_message.pending = true;
-                state.messages.push(new_message);
+                state.messages.push(Arc::new(new_message));
             }
         }
         ConversationAction::ReasoningDelta {
@@ -173,25 +176,26 @@ pub(crate) fn reduce_conversation(
                 .last_mut()
                 .filter(|message| message.role == Role::Assistant)
             {
-                assistant.pending = false;
+                Arc::make_mut(assistant).pending = false;
             }
             if let Some(message) = state
                 .messages
                 .last_mut()
                 .filter(|message| message.role == Role::Reasoning)
             {
+                let message = Arc::make_mut(message);
                 message.text.push_str(&delta);
                 message.revision = message.revision.saturating_add(1);
             } else {
                 new_message.title = Some("Think".into());
                 new_message.pending = true;
-                state.messages.push(new_message);
+                state.messages.push(Arc::new(new_message));
             }
         }
         ConversationAction::ToolStarted(message) => {
             settle_active_response_message(&mut state.messages);
             state.tool_calls = state.tool_calls.saturating_add(1);
-            state.messages.push(message);
+            state.messages.push(Arc::new(message));
         }
         ConversationAction::ToolFinished {
             call_id,
@@ -205,6 +209,7 @@ pub(crate) fn reduce_conversation(
                 .rev()
                 .find(|message| message.tool_call_id.as_deref() == Some(&call_id))
             {
+                let message = Arc::make_mut(message);
                 message.text = output;
                 message.revision = message.revision.saturating_add(1);
                 message.pending = false;
@@ -215,6 +220,7 @@ pub(crate) fn reduce_conversation(
         }
         ConversationAction::RunFinished { response_id, usage } => {
             for message in state.messages.iter_mut().rev() {
+                let message = Arc::make_mut(message);
                 if message.role == Role::User {
                     break;
                 }
@@ -238,6 +244,7 @@ pub(crate) fn reduce_conversation(
         }
         ConversationAction::FinishReasoning => {
             for message in state.messages.iter_mut().rev() {
+                let message = Arc::make_mut(message);
                 if message.role == Role::User {
                     break;
                 }
@@ -251,6 +258,7 @@ pub(crate) fn reduce_conversation(
             if let Some(message) = state.messages.get_mut(index)
                 && message.role == role
             {
+                let message = Arc::make_mut(message);
                 message.expanded = !message.expanded;
                 request_tail = message.expanded;
             }
@@ -259,6 +267,7 @@ pub(crate) fn reduce_conversation(
             if let Some(message) = state.messages.get_mut(index)
                 && message.role == Role::Assistant
             {
+                let message = Arc::make_mut(message);
                 message.rating = (message.rating != Some(positive)).then_some(positive);
             }
         }
@@ -266,17 +275,18 @@ pub(crate) fn reduce_conversation(
     request_tail
 }
 
-fn settle_active_response_message(messages: &mut [Message]) {
+fn settle_active_response_message(messages: &mut [Arc<Message>]) {
     if let Some(message) = messages
         .last_mut()
         .filter(|message| matches!(message.role, Role::Reasoning | Role::Assistant))
     {
-        message.pending = false;
+        Arc::make_mut(message).pending = false;
     }
 }
 
-fn refresh_live_search(messages: &mut [Message]) {
+fn refresh_live_search(messages: &mut [Arc<Message>]) {
     for message in messages.iter_mut().rev() {
+        let message = Arc::make_mut(message);
         if message.role == Role::User {
             break;
         }
@@ -287,14 +297,18 @@ fn refresh_live_search(messages: &mut [Message]) {
 }
 
 pub(crate) fn refresh_message_search_text(message: &mut Message) {
-    message.search_text = [
+    message.search_text = message_search_text(message);
+}
+
+fn message_search_text(message: &Message) -> String {
+    [
         message.title.as_deref().unwrap_or_default(),
         message.payload.as_deref().unwrap_or_default(),
         message.schema.as_deref().unwrap_or_default(),
         message.text.as_str(),
     ]
     .join("\n")
-    .to_lowercase();
+    .to_lowercase()
 }
 
 pub(crate) fn reindex_messages(messages: &mut [Message]) {
@@ -326,6 +340,61 @@ pub(crate) fn reindex_messages(messages: &mut [Message]) {
             });
         }
         refresh_message_search_text(message);
+    }
+}
+
+pub(crate) fn reindex_shared_messages(messages: &mut [Arc<Message>]) {
+    reindex_shared_messages_from(messages, 0);
+}
+
+pub(crate) fn reindex_shared_messages_from(messages: &mut [Arc<Message>], start: usize) {
+    let start = start.min(messages.len());
+    let (mut turn, mut step, mut assistant_phase) = start
+        .checked_sub(1)
+        .and_then(|index| messages.get(index))
+        .map_or((0, 0, false), |message| {
+            (
+                message.turn,
+                message.step,
+                matches!(message.role, Role::Reasoning | Role::Assistant),
+            )
+        });
+    for message in &mut messages[start..] {
+        match message.role {
+            Role::User => {
+                turn += 1;
+                step = 0;
+                assistant_phase = false;
+            }
+            Role::Reasoning | Role::Assistant => {
+                if !assistant_phase {
+                    step += 1;
+                    assistant_phase = true;
+                }
+            }
+            Role::Tool | Role::Notice => assistant_phase = false,
+        }
+        let request_id = (message.request_id.is_none() && turn > 0).then(|| {
+            if step > 0 {
+                format!("turn-{turn}-step-{step}")
+            } else {
+                format!("turn-{turn}")
+            }
+        });
+        let search_text = message_search_text(message);
+        if message.turn != turn
+            || message.step != step
+            || request_id.is_some()
+            || message.search_text != search_text
+        {
+            let message = Arc::make_mut(message);
+            message.turn = turn;
+            message.step = step;
+            if let Some(request_id) = request_id {
+                message.request_id = Some(request_id);
+            }
+            message.search_text = search_text;
+        }
     }
 }
 

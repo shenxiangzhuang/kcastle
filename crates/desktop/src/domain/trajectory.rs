@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use kcastle_agent::{
     AssistantChunk, EventTime, RecordedEvent, SessionEvent, StepOutcome, ToolResultStatus,
@@ -134,11 +135,15 @@ impl TrajectoryRecord {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TrajectoryProjection {
-    pub(crate) records: Vec<TrajectoryRecord>,
+    pub(crate) records: Vec<Arc<TrajectoryRecord>>,
     stats: TrajectoryStats,
-    revision: u64,
+    geometry_revision: u64,
+    indices: Arc<TrajectoryIndices>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TrajectoryIndices {
     step_starts: HashMap<(u32, u32), (u64, EventTime)>,
-    request_starts: HashMap<(u32, u32), (u64, EventTime)>,
     completed_steps: HashSet<(u32, u32)>,
     completed_turns: HashSet<u32>,
     assistants: HashMap<(u32, u32), usize>,
@@ -156,16 +161,13 @@ impl TrajectoryProjection {
     }
 
     pub(crate) fn apply(&mut self, recorded: &RecordedEvent) {
-        self.revision = self.revision.saturating_add(1);
         match &recorded.event {
             SessionEvent::StepStart { turn, step } => {
-                self.step_starts
+                Arc::make_mut(&mut self.indices)
+                    .step_starts
                     .insert((*turn, *step), (recorded.seq, recorded.time.clone()));
             }
-            SessionEvent::ModelRequestStart { turn, step } => {
-                self.request_starts
-                    .insert((*turn, *step), (recorded.seq, recorded.time.clone()));
-            }
+            SessionEvent::ModelRequestStart { .. } => {}
             SessionEvent::RequestHeader {
                 turn,
                 step,
@@ -270,7 +272,9 @@ impl TrajectoryProjection {
                 ..
             } => {
                 let index = self.records.len();
-                self.tools.insert(call_id.clone(), index);
+                Arc::make_mut(&mut self.indices)
+                    .tools
+                    .insert(call_id.clone(), index);
                 self.push_record(TrajectoryRecord {
                     id: record_id(recorded.seq),
                     source_seq: recorded.seq,
@@ -335,7 +339,9 @@ impl TrajectoryProjection {
                 ..
             } => {
                 let index = self.records.len();
-                self.compactions.insert(compaction_id.clone(), index);
+                Arc::make_mut(&mut self.indices)
+                    .compactions
+                    .insert(compaction_id.clone(), index);
                 self.push_record(TrajectoryRecord {
                     id: record_id(recorded.seq),
                     source_seq: recorded.seq,
@@ -363,7 +369,7 @@ impl TrajectoryProjection {
                 response,
                 ..
             } => {
-                if let Some(index) = self.compactions.get(compaction_id).copied() {
+                if let Some(index) = self.indices.compactions.get(compaction_id).copied() {
                     self.update_record(index, |record| {
                         record.text = summary.clone();
                         record.timing.completed = Some(recorded.time.clone());
@@ -386,20 +392,20 @@ impl TrajectoryProjection {
                 outcome,
                 error,
             } => {
-                self.completed_turns.insert(*turn);
-                self.completed_steps.insert((*turn, *step));
+                let indices = Arc::make_mut(&mut self.indices);
+                indices.completed_turns.insert(*turn);
+                indices.completed_steps.insert((*turn, *step));
                 if *outcome != StepOutcome::Completed {
-                    if let Some(index) = self.assistants.get(&(*turn, *step)).copied() {
+                    if let Some(index) = self.indices.assistants.get(&(*turn, *step)).copied() {
                         self.update_record(index, |record| {
                             record.status = TrajectoryStatus::Failed;
-                            record.timing.completed.get_or_insert(recorded.time.clone());
                         });
                     } else {
                         let (source_seq, started) = self
-                            .request_starts
+                            .indices
+                            .step_starts
                             .get(&(*turn, *step))
                             .cloned()
-                            .or_else(|| self.step_starts.get(&(*turn, *step)).cloned())
                             .unwrap_or((recorded.seq, recorded.time.clone()));
                         self.push_record(TrajectoryRecord {
                             id: record_id(source_seq),
@@ -432,28 +438,36 @@ impl TrajectoryProjection {
 
     pub(crate) fn stats(&self) -> TrajectoryStats {
         TrajectoryStats {
-            turns: self.completed_turns.len(),
-            steps: self.completed_steps.len(),
+            turns: self.indices.completed_turns.len(),
+            steps: self.indices.completed_steps.len(),
             ..self.stats
         }
     }
 
     pub(crate) fn revision(&self) -> u64 {
-        self.revision
+        self.geometry_revision
+    }
+
+    pub(crate) fn tool_duration_ms(&self, call_id: &str) -> Option<u128> {
+        self.tool_index(call_id)
+            .and_then(|index| self.records[index].timing.duration_ns())
+            .map(|duration| u128::from(duration) / 1_000_000)
     }
 
     fn ensure_assistant(&mut self, turn: u32, step: u32, recorded: &RecordedEvent) -> usize {
-        if let Some(index) = self.assistants.get(&(turn, step)).copied() {
+        if let Some(index) = self.indices.assistants.get(&(turn, step)).copied() {
             return index;
         }
         let (source_seq, started) = self
-            .request_starts
+            .indices
+            .step_starts
             .get(&(turn, step))
             .cloned()
-            .or_else(|| self.step_starts.get(&(turn, step)).cloned())
             .unwrap_or((recorded.seq, recorded.time.clone()));
         let index = self.records.len();
-        self.assistants.insert((turn, step), index);
+        Arc::make_mut(&mut self.indices)
+            .assistants
+            .insert((turn, step), index);
         self.push_record(TrajectoryRecord {
             id: record_id(source_seq),
             source_seq,
@@ -477,17 +491,22 @@ impl TrajectoryProjection {
     }
 
     fn tool_index(&self, call_id: &str) -> Option<usize> {
-        self.tools.get(call_id).copied()
+        self.indices.tools.get(call_id).copied()
     }
 
     fn push_record(&mut self, record: TrajectoryRecord) {
         add_stats(&mut self.stats, record_stats(&record));
-        self.records.push(record);
+        self.records.push(Arc::new(record));
+        self.geometry_revision = self.geometry_revision.saturating_add(1);
     }
 
     fn update_record(&mut self, index: usize, update: impl FnOnce(&mut TrajectoryRecord)) {
         let before = record_stats(&self.records[index]);
-        update(&mut self.records[index]);
+        let previous_timing = self.records[index].timing.clone();
+        update(Arc::make_mut(&mut self.records[index]));
+        if self.records[index].timing != previous_timing {
+            self.geometry_revision = self.geometry_revision.saturating_add(1);
+        }
         let after = record_stats(&self.records[index]);
         replace_stats(&mut self.stats, before, after);
     }
@@ -502,16 +521,18 @@ fn record_stats(record: &TrajectoryRecord) -> TrajectoryStats {
     }
     match record.kind {
         TrajectoryKind::Assistant => {
-            stats.llm_ns = record.timing.duration_ns().unwrap_or_default();
-            if let Some(ttft_ns) = record.timing.ttft_ns() {
-                stats.ttft_ns = ttft_ns;
-                stats.ttft_steps = 1;
-            }
-            if let Some(decode_ns) = record.timing.generation_ns()
-                && let Some(usage) = record.usage
-            {
-                stats.decode_ns = decode_ns;
-                stats.decode_tokens = u64::from(usage.output_tokens);
+            if let Some(llm_ns) = record.timing.duration_ns() {
+                stats.llm_ns = llm_ns;
+                if let Some(ttft_ns) = record.timing.ttft_ns() {
+                    stats.ttft_ns = ttft_ns;
+                    stats.ttft_steps = 1;
+                }
+                if let Some(decode_ns) = record.timing.generation_ns()
+                    && let Some(usage) = record.usage
+                {
+                    stats.decode_ns = decode_ns;
+                    stats.decode_tokens = u64::from(usage.output_tokens);
+                }
             }
         }
         TrajectoryKind::Tool => {
@@ -796,8 +817,8 @@ mod tests {
             .iter()
             .find(|record| record.kind == TrajectoryKind::Assistant)
             .unwrap();
-        assert_eq!(assistant.timing.duration_ns(), Some(30_000_000));
-        assert_eq!(assistant.timing.ttft_ns(), Some(10_000_000));
+        assert_eq!(assistant.timing.duration_ns(), Some(140_000_000));
+        assert_eq!(assistant.timing.ttft_ns(), Some(120_000_000));
         assert_eq!(assistant.timing.generation_ns(), Some(20_000_000));
 
         let compaction = projection
@@ -835,8 +856,8 @@ mod tests {
         for event in fixture() {
             projection.apply(&event);
             let mut scanned = TrajectoryStats {
-                turns: projection.completed_turns.len(),
-                steps: projection.completed_steps.len(),
+                turns: projection.indices.completed_turns.len(),
+                steps: projection.indices.completed_steps.len(),
                 ..TrajectoryStats::default()
             };
             for record in &projection.records {
@@ -851,9 +872,119 @@ mod tests {
         let stats = TrajectoryProjection::from_events(&fixture()).stats();
         assert_eq!(stats.turns, 1);
         assert_eq!(stats.steps, 1);
-        assert_eq!(stats.llm_ns, 30_000_000);
+        assert_eq!(stats.llm_ns, 140_000_000);
         assert_eq!(stats.tool_ns, 59_000_000);
-        assert_eq!(stats.ttft_ns, 10_000_000);
+        assert_eq!(stats.ttft_ns, 120_000_000);
         assert_eq!(stats.ttft_steps, 1);
+    }
+
+    #[test]
+    fn interrupted_partial_assistant_is_visible_but_not_timed() {
+        let events = [
+            event(0, 0, SessionEvent::TurnStart { turn: 1 }),
+            event(1, 0, SessionEvent::StepStart { turn: 1, step: 1 }),
+            event(
+                2,
+                20,
+                SessionEvent::AssistantChunk {
+                    turn: 1,
+                    step: 1,
+                    chunk: AssistantChunk::OutputTextDelta {
+                        delta: "partial".into(),
+                    },
+                },
+            ),
+            event(
+                3,
+                30,
+                SessionEvent::StepEnd {
+                    turn: 1,
+                    step: 1,
+                    outcome: StepOutcome::Aborted,
+                    error: None,
+                },
+            ),
+        ];
+        let projection = TrajectoryProjection::from_events(&events);
+        let assistant = projection
+            .records
+            .iter()
+            .find(|record| record.kind == TrajectoryKind::Assistant)
+            .unwrap();
+        assert_eq!(assistant.text, "partial");
+        assert_eq!(assistant.status, TrajectoryStatus::Failed);
+        assert_eq!(assistant.timing.completed, None);
+        assert_eq!(projection.stats().llm_ns, 0);
+        assert_eq!(projection.stats().ttft_ns, 0);
+        assert_eq!(projection.stats().ttft_steps, 0);
+    }
+
+    #[test]
+    fn assistant_text_chunks_do_not_invalidate_timeline_geometry() {
+        let mut projection = TrajectoryProjection::default();
+        projection.apply(&event(0, 0, SessionEvent::StepStart { turn: 1, step: 1 }));
+        projection.apply(&event(
+            1,
+            10,
+            SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: AssistantChunk::OutputTextDelta {
+                    delta: "first".into(),
+                },
+            },
+        ));
+        let revision = projection.revision();
+        projection.apply(&event(
+            2,
+            20,
+            SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: AssistantChunk::OutputTextDelta {
+                    delta: " second".into(),
+                },
+            },
+        ));
+        assert_eq!(projection.revision(), revision);
+        assert_eq!(projection.records[0].text, "first second");
+    }
+
+    #[test]
+    fn projection_clone_reuses_unchanged_records_and_indices() {
+        let projection = TrajectoryProjection::from_events(&fixture());
+        let mut updated = projection.clone();
+        let unchanged_tool = projection
+            .records
+            .iter()
+            .position(|record| record.kind == TrajectoryKind::Tool)
+            .unwrap();
+        let assistant = projection
+            .records
+            .iter()
+            .position(|record| record.kind == TrajectoryKind::Assistant)
+            .unwrap();
+
+        updated.apply(&event(
+            13,
+            210,
+            SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: AssistantChunk::OutputTextDelta {
+                    delta: " ignored by completed timing".into(),
+                },
+            },
+        ));
+
+        assert!(Arc::ptr_eq(
+            &projection.records[unchanged_tool],
+            &updated.records[unchanged_tool]
+        ));
+        assert!(!Arc::ptr_eq(
+            &projection.records[assistant],
+            &updated.records[assistant]
+        ));
+        assert!(Arc::ptr_eq(&projection.indices, &updated.indices));
     }
 }
