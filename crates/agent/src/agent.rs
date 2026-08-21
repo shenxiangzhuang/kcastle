@@ -530,13 +530,13 @@ impl Agent {
     pub fn start_compaction(self, instructions: Option<String>) -> ActiveAgent {
         self.spawn(move |mut agent, channels, events| async move {
             if let Err(error) = agent.commit.prepare(&agent.state).await {
-                return Err((agent, error.into()));
+                return Err(Box::new((agent, error.into())));
             }
             if let Err(error) = agent.close_interrupted_compaction(&events).await {
-                return Err((agent, error));
+                return Err(Box::new((agent, error)));
             }
             if let Err(error) = agent.close_unresolved_tools(&events).await {
-                return Err((agent, error));
+                return Err(Box::new((agent, error)));
             }
             if agent.active_turn.is_some() {
                 agent
@@ -553,7 +553,7 @@ impl Agent {
                 .await
             {
                 Ok(()) => Ok(agent),
-                Err(error) => Err((agent, error)),
+                Err(error) => Err(Box::new((agent, error))),
             }
         })
     }
@@ -561,7 +561,7 @@ impl Agent {
     fn spawn<F, Fut>(self, operation: F) -> ActiveAgent
     where
         F: FnOnce(Agent, RunChannels, mpsc::Sender<AgentEvent>) -> Fut + Send + 'static,
-        Fut: Future<Output = Result<Agent, (Agent, AgentError)>> + Send + 'static,
+        Fut: Future<Output = Result<Agent, Box<(Agent, AgentError)>>> + Send + 'static,
     {
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let (queue_tx, queue_rx) = mpsc::unbounded_channel();
@@ -583,7 +583,8 @@ impl Agent {
         let task = tokio::spawn(async move {
             let mut agent = match operation(self, channels, events_tx.clone()).await {
                 Ok(agent) => agent,
-                Err((mut agent, error)) => {
+                Err(error) => {
+                    let (mut agent, error) = *error;
                     if matches!(error, AgentError::Aborted) {
                         match agent.close_unresolved_tools(&events_tx).await {
                             Ok(()) => {
@@ -644,18 +645,18 @@ impl Agent {
         input: String,
         mut channels: RunChannels,
         events: mpsc::Sender<AgentEvent>,
-    ) -> Result<Self, (Self, AgentError)> {
+    ) -> Result<Self, Box<(Self, AgentError)>> {
         if input.trim().is_empty() {
-            return Err((self, AgentError::EmptyInput));
+            return Err(Box::new((self, AgentError::EmptyInput)));
         }
         if let Err(error) = self.commit.prepare(&self.state).await {
-            return Err((self, error.into()));
+            return Err(Box::new((self, error.into())));
         }
         if let Err(error) = self.close_interrupted_compaction(&events).await {
-            return Err((self, error));
+            return Err(Box::new((self, error)));
         }
         if let Err(error) = self.close_unresolved_tools(&events).await {
-            return Err((self, error));
+            return Err(Box::new((self, error)));
         }
         if self.active_turn.is_some() {
             self.close_active_lifecycle(
@@ -670,17 +671,17 @@ impl Agent {
             .emit(&events, AgentEvent::RunStarted(input.clone()))
             .await
         {
-            return Err((self, AgentError::Task(error.to_string())));
+            return Err(Box::new((self, AgentError::Task(error.to_string()))));
         }
         let result = self.run_loop(input, &mut channels, &events).await;
         match result {
             Ok(summary) => {
                 if let Err(error) = self.emit(&events, AgentEvent::RunFinished(summary)).await {
-                    return Err((self, error));
+                    return Err(Box::new((self, error)));
                 }
                 Ok(self)
             }
-            Err(error) => Err((self, error)),
+            Err(error) => Err(Box::new((self, error))),
         }
     }
 
