@@ -628,24 +628,22 @@ fn items_text<T: serde::Serialize>(items: &T) -> String {
     };
     let mut text = Vec::new();
     collect_text(&value, &mut text);
-    if text.is_empty() {
-        pretty(items)
-    } else {
-        text.join("\n")
-    }
+    text.join("\n")
 }
 
 fn collect_text(value: &serde_json::Value, text: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(object) => {
             for (key, value) in object {
-                if matches!(key.as_str(), "text" | "arguments" | "output")
+                if key == "text"
                     && let Some(value) = value.as_str().filter(|value| !value.is_empty())
                 {
                     text.push(value.to_owned());
                     continue;
                 }
-                collect_text(value, text);
+                if matches!(key.as_str(), "content" | "summary") {
+                    collect_text(value, text);
+                }
             }
         }
         serde_json::Value::Array(values) => {
@@ -807,6 +805,30 @@ mod tests {
                 },
             ),
         ]
+    }
+
+    #[test]
+    fn item_text_excludes_protocol_metadata_and_tool_call_arguments() {
+        let user = vec![
+            serde_json::from_value::<InputItem>(serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": "hello"
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(items_text(&user), "hello");
+
+        let tool_call = vec![
+            serde_json::from_value::<InputItem>(serde_json::json!({
+                "type": "function_call",
+                "arguments": "{\"command\":\"true\"}",
+                "call_id": "call-1",
+                "name": "shell"
+            }))
+            .unwrap(),
+        ];
+        assert_eq!(items_text(&tool_call), "");
     }
 
     #[test]
