@@ -2,27 +2,25 @@
 
 Native Rust agent harness used by [Kcastle](https://github.com/shenxiangzhuang/kcastle).
 
-It provides an OpenAI Responses run loop, append-only state and JSONL sessions, context compaction,
-cancellation-safe tool execution, and a local shell capability. Applications can construct the
-default session-backed agent or inject their own `StateCommit` and `AgentTool` implementations with
-`Agent::from_parts`.
+It provides an OpenAI Responses run loop, transactional append-only sessions, context compaction,
+cancellation-safe tool execution, and a local shell capability.
 
-Sessions use the versioned v1 JSONL event format. The first record is a strict format header;
-pre-v1 logs are rejected and are not migrated. Every following event has a contiguous sequence,
-wall time, process-local monotonic time, optional source-event links, and an optional append/replace
-surface operation. Loading and writing both validate turn/step nesting, tool and compaction
-lifecycles, and source references before rebuilding `State` from the event stream. Writers advance
-an incremental validator for every event and batch adjacent streaming chunks for up to 16 ms or
-64 KiB; structural events flush the batch before they are acknowledged. This avoids both replaying
-the full log and issuing a synchronous write for every token.
+Session v2 uses one project-local SQLite WAL database as its only runtime source of truth. JSONL is
+an explicit export format. Version 1 JSONL files are intentionally ignored and are not migrated or
+dual-written. Each logical transition is a revision-checked, idempotent transaction. The
+`SessionMachine` validates the complete candidate batch without mutation; only a matching SQLite
+commit receipt may advance the live machine or be published to a UI. Connection ambiguity is
+resolved by transaction ID rather than by blindly retrying.
 
-Session catalogs cache each file's validated header and search projection by file size and modified
-time. Unchanged logs are not reparsed on sidebar or search refreshes; when a file changes, its full
-event lifecycle is validated again before it can re-enter the catalog.
+Inputs, request snapshots, tool dispatch intent, execution milestones, results, compaction, and
+terminal recovery all have explicit typed correlation IDs. Model and tool effects start only after
+their intent commits. A tool interrupted after dispatch is recorded with unknown side effects and
+is never retried automatically. Streaming observations are committed in short batches, while every
+structural boundary remains atomic.
 
-Tool calls record four independent milestones: call observed, execution dispatched, execution
-finished, and result committed. This preserves real parallel completion order while committing
-tool results in model order. Assistant streaming records typed text, reasoning, and tool-argument
-deltas so consumers can derive lifecycle duration, TTFT, generation time, and throughput without
-using UI clocks. Assistant duration and TTFT start at the durable step boundary, matching DSH even
-when automatic compaction happens before the provider request.
+Tool calls record call observation, authorization, durable dispatch intent, observed execution
+start and completion, and result attachment independently. This preserves real parallel completion
+order while attaching tool results in model order. Assistant streaming records typed text,
+reasoning, and tool-call deltas so consumers derive duration, TTFT, generation time, and throughput
+without UI clocks. Assistant duration and TTFT start at `ModelRequestStarted`, so automatic
+compaction after the step boundary is not double-counted as model time.

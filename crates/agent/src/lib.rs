@@ -2,6 +2,8 @@ mod agent;
 mod compaction;
 mod session;
 mod session_event;
+mod session_machine;
+mod session_store;
 mod state;
 mod tool;
 
@@ -16,14 +18,16 @@ pub use agent::{
 };
 pub use compaction::CompactionConfig;
 pub use session::{
-    ARCHIVE_DIRECTORY, DEFAULT_PROJECT_ID, InputMode, RecoveryReport, Session, SessionCatalog,
-    SessionConfig, SessionError, SessionId, SessionInfo, SessionIssue, SessionSearchData,
-    SessionSnapshot, StateCommit,
+    ARCHIVE_DIRECTORY, DEFAULT_PROJECT_ID, Session, SessionCatalog, SessionConfig, SessionError,
+    SessionId, SessionInfo, SessionSearchData, SessionSnapshot,
 };
 pub use session_event::{
-    AssistantChunk, EventTime, RecordedEvent, RequestHeaderReason, SESSION_FORMAT_VERSION,
-    SessionEvent, StepOutcome, SurfaceOp, ToolExecutionOutcome, ToolResultStatus, TurnEndReason,
-    UserMessageMode,
+    AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin,
+    RecordedEvent, RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome,
+    SESSION_FORMAT_VERSION, SessionEvent, StepId, StepOutcome, TokenUsage,
+    ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnEndReason, TurnId, TxId,
 };
+pub use session_machine::{PendingInput, PlannedBatch, SessionMachine, SessionMachineError};
+pub use session_store::{CommitReceipt, SESSION_DATABASE_FILE, SessionStoreError};
 pub use state::{ResponseMetadata, State, StateEntry, TranscriptItem};
 pub use tool::{AgentTool, Env, ShellTool, ToolResult};

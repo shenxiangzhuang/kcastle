@@ -33,7 +33,7 @@ kcastle is a Rust workspace with an agent core and two user interfaces:
 
 | Package | Crate | Responsibility |
 | --- | --- | --- |
-| `kcastle-agent` | `kcastle_agent` library | UI-independent agent runtime, state, commit port, `Session`, compaction, `Env`, and tools |
+| `kcastle-agent` | `kcastle_agent` library | UI-independent agent runtime, transactional `SessionMachine`, SQLite `SessionStore`, canonical session facts, compaction, `Env`, and tools |
 | `kcastle` | terminal binary | Ratatui/Crossterm rendering, terminal input, approvals, and TUI dependency composition |
 | `kcastle-desktop` | desktop binary | GPUI rendering, desktop input, approvals, session orchestration, and desktop dependency composition |
 
@@ -56,27 +56,44 @@ maintaining a provider abstraction.
 
 ## Core semantics
 
-- An idle `Agent` owns append-only `State` plus a `StateCommit` persistence port.
-- `Session` is the default JSONL adapter; `AgentTool` values provide executable capabilities.
+- An idle `Agent` owns one replayable `SessionMachine` plus a concrete transactional
+  `SessionStore`; there is no second validator or mutable persistence mirror.
+- A project-local SQLite WAL database is the only runtime source of truth. JSONL is an explicit
+  export format, and pre-v2 session files are intentionally ignored rather than migrated or
+  dual-written.
+- One logical domain transition is committed as one idempotent transaction with an expected
+  session revision. The machine evolves and committed events are published only after the store
+  confirms the commit; persistence failures never trigger in-memory rollback.
+- Model and tool effects start only after their durable intent is committed. Effect results return
+  as correlated commands to the single session owner; unresolved non-idempotent tool attempts are
+  recorded as having unknown side effects and are never retried automatically.
+- Inputs are submitted and later attached atomically to one run/turn/step. Lifecycle completion,
+  cancellation, failure, and crash recovery each use a complete terminal transaction.
 - `Agent::start(self, input)` transfers the agent to one background task; `ActiveAgent::finish()`
   returns ownership after the operation settles.
 - `RunControl` sends steering, follow-up, approval, and cancellation signals without shared mutable
   agent state.
 - Steering runs after the current response and its tools; queueing runs after the agent would
   otherwise settle.
-- Cancellation records unresolved tool calls as having unknown side effects.
-- Compaction appends a summary boundary and retains recent input batches; it does not mutate prior
-  records.
-- User interfaces consume `AgentEvent` values and never persist state from UI events.
+- Compaction commits a summary boundary and retains recent input batches in the canonical replayed
+  surface; it does not rewrite prior journal transactions.
+- User interfaces derive durable content only from committed session transactions. Transient
+  control signals may drive approvals, connection status, and notices but never conversation,
+  trajectory, timing, or session statistics.
+- Conversation, trajectory, details, timing, search, and composer statistics are selectors over one
+  canonical session document at one revision. Incremental application must equal full replay for
+  every committed prefix.
 
 ## Conventions
 
 - Rust edition 2024; stable toolchain.
-- Tokio, async-openai Responses API, Serde, Ratatui/Crossterm for the TUI, and GPUI for the desktop
-  UI.
+- Tokio, async-openai Responses API, Serde, rusqlite/SQLite WAL for session transactions,
+  Ratatui/Crossterm for the TUI, and GPUI for the desktop UI.
 - `cargo fmt`; Clippy with warnings denied; built-in Rust test harness.
 - For bug fixes, reproduce the failure before implementing the fix.
 - Tests protect non-trivial behavior and trust boundaries; avoid tests for trivial configuration.
+- Session storage changes require transaction/fault tests; session semantics require replay-prefix
+  and property tests; desktop timing and trajectory changes require DSH golden fixtures.
 - Update user-facing documentation whenever core usage changes.
 - Prefer concrete structs and enums over one-implementation traits or speculative extension points.
 - Conventional Commits: `<type>(<scope>): <subject>`.

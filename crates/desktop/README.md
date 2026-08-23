@@ -25,9 +25,9 @@ provider-card flow: configured providers stay editable, while Add provider lets 
 or DeepSeek before entering its API key and editing its model catalog. The composer only lists
 models from providers with configured credentials. API keys saved there are never rendered
 back into the form, and the settings file is written with user-only permissions on Unix. Global
-model and permission choices are defaults for new sessions. Each session persists its own runtime
-configuration and append-only history below `~/.kcastle/sessions`; the built-in Default project
-uses `~/.kcastle/sessions/default`.
+model and permission choices are defaults for new sessions. Each project persists session metadata
+and append-only transactions in a SQLite WAL database in its configured sessions directory; the
+built-in Default project uses `~/.kcastle/sessions/default/sessions.sqlite3`. JSONL is export-only.
 
 In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
@@ -71,18 +71,21 @@ Key constraints:
 - `domain`, `layout`, and `application` are pure layers and do not depend on GPUI.
 - Views send actions instead of mutating domain state directly.
 - `SessionId` is the stable identity and each `SessionRuntime` owns exactly one Agent, control
-  channel, event stream, approval state, queue, configuration, and writer lease. Agent events do
-  not pass through an app-global bus or the currently selected session.
+  channel, committed-event stream, approval state, configuration, and canonical
+  `SessionDocument`. Agent events do not pass through an app-global bus or the currently selected
+  session.
 - Projects are directory namespaces, not scheduling boundaries. Sessions in the same or different
   projects run concurrently and switching the selected runtime only changes the visible snapshot.
-- Visible run, stream, tool-result, and queued-input transitions are appended before their UI
-  events. A per-session writer lease rejects a second writer while still allowing read-only browse.
+- Durable chat, trajectory, timing, details, search, and composer data are selectors over the same
+  committed document revision. Transient controls never create durable chat rows.
+- SQLite expected-revision compare-and-swap serializes writers. Every model/tool intent commits
+  before the external effect and the UI sees only the resulting commit receipt.
 - A collapsed live Think row shows the latest non-blank reasoning line and follows its horizontal
   tail at most once every three display frames; expanding it exposes the complete reasoning, and
   settlement restores the stable first line immediately.
 - Chat position is restored with semantic message anchors rather than raw pixel snapshots.
-- Session metadata and modification times are cached outside the render path and refreshed after
-  project or session mutations.
+- Session metadata and committed update times are cached outside the render path and refreshed
+  after project or session mutations; opaque session locators are never treated as data files.
 - GPUI lifecycle calls stay in `platform/gpui`; AppKit titlebar integration stays in
   `platform/native_titlebar.rs`.
 
@@ -107,8 +110,8 @@ For native UI changes, also exercise the signed release bundle manually:
   they stream, approve, queue, stop, and finish independently.
 - Confirm a background session uses a spinning ring while running, changes to a blue unread dot
   after it finishes, and clears the dot when selected; the relative time label must remain visible.
-- Open a running session read-only, verify a second writer is rejected, and confirm a damaged log
-  is omitted while valid catalog entries remain visible.
+- Confirm unsupported or damaged sessions are silently omitted while valid catalog entries remain
+  visible.
 - Hover a session row and confirm rename appears before archive without selecting the row; restore
   or permanently delete archived sessions from the matching project in Settings.
 - Resize through compact, regular, split, and overlay layouts and confirm the composer never

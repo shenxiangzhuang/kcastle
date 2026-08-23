@@ -1,10 +1,10 @@
 mod app;
 
+use std::collections::HashSet;
 use std::env;
 use std::error::Error;
-use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use app::{App, UiAction};
@@ -15,8 +15,9 @@ use crossterm::event::{
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
 use kcastle_agent::{
-    ActiveAgent, Agent, AgentEvent, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID, Model,
-    OPENAI_MODEL_PRESETS, OPENAI_PROVIDER_ID, Session, SessionConfig, SessionInfo,
+    ActiveAgent, Agent, AgentEvent, AssistantChunk, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID,
+    Model, OPENAI_MODEL_PRESETS, OPENAI_PROVIDER_ID, Session, SessionConfig, SessionEvent, State,
+    TranscriptItem,
 };
 use ratatui::text::Text;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -171,14 +172,42 @@ async fn run_prompt(agent: Agent, prompt: String, allow_tools: bool) -> Result<(
     let mut active = agent.start(prompt);
     let control = active.control();
     let mut failure = None;
+    let mut output_requests = HashSet::new();
+    let mut applied_transactions = HashSet::new();
     while let Some(event) = active.next_event().await {
         match event {
-            AgentEvent::TextDelta(delta) => {
-                print!("{delta}");
-                io::stdout().flush()?;
+            AgentEvent::SessionCommitted(receipt)
+                if applied_transactions.insert(receipt.tx_id.to_string()) =>
+            {
+                for recorded in receipt.events {
+                    match recorded.event {
+                        SessionEvent::AssistantChunk {
+                            request_id,
+                            chunk: AssistantChunk::OutputTextDelta { delta },
+                        } if !delta.is_empty() => {
+                            output_requests.insert(request_id.to_string());
+                            print!("{delta}");
+                            io::stdout().flush()?;
+                        }
+                        SessionEvent::AssistantCompleted {
+                            request_id, items, ..
+                        } if !output_requests.contains(request_id.as_str()) => {
+                            let mut state = State::default();
+                            if state.append_items(items, None).is_ok() {
+                                for item in state.transcript() {
+                                    if let TranscriptItem::Assistant(output) = item {
+                                        print!("{output}");
+                                    }
+                                }
+                                io::stdout().flush()?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             AgentEvent::ApprovalRequired(call) => {
-                control.approve(call.call_id, allow_tools)?;
+                control.approve(call.call_id, allow_tools).await?;
             }
             AgentEvent::RunFinished(_) => println!(),
             AgentEvent::RunFailed(error) => failure = Some(error),
@@ -207,29 +236,27 @@ async fn run_tui(
             usage.input_tokens_details.cached_tokens,
         )
     });
-    let mut session_config = if agent.session_info().path.as_os_str().is_empty() {
-        SessionConfig::default()
-    } else {
-        Session::inspect(&agent.session_info().path)
-            .map(|snapshot| snapshot.config().clone())
-            .unwrap_or_default()
-    };
+    let session_snapshot = (!agent.session_info().path.as_os_str().is_empty())
+        .then(|| Session::inspect(&agent.session_info().path).ok())
+        .flatten();
+    let mut session_config = session_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.config().clone())
+        .unwrap_or_default();
     let mut config_changed = false;
     if session_config.model_id.is_none() {
         session_config.model_id = Some(runtime_model_id(agent.model()));
         session_config.reasoning_effort = agent.model().reasoning_effort().map(reasoning_key);
         config_changed = true;
     }
-    if !session_config.allow_all_tools && read_legacy_permission(agent.session_info()) {
-        session_config.allow_all_tools = true;
-        config_changed = true;
-        let _ = fs::remove_file(permission_path(&agent.session_info().path));
-    }
     if config_changed && !agent.session_info().path.as_os_str().is_empty() {
         agent.persist_session_config(&session_config).await?;
     }
     let allow_all = session_config.allow_all_tools;
     let mut app = App::new(agent.model(), agent.transcript(), &cwd, usage, allow_all);
+    if let Some(snapshot) = &session_snapshot {
+        app.restore_committed_metadata(snapshot.events());
+    }
     let session_path = agent.session_info().path.clone();
     let mut runtime = Runtime {
         agent: Some(agent),
@@ -315,7 +342,7 @@ async fn tui_loop(
                 if let Some((call_id, allow)) = app.apply_event(event)
                     && let Some(active) = &runtime.active
                 {
-                    active.control().approve(call_id, allow)?;
+                    active.control().approve(call_id, allow).await?;
                 }
             }
             Next::Agent(None) => finish_active(app, runtime).await?,
@@ -405,7 +432,7 @@ async fn handle_action(
         UiAction::Exit => app.request_exit(),
         UiAction::Approve { call_id, allow } => {
             if let Some(active) = &runtime.active {
-                active.control().approve(call_id, allow)?;
+                active.control().approve(call_id, allow).await?;
             }
         }
         UiAction::SetPermissions {
@@ -417,7 +444,7 @@ async fn handle_action(
                 if let Some(call_id) = pending_call_id
                     && let Some(active) = &runtime.active
                 {
-                    active.control().approve(call_id, true)?;
+                    active.control().approve(call_id, true).await?;
                 }
             }
             Err(error) => {
@@ -425,7 +452,7 @@ async fn handle_action(
                 if let Some(call_id) = pending_call_id
                     && let Some(active) = &runtime.active
                 {
-                    active.control().approve(call_id, false)?;
+                    active.control().approve(call_id, false).await?;
                 }
             }
         },
@@ -435,7 +462,8 @@ async fn handle_action(
                 app.notice("Cannot resume while the agent is running");
             } else {
                 match Session::open(path).await {
-                    Ok(session) => {
+                    Ok(mut session) => {
+                        let committed_events = session.take_events();
                         runtime.session_config = session.config().clone();
                         let allow_all = runtime.session_config.allow_all_tools;
                         runtime.session_path = session.info().path.clone();
@@ -467,6 +495,7 @@ async fn handle_action(
                         }
                         agent.set_session(session);
                         app.load_transcript(agent.transcript());
+                        app.restore_committed_metadata(&committed_events);
                         app.set_identity(agent.model());
                         app.set_usage_values(agent.latest_usage().map(|usage| {
                             (
@@ -487,19 +516,7 @@ async fn handle_action(
                 "Current session cannot be deleted".into()
             } else {
                 match Session::delete(&session) {
-                    Ok(()) => {
-                        let permissions = permission_path(&session.path);
-                        if let Err(error) = fs::remove_file(permissions)
-                            && error.kind() != io::ErrorKind::NotFound
-                        {
-                            format!(
-                                "Deleted “{}”; permission cleanup failed: {error}",
-                                session.title
-                            )
-                        } else {
-                            format!("Deleted “{}” permanently", session.title)
-                        }
-                    }
+                    Ok(()) => format!("Deleted “{}” permanently", session.title),
                     Err(error) => format!("Could not delete “{}”: {error}", session.title),
                 }
             };
@@ -606,7 +623,8 @@ async fn handle_submit(
                     .as_ref()
                     .expect("active agent")
                     .control()
-                    .queue(argument.trim().to_owned())?;
+                    .queue(argument.trim().to_owned())
+                    .await?;
             }
             "queue" => app.notice("Usage: /queue MESSAGE while the agent is running"),
             "help" => app.notice(HELP),
@@ -622,7 +640,7 @@ async fn handle_submit(
     }
     ensure_persistent_session(app, runtime).await?;
     if let Some(active) = &runtime.active {
-        active.control().steer(value)?;
+        active.control().steer(value).await?;
     } else {
         let agent = runtime.agent.take().expect("idle agent");
         let active = agent.start(value);
@@ -672,10 +690,6 @@ fn open_session_manager(
     }
 }
 
-fn permission_path(session_path: &Path) -> PathBuf {
-    session_path.with_extension("permissions")
-}
-
 fn runtime_model_id(model: &Model) -> String {
     let provider = match model.name() {
         "DeepSeek" => DEEPSEEK_PROVIDER_ID,
@@ -696,14 +710,6 @@ fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort>
     serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
-fn read_legacy_permission(session: &SessionInfo) -> bool {
-    if session.path.as_os_str().is_empty() {
-        return false;
-    }
-    fs::read_to_string(permission_path(&session.path))
-        .is_ok_and(|value| value.trim() == "allow all")
-}
-
 async fn write_runtime_permission(
     runtime: &mut Runtime,
     allow_all: bool,
@@ -715,12 +721,6 @@ async fn write_runtime_permission(
             .await?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-fn write_permission(session_path: &Path, allow_all: bool) -> io::Result<()> {
-    let path = permission_path(session_path);
-    fs::write(path, if allow_all { "allow all\n" } else { "ask\n" })
 }
 
 async fn finish_active(app: &mut App, runtime: &mut Runtime) -> Result<(), Box<dyn Error>> {
@@ -741,10 +741,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::{
-        App, Command, Runtime, SessionInfo, ensure_persistent_session, handle_submit,
-        parse_args_from, read_legacy_permission, write_permission,
-    };
+    use super::{App, Command, Runtime, ensure_persistent_session, handle_submit, parse_args_from};
 
     #[test]
     fn prompt_tools_require_explicit_flag() {
@@ -769,25 +766,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[test]
-    fn permission_mode_round_trips_per_session() {
-        let path = std::env::temp_dir().join(format!(
-            "kcastle-permission-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let info = SessionInfo::legacy(path.clone(), "test", 0);
-        assert!(!read_legacy_permission(&info));
-        write_permission(&path, true).unwrap();
-        assert!(read_legacy_permission(&info));
-        write_permission(&path, false).unwrap();
-        assert!(!read_legacy_permission(&info));
-        std::fs::remove_file(path.with_extension("permissions")).unwrap();
     }
 
     #[tokio::test]

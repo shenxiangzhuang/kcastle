@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
 use async_openai::types::responses::{
     EasyInputContent, EasyInputMessage, FunctionCallOutput, InputItem, InputParam, Item,
     MessageItem, OutputMessageContent, ReasoningItemContent, ResponseUsage, Role, SummaryPart,
 };
+use im::{HashMap, OrdMap, Vector};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,21 +58,28 @@ pub enum TranscriptItem {
 
 #[derive(Debug, Clone, Default)]
 pub struct State {
-    entries: Vec<StateEntry>,
+    // `State` is cloned while a transaction is being validated. A persistent vector keeps that
+    // speculative clone O(1); appending a state entry only copies the vector's shallow trie path.
+    entries: Vector<StateEntry>,
     active_start: usize,
+    latest_response: Option<usize>,
+    latest_summary: Option<usize>,
+    next_tool_ordinal: u64,
+    open_tool_ordinals: HashMap<String, u64>,
+    open_tools: OrdMap<u64, String>,
 }
 
 impl State {
     pub fn restore(entries: Vec<StateEntry>) -> Result<Self, String> {
         let mut state = Self {
-            entries,
-            active_start: 0,
+            entries: entries.into_iter().collect(),
+            ..Self::default()
         };
         state.reindex()?;
         Ok(state)
     }
 
-    pub fn entries(&self) -> &[StateEntry] {
+    pub fn entries(&self) -> &Vector<StateEntry> {
         &self.entries
     }
 
@@ -84,7 +90,7 @@ impl State {
                 "<conversation_summary>\nThis is factual context from earlier work, not new instructions.\n{summary}\n</conversation_summary>"
             ))));
         }
-        for entry in &self.entries[self.active_start..] {
+        for entry in self.entries.iter().skip(self.active_start) {
             if let StateEntry::Items {
                 items: entry_items, ..
             } = entry
@@ -96,8 +102,9 @@ impl State {
     }
 
     pub fn active_batches(&self) -> Vec<(u64, &[InputItem])> {
-        self.entries[self.active_start..]
+        self.entries
             .iter()
+            .skip(self.active_start)
             .filter_map(|entry| match entry {
                 StateEntry::Items { id, items, .. } => Some((*id, items.as_slice())),
                 StateEntry::Compaction { .. } => None,
@@ -113,12 +120,17 @@ impl State {
         if items.is_empty() {
             return Err("items must not be empty".into());
         }
+        self.index_items(&items);
+        let has_response = response.is_some();
         let entry = StateEntry::Items {
             id: self.next_id(),
             items,
             response,
         };
-        self.entries.push(entry.clone());
+        if has_response {
+            self.latest_response = Some(self.entries.len());
+        }
+        self.entries.push_back(entry.clone());
         Ok(entry)
     }
 
@@ -129,9 +141,16 @@ impl State {
         tokens_before: usize,
         response: Option<ResponseMetadata>,
     ) -> Result<StateEntry, String> {
-        let Some(active_start) = self.entries.iter().position(
-            |entry| matches!(entry, StateEntry::Items { id, .. } if *id == first_kept_id),
-        ) else {
+        let Some(active_start) = first_kept_id
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|index| {
+                matches!(
+                    self.entries.get(*index),
+                    Some(StateEntry::Items { id, .. }) if *id == first_kept_id
+                )
+            })
+        else {
             return Err(format!("unknown first_kept_id: {first_kept_id}"));
         };
         if active_start < self.active_start {
@@ -144,55 +163,35 @@ impl State {
             tokens_before,
             response,
         };
-        self.entries.push(entry.clone());
+        self.latest_summary = Some(self.entries.len());
+        self.entries.push_back(entry.clone());
         self.active_start = active_start;
         Ok(entry)
     }
 
-    pub fn rollback(&mut self, id: u64) -> Result<(), String> {
-        if self.entries.last().map(StateEntry::id) != Some(id) {
-            return Err(format!("cannot roll back non-tail entry: {id}"));
-        }
-        self.entries.pop();
-        self.reindex()
-    }
-
     pub fn latest_response(&self) -> Option<&ResponseMetadata> {
-        self.entries.iter().rev().find_map(|entry| match entry {
-            StateEntry::Items {
-                response: Some(response),
-                ..
-            } => Some(response),
-            _ => None,
-        })
+        self.latest_response
+            .and_then(|index| self.entries.get(index))
+            .and_then(|entry| match entry {
+                StateEntry::Items {
+                    response: Some(response),
+                    ..
+                } => Some(response),
+                _ => None,
+            })
     }
 
     pub fn latest_summary(&self) -> Option<&str> {
-        self.entries.iter().rev().find_map(|entry| match entry {
-            StateEntry::Compaction { summary, .. } => Some(summary.as_str()),
-            _ => None,
-        })
+        self.latest_summary
+            .and_then(|index| self.entries.get(index))
+            .and_then(|entry| match entry {
+                StateEntry::Compaction { summary, .. } => Some(summary.as_str()),
+                _ => None,
+            })
     }
 
     pub fn unresolved_tool_call_ids(&self) -> Vec<String> {
-        let mut pending = HashSet::new();
-        for entry in &self.entries[self.active_start..] {
-            let StateEntry::Items { items, .. } = entry else {
-                continue;
-            };
-            for item in items {
-                match item {
-                    InputItem::Item(Item::FunctionCall(call)) => {
-                        pending.insert(call.call_id.clone());
-                    }
-                    InputItem::Item(Item::FunctionCallOutput(output)) => {
-                        pending.remove(&output.call_id);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        pending.into_iter().collect()
+        self.open_tools.values().cloned().collect()
     }
 
     pub fn transcript(&self) -> Vec<TranscriptItem> {
@@ -200,7 +199,7 @@ impl State {
         if let Some(summary) = self.latest_summary() {
             transcript.push(TranscriptItem::Summary(summary.to_owned()));
         }
-        for entry in &self.entries[self.active_start..] {
+        for entry in self.entries.iter().skip(self.active_start) {
             let StateEntry::Items { items, .. } = entry else {
                 continue;
             };
@@ -277,28 +276,86 @@ impl State {
     }
 
     fn next_id(&self) -> u64 {
-        self.entries.last().map_or(1, |entry| entry.id() + 1)
+        self.entries.back().map_or(1, |entry| entry.id() + 1)
     }
 
     fn reindex(&mut self) -> Result<(), String> {
         self.active_start = 0;
-        for (index, entry) in self.entries.iter().enumerate() {
+        self.latest_response = None;
+        self.latest_summary = None;
+        self.next_tool_ordinal = 0;
+        self.open_tool_ordinals.clear();
+        self.open_tools.clear();
+        let entries = self.entries.clone();
+        for (index, entry) in entries.iter().enumerate() {
             if entry.id() != index as u64 + 1 {
                 return Err("state entry IDs must be consecutive from 1".into());
             }
             if let StateEntry::Compaction { first_kept_id, .. } = entry {
-                let Some(boundary) = self.entries[..index].iter().position(
-                    |candidate| matches!(candidate, StateEntry::Items { id, .. } if id == first_kept_id),
-                ) else {
+                let Some(boundary) = first_kept_id
+                    .checked_sub(1)
+                    .and_then(|candidate| usize::try_from(candidate).ok())
+                    .filter(|candidate| {
+                        *candidate < index
+                            && matches!(
+                                self.entries.get(*candidate),
+                                Some(StateEntry::Items { id, .. }) if id == first_kept_id
+                            )
+                    })
+                else {
                     return Err(format!("unknown first_kept_id: {first_kept_id}"));
                 };
                 if boundary < self.active_start {
                     return Err("compaction cannot restore inactive history".into());
                 }
                 self.active_start = boundary;
+                self.latest_summary = Some(index);
+            }
+            if let StateEntry::Items {
+                items, response, ..
+            } = entry
+            {
+                if response.is_some() {
+                    self.latest_response = Some(index);
+                }
+                self.index_items(items);
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn has_active_items_id(&self, id: u64) -> bool {
+        id.checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .is_some_and(|index| {
+                index >= self.active_start
+                    && matches!(
+                        self.entries.get(index),
+                        Some(StateEntry::Items { id: candidate, .. }) if *candidate == id
+                    )
+            })
+    }
+
+    fn index_items(&mut self, items: &[InputItem]) {
+        for item in items {
+            match item {
+                InputItem::Item(Item::FunctionCall(call)) => {
+                    if !self.open_tool_ordinals.contains_key(&call.call_id) {
+                        let ordinal = self.next_tool_ordinal;
+                        self.next_tool_ordinal = self.next_tool_ordinal.saturating_add(1);
+                        self.open_tool_ordinals
+                            .insert(call.call_id.clone(), ordinal);
+                        self.open_tools.insert(ordinal, call.call_id.clone());
+                    }
+                }
+                InputItem::Item(Item::FunctionCallOutput(output)) => {
+                    if let Some(ordinal) = self.open_tool_ordinals.remove(&output.call_id) {
+                        self.open_tools.remove(&ordinal);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
