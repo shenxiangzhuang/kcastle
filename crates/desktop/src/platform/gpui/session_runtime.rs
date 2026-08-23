@@ -1,21 +1,16 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{Context, Window};
 use kcastle_agent::{
-    Agent, AgentEvent, Model, ReasoningEffort, RunControl, Session, SessionConfig, SessionInfo,
-    ToolResult,
+    Agent, AgentEvent, CommitReceipt, Model, ReasoningEffort, RunControl, Session, SessionConfig,
+    SessionInfo,
 };
 
-use crate::application::{MAX_EVENTS_PER_FRAME, StreamBatch, is_frame_stream_event};
-use crate::domain::{
-    ApprovalState, ConversationAction, ConversationState, Message, Role, RunId,
-    TrajectoryProjection, UsageSnapshot, next_message_id, reduce_conversation,
-    reindex_shared_messages_from,
-};
-use crate::platform::gpui::arm_next_frame;
+use crate::domain::session_document::{ConversationItemId, ProjectionDelta, SessionDocument};
+use crate::domain::{ApprovalState, Message, MessageId, RunId, SessionView, TrajectoryItemId};
 use crate::settings::EnterBehavior;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,14 +19,231 @@ pub(crate) enum SessionRuntimeStatus {
     Creating,
     Configuring,
     Running,
+    Settling,
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeOperation {
+    StartRun,
+    SubmitDuringRun,
+    Configure,
+    Rename,
+    ChangePermissionDuringRun,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RunTerminal {
+    Finished,
+    Aborted,
+    Failed(String),
+}
+
+/// The only authority for runtime lifecycle transitions.
+///
+/// In particular, a terminal event only moves a run to `Settling`. The runtime cannot become idle
+/// until `ActiveAgent::finish` returns ownership of the agent.
+#[derive(Clone, Debug)]
+struct RuntimeLifecycle {
+    status: SessionRuntimeStatus,
+    terminal: Option<RunTerminal>,
+}
+
+impl Default for RuntimeLifecycle {
+    fn default() -> Self {
+        Self {
+            status: SessionRuntimeStatus::Idle,
+            terminal: None,
+        }
+    }
+}
+
+impl RuntimeLifecycle {
+    fn status(&self) -> &SessionRuntimeStatus {
+        &self.status
+    }
+
+    fn allows(&self, operation: RuntimeOperation) -> bool {
+        use RuntimeOperation::{
+            ChangePermissionDuringRun, Configure, Rename, StartRun, SubmitDuringRun,
+        };
+        match &self.status {
+            SessionRuntimeStatus::Idle | SessionRuntimeStatus::Failed(_) => {
+                matches!(operation, StartRun | Configure | Rename)
+            }
+            SessionRuntimeStatus::Running => {
+                matches!(operation, SubmitDuringRun | ChangePermissionDuringRun)
+            }
+            SessionRuntimeStatus::Creating
+            | SessionRuntimeStatus::Configuring
+            | SessionRuntimeStatus::Settling => false,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(
+            self.status,
+            SessionRuntimeStatus::Creating
+                | SessionRuntimeStatus::Configuring
+                | SessionRuntimeStatus::Running
+                | SessionRuntimeStatus::Settling
+        )
+    }
+
+    fn begin_creating(&mut self) -> bool {
+        if !self.allows(RuntimeOperation::StartRun) {
+            return false;
+        }
+        self.terminal = None;
+        self.status = SessionRuntimeStatus::Creating;
+        true
+    }
+
+    fn begin_running(&mut self) -> bool {
+        if !matches!(
+            self.status,
+            SessionRuntimeStatus::Idle
+                | SessionRuntimeStatus::Failed(_)
+                | SessionRuntimeStatus::Creating
+        ) {
+            return false;
+        }
+        self.terminal = None;
+        self.status = SessionRuntimeStatus::Running;
+        true
+    }
+
+    fn begin_configuring(&mut self) -> bool {
+        if !self.allows(RuntimeOperation::Configure) {
+            return false;
+        }
+        self.status = SessionRuntimeStatus::Configuring;
+        true
+    }
+
+    fn begin_settlement_config(&mut self) {
+        debug_assert!(matches!(self.status, SessionRuntimeStatus::Settling));
+        self.status = SessionRuntimeStatus::Configuring;
+    }
+
+    fn complete_config(&mut self, status: SessionRuntimeStatus) {
+        debug_assert!(matches!(self.status, SessionRuntimeStatus::Configuring));
+        debug_assert!(matches!(
+            status,
+            SessionRuntimeStatus::Idle | SessionRuntimeStatus::Failed(_)
+        ));
+        self.terminal = None;
+        self.status = status;
+    }
+
+    fn fail(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        match self.status {
+            SessionRuntimeStatus::Running | SessionRuntimeStatus::Settling => {
+                self.observe_terminal(RunTerminal::Failed(error));
+            }
+            _ => self.status = SessionRuntimeStatus::Failed(error),
+        }
+    }
+
+    /// Returns true only for the first successful completion event, so completion counters cannot
+    /// be advanced by duplicate or stale terminal notifications.
+    fn observe_terminal(&mut self, terminal: RunTerminal) -> bool {
+        match self.status {
+            SessionRuntimeStatus::Running => {
+                let completed = matches!(terminal, RunTerminal::Finished);
+                self.terminal = Some(terminal);
+                self.status = SessionRuntimeStatus::Settling;
+                completed
+            }
+            SessionRuntimeStatus::Settling => {
+                if matches!(terminal, RunTerminal::Failed(_)) {
+                    self.terminal = Some(terminal);
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn status_after_join(&self) -> SessionRuntimeStatus {
+        debug_assert!(matches!(self.status, SessionRuntimeStatus::Settling));
+        match &self.terminal {
+            Some(RunTerminal::Finished | RunTerminal::Aborted) => SessionRuntimeStatus::Idle,
+            Some(RunTerminal::Failed(error)) => SessionRuntimeStatus::Failed(error.clone()),
+            None => SessionRuntimeStatus::Failed("run ended without a terminal event".into()),
+        }
+    }
+
+    fn stream_closed(&mut self) {
+        if matches!(self.status, SessionRuntimeStatus::Running) {
+            self.status = SessionRuntimeStatus::Settling;
+        }
+    }
+
+    fn complete_join(&mut self, status: SessionRuntimeStatus) {
+        debug_assert!(matches!(self.status, SessionRuntimeStatus::Settling));
+        self.terminal = None;
+        self.status = status;
+    }
+
+    fn join_failed(&mut self, error: impl Into<String>) {
+        self.terminal = None;
+        self.status = SessionRuntimeStatus::Failed(error.into());
+    }
+
+    fn complete_local_configuration(&mut self) {
+        debug_assert!(matches!(
+            self.status,
+            SessionRuntimeStatus::Idle | SessionRuntimeStatus::Failed(_)
+        ));
+        self.terminal = None;
+        self.status = SessionRuntimeStatus::Idle;
+    }
+}
+
+#[derive(Default)]
+struct ApprovalQueue(VecDeque<ApprovalState>);
+
+impl ApprovalQueue {
+    fn front(&self) -> Option<&ApprovalState> {
+        self.0.front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn push(&mut self, approval: ApprovalState) {
+        if self
+            .0
+            .iter()
+            .any(|existing| existing.call_id == approval.call_id)
+        {
+            return;
+        }
+        self.0.push_back(approval);
+    }
+
+    fn is_front(&self, call_id: &str) -> bool {
+        self.0
+            .front()
+            .is_some_and(|approval| approval.call_id == call_id)
+    }
+
+    fn pop_front(&mut self) -> Option<ApprovalState> {
+        self.0.pop_front()
+    }
+
+    fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionRuntimeSnapshot {
     pub(crate) session: SessionInfo,
-    pub(crate) conversation: Arc<ConversationState>,
-    pub(crate) trajectory: Arc<TrajectoryProjection>,
+    pub(crate) view: Arc<SessionView>,
     pub(crate) status: SessionRuntimeStatus,
     pub(crate) approval: Option<ApprovalState>,
     pub(crate) started_at: Option<Instant>,
@@ -47,41 +259,24 @@ pub(crate) struct SessionRuntimeObservation {
     pub(crate) approval_needed: bool,
     pub(crate) completed_runs: u64,
     pub(crate) transcript_updates: u64,
+    pub(crate) presentation_sequence: u64,
+    pub(crate) durable_revision: u64,
+    pub(crate) metadata_generation: u64,
 }
 
-enum PendingConversationDelta {
-    Reasoning(String),
-    Text(String),
+const PRESENTATION_CHANGE_HISTORY: usize = 128;
+
+#[derive(Clone, Debug)]
+struct PresentationChange {
+    sequence: u64,
+    full_reset: bool,
+    message_ids: Vec<MessageId>,
 }
 
-fn merge_pending_delta(
-    pending: &mut Option<PendingConversationDelta>,
-    next: PendingConversationDelta,
-    runtime: &mut SessionRuntime,
-    conversation_changed: &mut bool,
-) {
-    match (pending.as_mut(), &next) {
-        (
-            Some(PendingConversationDelta::Reasoning(previous)),
-            PendingConversationDelta::Reasoning(next),
-        )
-        | (Some(PendingConversationDelta::Text(previous)), PendingConversationDelta::Text(next)) => {
-            previous.push_str(next)
-        }
-        _ => {
-            if let Some(previous) = pending.take() {
-                runtime.apply_pending_delta(previous);
-                *conversation_changed = true;
-            }
-            *pending = Some(next);
-        }
-    }
-}
-
-/// The complete GPUI-owned execution boundary for one session.
+/// Per-session execution boundary owned by GPUI.
 ///
-/// Agent events never leave this entity. Observers receive only immutable snapshots, so
-/// selecting another session cannot reroute or interrupt this runtime.
+/// Durable content has exactly one route: committed events -> `SessionDocument` -> `SessionView`.
+/// Transient events may change status and approvals, but never fabricate visible session items.
 pub(crate) struct SessionRuntime {
     session: SessionInfo,
     project_id: String,
@@ -92,10 +287,17 @@ pub(crate) struct SessionRuntime {
     next_run: RunId,
     completed_runs: u64,
     transcript_updates: u64,
-    conversation: Arc<ConversationState>,
-    trajectory: Arc<TrajectoryProjection>,
-    approval: Option<ApprovalState>,
-    status: SessionRuntimeStatus,
+    durable_revision: u64,
+    metadata_generation: u64,
+    document: SessionDocument,
+    view: Arc<SessionView>,
+    conversation_ids: Vec<ConversationItemId>,
+    message_keys: HashMap<ConversationItemId, MessageId>,
+    message_indices: HashMap<MessageId, usize>,
+    presentation_sequence: u64,
+    presentation_changes: VecDeque<PresentationChange>,
+    approvals: ApprovalQueue,
+    lifecycle: RuntimeLifecycle,
     started_at: Option<Instant>,
     allow_all_tools: bool,
     config: SessionConfig,
@@ -107,11 +309,11 @@ impl SessionRuntime {
         agent: Agent,
         project_id: String,
         sessions_dir: PathBuf,
-        conversation: ConversationState,
-        trajectory: TrajectoryProjection,
+        document: SessionDocument,
         config: SessionConfig,
     ) -> Self {
         let session = agent.session_info().clone();
+        let durable_revision = agent.session_revision();
         let tool_schemas = agent
             .tool_schemas()
             .into_iter()
@@ -122,7 +324,15 @@ impl SessionRuntime {
                 let display = serde_json::to_string_pretty(function).ok()?;
                 Some((name, display))
             })
-            .collect();
+            .collect::<HashMap<_, _>>();
+        let view = Arc::new(SessionView::from_document(
+            &document,
+            &session.title,
+            &tool_schemas,
+            None,
+        ));
+        let conversation_ids = document.conversation_ids().to_vec();
+        let (message_keys, message_indices) = presentation_indices(&conversation_ids, &view);
         Self {
             session,
             project_id,
@@ -133,10 +343,17 @@ impl SessionRuntime {
             next_run: RunId::default(),
             completed_runs: 0,
             transcript_updates: 0,
-            conversation: Arc::new(conversation),
-            trajectory: Arc::new(trajectory),
-            approval: None,
-            status: SessionRuntimeStatus::Idle,
+            durable_revision,
+            metadata_generation: 0,
+            document,
+            view,
+            conversation_ids,
+            message_keys,
+            message_indices,
+            presentation_sequence: 0,
+            presentation_changes: VecDeque::new(),
+            approvals: ApprovalQueue::default(),
+            lifecycle: RuntimeLifecycle::default(),
             started_at: None,
             allow_all_tools: config.allow_all_tools,
             config,
@@ -147,10 +364,9 @@ impl SessionRuntime {
     pub(crate) fn snapshot(&self) -> SessionRuntimeSnapshot {
         SessionRuntimeSnapshot {
             session: self.session.clone(),
-            conversation: self.conversation.clone(),
-            trajectory: self.trajectory.clone(),
-            status: self.status.clone(),
-            approval: self.approval.clone(),
+            view: Arc::clone(&self.view),
+            status: self.lifecycle.status().clone(),
+            approval: self.approvals.front().cloned(),
             started_at: self.started_at,
             allow_all_tools: self.allow_all_tools,
             config: self.config.clone(),
@@ -161,57 +377,146 @@ impl SessionRuntime {
     pub(crate) fn observation(&self) -> SessionRuntimeObservation {
         SessionRuntimeObservation {
             session: self.session.clone(),
-            status: self.status.clone(),
-            approval_needed: self.approval.is_some(),
+            status: self.lifecycle.status().clone(),
+            approval_needed: !self.approvals.is_empty(),
             completed_runs: self.completed_runs,
             transcript_updates: self.transcript_updates,
+            presentation_sequence: self.presentation_sequence,
+            durable_revision: self.durable_revision,
+            metadata_generation: self.metadata_generation,
         }
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        matches!(
-            self.status,
-            SessionRuntimeStatus::Creating
-                | SessionRuntimeStatus::Configuring
-                | SessionRuntimeStatus::Running
-        )
+        self.lifecycle.is_active()
     }
 
-    pub(crate) fn set_message_expanded(
-        &mut self,
-        index: usize,
-        role: Role,
-        expanded: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(message) = self.conversation.messages.get(index) else {
-            return;
-        };
-        if message.role != role || message.expanded == expanded {
-            return;
+    /// Returns true only when this inactive runtime and its idle Agent were loaded from exactly
+    /// the same durable snapshot as `session`. Metadata and configuration are not journal events,
+    /// so revision equality alone is insufficient for safe cache reuse.
+    pub(crate) fn matches_loaded_session(&self, session: &Session) -> bool {
+        !self.is_active()
+            && self.durable_revision == session.revision()
+            && self.session == *session.info()
+            && self.agent.as_ref().is_some_and(|agent| {
+                agent.session_revision() == session.revision()
+                    && agent.session_config() == session.config()
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_failed_for_test(&mut self, message: impl Into<String>) {
+        debug_assert!(!self.lifecycle.is_active());
+        self.lifecycle.fail(message);
+    }
+
+    pub(crate) fn details_raw(&self, id: &TrajectoryItemId) -> String {
+        self.document.details_raw(id).unwrap_or_default()
+    }
+
+    pub(crate) fn details_raw_revision(&self, id: &TrajectoryItemId) -> Option<(usize, u64)> {
+        let source_seqs = self.document.details(id)?.source_seqs;
+        Some((source_seqs.len(), *source_seqs.last()?))
+    }
+
+    pub(crate) fn presentation_snapshot(&self) -> Vec<Arc<Message>> {
+        self.view.conversation.messages.iter().cloned().collect()
+    }
+
+    /// Returns all committed message changes after `sequence` without scanning the whole view.
+    /// A bounded-history miss is reported as a full reset.
+    pub(crate) fn presentation_update_since(
+        &self,
+        sequence: u64,
+    ) -> (u64, bool, Vec<Arc<Message>>) {
+        if sequence == self.presentation_sequence {
+            return (self.presentation_sequence, false, Vec::new());
         }
-        reduce_conversation(
-            Arc::make_mut(&mut self.conversation),
-            ConversationAction::ToggleExpanded { index, role },
-        );
-        cx.notify();
+        let history_missed = sequence > self.presentation_sequence
+            || self
+                .presentation_changes
+                .front()
+                .is_none_or(|change| sequence.saturating_add(1) < change.sequence);
+        if history_missed {
+            return (
+                self.presentation_sequence,
+                true,
+                self.presentation_snapshot(),
+            );
+        }
+
+        let mut full_reset = false;
+        let mut seen = std::collections::HashSet::new();
+        let mut ids = Vec::new();
+        for change in self
+            .presentation_changes
+            .iter()
+            .filter(|change| change.sequence > sequence)
+        {
+            full_reset |= change.full_reset;
+            for id in &change.message_ids {
+                if seen.insert(*id) {
+                    ids.push(*id);
+                }
+            }
+        }
+        if full_reset {
+            return (
+                self.presentation_sequence,
+                true,
+                self.presentation_snapshot(),
+            );
+        }
+        let messages = ids
+            .into_iter()
+            .filter_map(|id| {
+                self.message_indices
+                    .get(&id)
+                    .and_then(|index| self.view.conversation.messages.get(*index))
+                    .cloned()
+            })
+            .collect();
+        (self.presentation_sequence, false, messages)
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
         if allow == self.allow_all_tools && allow == self.config.allow_all_tools {
             return true;
         }
-        if self.is_active() {
+        if self
+            .lifecycle
+            .allows(RuntimeOperation::ChangePermissionDuringRun)
+        {
             self.allow_all_tools = allow;
-            if allow
-                && let Some(approval) = self.approval.take()
-                && let Some(control) = &self.control
-                && let Err(error) = control.approve(approval.call_id, true)
-            {
-                self.notice(error.to_string());
+            if allow {
+                let approvals = self
+                    .approvals
+                    .0
+                    .drain(..)
+                    .map(|approval| approval.call_id)
+                    .collect::<Vec<_>>();
+                let Some(control) = self.control.clone() else {
+                    self.fail_runtime("run control is unavailable");
+                    return false;
+                };
+                cx.spawn(async move |this, cx| {
+                    for call_id in approvals {
+                        if let Err(error) = control.approve(call_id, true).await {
+                            let _ = this.update(cx, |runtime, cx| {
+                                runtime.fail_runtime(error.to_string());
+                                cx.notify();
+                            });
+                            break;
+                        }
+                    }
+                })
+                .detach();
             }
             cx.notify();
             return true;
+        }
+        if !self.lifecycle.allows(RuntimeOperation::Configure) {
+            return false;
         }
         let mut config = self.config.clone();
         config.allow_all_tools = allow;
@@ -250,12 +555,13 @@ impl SessionRuntime {
         model: Option<Model>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.is_active() {
+        if !self.lifecycle.allows(RuntimeOperation::Configure) {
             return false;
         }
         if config == self.config {
             if let (Some(agent), Some(model)) = (&mut self.agent, model) {
                 agent.set_model(model);
+                self.lifecycle.complete_local_configuration();
                 cx.notify();
                 return true;
             }
@@ -267,6 +573,7 @@ impl SessionRuntime {
             }
             self.allow_all_tools = config.allow_all_tools;
             self.config = config;
+            self.lifecycle.complete_local_configuration();
             cx.notify();
             return true;
         }
@@ -275,36 +582,29 @@ impl SessionRuntime {
         };
         let previous_allow_all_tools = self.allow_all_tools;
         self.allow_all_tools = config.allow_all_tools;
-        let settled_status = self.status.clone();
-        self.status = SessionRuntimeStatus::Configuring;
+        if !self.lifecycle.begin_configuring() {
+            self.agent = Some(agent);
+            self.allow_all_tools = previous_allow_all_tools;
+            return false;
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = agent.persist_session_config(&config).await;
             let _ = this.update(cx, |runtime, cx| {
-                let persisted = match result {
+                match result {
                     Ok(()) => {
-                        if let Some(model) = model {
-                            agent.set_model(model);
-                        }
-                        runtime.config = config;
-                        runtime.status = settled_status;
-                        true
+                        runtime.complete_persisted_config(config, model, &mut agent);
                     }
                     Err(error) => {
                         if runtime.allow_all_tools == config.allow_all_tools {
                             runtime.allow_all_tools = previous_allow_all_tools;
                         }
-                        runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                        runtime.notice(format!("Could not save session configuration: {error}"));
-                        false
+                        runtime
+                            .lifecycle
+                            .complete_config(SessionRuntimeStatus::Failed(error.to_string()));
                     }
-                };
-                agent.release_session_writer();
-                runtime.agent = Some(agent);
-                let allow_all_tools = runtime.allow_all_tools;
-                if persisted && runtime.config.allow_all_tools != allow_all_tools {
-                    runtime.set_allow_all_tools(allow_all_tools, cx);
                 }
+                runtime.agent = Some(agent);
                 cx.notify();
             });
         })
@@ -312,29 +612,51 @@ impl SessionRuntime {
         true
     }
 
+    fn complete_persisted_config(
+        &mut self,
+        config: SessionConfig,
+        model: Option<Model>,
+        agent: &mut Agent,
+    ) {
+        if let Some(model) = model {
+            agent.set_model(model);
+        }
+        self.config = config;
+        self.sync_agent_metadata(agent);
+        self.metadata_generation = self.metadata_generation.saturating_add(1);
+        self.lifecycle.complete_config(SessionRuntimeStatus::Idle);
+    }
+
     pub(crate) fn rename(&mut self, title: String, cx: &mut Context<Self>) -> bool {
-        if self.is_active() || self.session.path.as_os_str().is_empty() {
+        if !self.lifecycle.allows(RuntimeOperation::Rename)
+            || self.session.path.as_os_str().is_empty()
+        {
             return false;
         }
         let Some(mut agent) = self.agent.take() else {
             return false;
         };
+        if !self.lifecycle.begin_configuring() {
+            self.agent = Some(agent);
+            return false;
+        }
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let result = agent.rename_session(&title).await;
             let _ = this.update(cx, |runtime, cx| {
                 match result {
                     Ok(()) => {
                         runtime.session = agent.session_info().clone();
-                        Arc::make_mut(&mut runtime.conversation).title =
-                            runtime.session.title.clone();
-                        runtime.status = SessionRuntimeStatus::Idle;
+                        runtime.refresh_view();
+                        runtime.metadata_generation = runtime.metadata_generation.saturating_add(1);
+                        runtime
+                            .lifecycle
+                            .complete_config(SessionRuntimeStatus::Idle);
                     }
-                    Err(error) => {
-                        runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                        runtime.notice(format!("Could not rename session: {error}"));
-                    }
+                    Err(error) => runtime
+                        .lifecycle
+                        .complete_config(SessionRuntimeStatus::Failed(error.to_string())),
                 }
-                agent.release_session_writer();
                 runtime.agent = Some(agent);
                 cx.notify();
             });
@@ -350,21 +672,35 @@ impl SessionRuntime {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if input.trim().is_empty() || matches!(self.status, SessionRuntimeStatus::Creating) {
+        if input.trim().is_empty() {
             return;
         }
         if let Some(control) = &self.control {
-            let result = match behavior {
-                EnterBehavior::Steer => control.steer(input),
-                EnterBehavior::Queue => control.queue(input),
-            };
-            if let Err(error) = result {
-                self.notice(error.to_string());
+            if !self.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
+                return;
             }
+            let control = control.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let result = match behavior {
+                    EnterBehavior::Steer => control.steer(input).await,
+                    EnterBehavior::Queue => control.queue(input).await,
+                };
+                if let Err(error) = result {
+                    let _ = cx.update(|_, app| {
+                        this.update(app, |runtime, cx| {
+                            runtime.fail_runtime(error.to_string());
+                            cx.notify();
+                        })
+                    });
+                }
+            })
+            .detach();
             cx.notify();
             return;
         }
-
+        if !self.lifecycle.allows(RuntimeOperation::StartRun) {
+            return;
+        }
         if self.session.path.as_os_str().is_empty() {
             self.create_and_start(input, window, cx);
         } else {
@@ -373,7 +709,9 @@ impl SessionRuntime {
     }
 
     fn create_and_start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.status = SessionRuntimeStatus::Creating;
+        if !self.lifecycle.begin_creating() {
+            return;
+        }
         let sessions_dir = self.sessions_dir.clone();
         let project_id = self.project_id.clone();
         let runtime_config = self.config.clone();
@@ -397,8 +735,7 @@ impl SessionRuntime {
                         runtime.start(input, window, cx);
                     }
                     Err(error) => {
-                        runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                        runtime.notice(format!("Could not create session: {error}"));
+                        runtime.lifecycle.fail(error.to_string());
                         cx.notify();
                     }
                 })
@@ -409,70 +746,41 @@ impl SessionRuntime {
 
     fn start(&mut self, input: String, window: &mut Window, cx: &mut Context<Self>) {
         let Some(agent) = self.agent.take() else {
-            self.status = SessionRuntimeStatus::Failed("Agent is unavailable".into());
-            self.notice("Agent is unavailable");
+            self.lifecycle.fail("Agent is unavailable");
             cx.notify();
             return;
         };
+        if !self.lifecycle.begin_running() {
+            self.agent = Some(agent);
+            return;
+        }
         let run = self.next_run.next();
         self.next_run = run;
         let mut active = agent.start(input);
         self.control = Some(active.control());
         self.active_run = Some(run);
-        self.status = SessionRuntimeStatus::Running;
         self.started_at = Some(Instant::now());
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
-            let mut stream_ended = false;
-            while !stream_ended {
-                let Some(first) = active.next_event().await else {
-                    break;
-                };
-                let collect_frame = is_frame_stream_event(&first);
-                let mut batch = StreamBatch::new(first);
-                if collect_frame {
-                    let (frame_tx, mut frame_rx) = tokio::sync::oneshot::channel();
-                    cx.update(|window, _| arm_next_frame(window, frame_tx)).ok();
-                    let mut reached_frame = false;
-                    let mut reached_structure = false;
-                    while batch.len() < MAX_EVENTS_PER_FRAME {
-                        tokio::select! {
-                            biased;
-                            _ = &mut frame_rx => {
-                                reached_frame = true;
-                                break;
-                            }
-                            event = active.next_event() => match event {
-                                Some(event) => {
-                                    let structural = !is_frame_stream_event(&event);
-                                    batch.push(event);
-                                    if structural {
-                                        reached_structure = true;
-                                        break;
-                                    }
-                                }
-                                None => {
-                                    stream_ended = true;
-                                    break;
-                                }
-                            },
-                        }
-                    }
-                    if !reached_frame && !reached_structure && !stream_ended {
-                        let _ = frame_rx.await;
-                    }
-                }
+            while let Some(event) = active.next_event().await {
                 let _ = cx.update(|_, app| {
                     this.update(app, |runtime, cx| {
-                        if runtime.active_run != Some(run) {
-                            return;
+                        if runtime.active_run == Some(run) {
+                            runtime.apply_event(event);
+                            cx.notify();
                         }
-                        runtime.apply_events(batch.into_events());
-                        cx.notify();
                     })
                 });
             }
+            let _ = cx.update(|_, app| {
+                this.update(app, |runtime, cx| {
+                    if runtime.active_run == Some(run) {
+                        runtime.lifecycle.stream_closed();
+                        cx.notify();
+                    }
+                })
+            });
             let result = active.finish().await;
             let _ = cx.update(|_, app| {
                 this.update(app, |runtime, cx| {
@@ -481,25 +789,16 @@ impl SessionRuntime {
                     }
                     runtime.active_run = None;
                     runtime.control = None;
+                    runtime.approvals.clear();
                     runtime.started_at = None;
                     match result {
-                        Ok(mut agent) => {
-                            runtime.session = agent.session_info().clone();
-                            agent.release_session_writer();
-                            runtime.agent = Some(agent);
-                            if matches!(runtime.status, SessionRuntimeStatus::Running) {
-                                runtime.status = SessionRuntimeStatus::Idle;
-                            }
+                        Ok(agent) => {
+                            runtime.settle_agent_after_run(agent, cx);
                         }
                         Err(error) => {
-                            runtime.status = SessionRuntimeStatus::Failed(error.to_string());
-                            runtime.notice(error.to_string());
+                            runtime.allow_all_tools = runtime.config.allow_all_tools;
+                            runtime.lifecycle.join_failed(error.to_string());
                         }
-                    }
-                    let allow_all_tools = runtime.allow_all_tools;
-                    if runtime.agent.is_some() && runtime.config.allow_all_tools != allow_all_tools
-                    {
-                        runtime.set_allow_all_tools(allow_all_tools, cx);
                     }
                     cx.notify();
                 })
@@ -508,238 +807,244 @@ impl SessionRuntime {
         .detach();
     }
 
+    fn settle_agent_after_run(&mut self, mut agent: Agent, cx: &mut Context<Self>) {
+        self.sync_agent_metadata(&agent);
+        let settled_status = self.lifecycle.status_after_join();
+        let Some(config) = deferred_allow_all_config(&self.config, self.allow_all_tools) else {
+            self.agent = Some(agent);
+            self.lifecycle.complete_join(settled_status);
+            return;
+        };
+
+        self.lifecycle.begin_settlement_config();
+        cx.spawn(async move |this, cx| {
+            let result = agent.persist_session_config(&config).await;
+            let _ = this.update(cx, |runtime, cx| {
+                match result {
+                    Ok(()) => {
+                        resolve_deferred_allow_all(
+                            &mut runtime.config,
+                            &mut runtime.allow_all_tools,
+                            config,
+                            true,
+                        );
+                        runtime.sync_agent_metadata(&agent);
+                        runtime.lifecycle.complete_config(settled_status);
+                    }
+                    Err(error) => {
+                        resolve_deferred_allow_all(
+                            &mut runtime.config,
+                            &mut runtime.allow_all_tools,
+                            config,
+                            false,
+                        );
+                        runtime.lifecycle.complete_config(settlement_config_failure(
+                            &settled_status,
+                            &error.to_string(),
+                        ));
+                    }
+                }
+                runtime.agent = Some(agent);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn abort(&mut self, cx: &mut Context<Self>) {
         if let Some(control) = &self.control {
             control.abort();
-            self.notice("Stopping…");
             cx.notify();
         }
     }
 
     pub(crate) fn decide(&mut self, call_id: String, allow: bool, cx: &mut Context<Self>) {
-        if let Some(control) = &self.control
-            && let Err(error) = control.approve(call_id, allow)
+        if !self.lifecycle.allows(RuntimeOperation::SubmitDuringRun)
+            || !self.approvals.is_front(&call_id)
         {
-            self.notice(error.to_string());
+            return;
         }
-        self.approval = None;
-        self.notice(if allow { "Tool allowed" } else { "Tool denied" });
+        let Some(control) = self.control.clone() else {
+            self.fail_runtime("run control is unavailable");
+            cx.notify();
+            return;
+        };
+        let approval = self
+            .approvals
+            .pop_front()
+            .expect("front approval was checked");
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = control.approve(call_id, allow).await {
+                let _ = this.update(cx, |runtime, cx| {
+                    if runtime.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
+                        runtime.approvals.0.push_front(approval);
+                    }
+                    runtime.fail_runtime(error.to_string());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.notify();
     }
 
-    fn apply_events(&mut self, events: Vec<AgentEvent>) {
-        let conversation_dirty_from = self.conversation.messages.len().saturating_sub(1);
-        let mut pending_delta = None;
-        let mut conversation_changed = false;
-        let mut transcript_updates = 0_u64;
-        for event in events {
-            match event {
-                AgentEvent::SessionEvent(recorded) => {
-                    Arc::make_mut(&mut self.trajectory).apply(&recorded);
-                }
-                AgentEvent::ReasoningDelta(delta) => {
-                    merge_pending_delta(
-                        &mut pending_delta,
-                        PendingConversationDelta::Reasoning(delta),
-                        self,
-                        &mut conversation_changed,
-                    );
-                    transcript_updates = transcript_updates.saturating_add(1);
-                }
-                AgentEvent::TextDelta(delta) => {
-                    merge_pending_delta(
-                        &mut pending_delta,
-                        PendingConversationDelta::Text(delta),
-                        self,
-                        &mut conversation_changed,
-                    );
-                    transcript_updates = transcript_updates.saturating_add(1);
-                }
-                event => {
-                    if let Some(delta) = pending_delta.take() {
-                        self.apply_pending_delta(delta);
-                        conversation_changed = true;
-                    }
-                    let (changed, transcript) = self.apply_structural_event(event);
-                    conversation_changed |= changed;
-                    transcript_updates = transcript_updates.saturating_add(u64::from(transcript));
-                }
-            }
-        }
-        if let Some(delta) = pending_delta {
-            self.apply_pending_delta(delta);
-            conversation_changed = true;
-        }
-        self.transcript_updates = self.transcript_updates.saturating_add(transcript_updates);
-        if conversation_changed {
-            reindex_shared_messages_from(
-                &mut Arc::make_mut(&mut self.conversation).messages,
-                conversation_dirty_from,
-            );
-        }
-    }
-
-    fn apply_pending_delta(&mut self, delta: PendingConversationDelta) {
-        let conversation = Arc::make_mut(&mut self.conversation);
-        match delta {
-            PendingConversationDelta::Reasoning(delta) => {
-                reduce_conversation(
-                    conversation,
-                    ConversationAction::ReasoningDelta {
-                        new_message: message(Role::Reasoning, delta.clone()),
-                        delta,
-                    },
-                );
-            }
-            PendingConversationDelta::Text(delta) => {
-                reduce_conversation(
-                    conversation,
-                    ConversationAction::TextDelta {
-                        new_message: message(Role::Assistant, delta.clone()),
-                        delta,
-                    },
-                );
-            }
-        }
-    }
-
-    fn apply_structural_event(&mut self, event: AgentEvent) -> (bool, bool) {
-        let changes_transcript = matches!(
-            &event,
-            AgentEvent::ToolStarted(_)
-                | AgentEvent::ToolFinished { .. }
-                | AgentEvent::RunFinished(_)
-                | AgentEvent::RunStarted(_)
-                | AgentEvent::InputAdmitted { .. }
-        );
-        let mut conversation_changed = true;
+    fn apply_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::SessionCommitted(receipt) => self.apply_receipt(receipt),
             AgentEvent::ApprovalRequired(call) => {
-                conversation_changed = false;
+                if !self.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
+                    return;
+                }
                 if self.allow_all_tools {
-                    if let Some(control) = &self.control
-                        && let Err(error) = control.approve(call.call_id, true)
-                    {
-                        self.notice(error.to_string());
-                        conversation_changed = true;
+                    if let Some(control) = self.control.clone() {
+                        tokio::spawn(async move {
+                            let _ = control.approve(call.call_id, true).await;
+                        });
+                    } else {
+                        self.fail_runtime("run control is unavailable");
                     }
                 } else {
-                    self.approval = Some(ApprovalState {
+                    self.approvals.push(ApprovalState {
                         call_id: call.call_id,
                         name: call.name,
                         arguments: call.arguments,
                     });
                 }
             }
-            AgentEvent::ToolStarted(call) => {
-                let schema = self.tool_schemas.get(&call.name).cloned();
-                reduce_conversation(
-                    Arc::make_mut(&mut self.conversation),
-                    ConversationAction::ToolStarted(Message {
-                        key: next_message_id(),
-                        revision: 0,
-                        role: Role::Tool,
-                        tool_call_id: Some(call.call_id),
-                        title: Some(call.name),
-                        text: String::new(),
-                        payload: Some(call.arguments),
-                        schema,
-                        pending: true,
-                        failed: false,
-                        expanded: false,
-                        rating: None,
-                        started_at_ms: None,
-                        duration_ms: None,
-                        turn: 0,
-                        step: 0,
-                        request_id: None,
-                        search_text: String::new(),
-                    }),
-                );
-            }
-            AgentEvent::ToolFinished { call, result } => self.tool_result(&call.call_id, result),
-            AgentEvent::RunFinished(summary) => {
-                let usage = summary.usage.map(|usage| UsageSnapshot {
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    cached_tokens: usage.input_tokens_details.cached_tokens,
-                });
-                reduce_conversation(
-                    Arc::make_mut(&mut self.conversation),
-                    ConversationAction::RunFinished {
-                        response_id: summary.response_id,
-                        usage,
-                    },
-                );
-                self.completed_runs = self.completed_runs.saturating_add(1);
-                self.status = SessionRuntimeStatus::Idle;
-            }
-            AgentEvent::RunFailed(error) => {
-                self.finish_reasoning();
-                self.status = SessionRuntimeStatus::Failed(error.clone());
-                self.notice(error);
+            AgentEvent::RunFinished(_) => {
+                self.approvals.clear();
+                if self.lifecycle.observe_terminal(RunTerminal::Finished) {
+                    self.completed_runs = self.completed_runs.saturating_add(1);
+                }
             }
             AgentEvent::RunAborted => {
-                self.finish_reasoning();
-                self.status = SessionRuntimeStatus::Idle;
-                self.notice("Stopped");
+                self.approvals.clear();
+                self.lifecycle.observe_terminal(RunTerminal::Aborted);
             }
-            AgentEvent::CompactionStarted { .. } => self.notice("Compacting context…"),
-            AgentEvent::CompactionFinished { .. } => self.notice("Context compacted"),
-            AgentEvent::RunStarted(input) => {
-                reduce_conversation(
-                    Arc::make_mut(&mut self.conversation),
-                    ConversationAction::SubmitUser(message(Role::User, input)),
-                );
+            AgentEvent::RunFailed(error) => {
+                self.approvals.clear();
+                self.lifecycle.observe_terminal(RunTerminal::Failed(error));
             }
-            AgentEvent::InputAdmitted { input, .. } => {
-                reduce_conversation(
-                    Arc::make_mut(&mut self.conversation),
-                    ConversationAction::SubmitUser(message(Role::User, input)),
-                );
+            AgentEvent::RunStarted(_)
+            | AgentEvent::ModelStarted(_)
+            | AgentEvent::CompactionStarted { .. }
+            | AgentEvent::CompactionFinished { .. } => {}
+        }
+    }
+
+    fn apply_receipt(&mut self, receipt: CommitReceipt) {
+        let previous_revision = self.document.revisions().conversation;
+        let committed_revision = receipt.revision;
+        let committed_at_ms = receipt.committed_at_ms;
+        match self.document.apply_batch(receipt.events) {
+            Ok(delta) => {
+                if self.document.revisions().conversation != previous_revision {
+                    self.transcript_updates = self.transcript_updates.saturating_add(1);
+                }
+                let next_view = Arc::new(SessionView::after_delta(
+                    &self.document,
+                    &delta,
+                    &self.session.title,
+                    &self.tool_schemas,
+                    &self.view,
+                ));
+                self.publish_presentation_change(&delta, &next_view);
+                self.view = next_view;
+                self.durable_revision = committed_revision;
+                if committed_at_ms >= 0 {
+                    let updated_at = millis_to_seconds(committed_at_ms);
+                    self.session.updated_at = self.session.updated_at.max(updated_at);
+                }
             }
-            AgentEvent::ModelStarted(_) => conversation_changed = false,
-            AgentEvent::SessionEvent(_)
-            | AgentEvent::ReasoningDelta(_)
-            | AgentEvent::TextDelta(_) => {
-                unreachable!("stream events are handled before structural reduction")
+            Err(error) => {
+                self.fail_runtime(format!("committed session projection failed: {error}"));
             }
         }
-        (conversation_changed, changes_transcript)
     }
 
-    #[cfg(test)]
-    pub(crate) fn apply_test_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
-        self.apply_events(vec![event]);
-        cx.notify();
+    fn fail_runtime(&mut self, error: impl Into<String>) {
+        self.lifecycle.fail(error);
+        if matches!(self.lifecycle.status(), SessionRuntimeStatus::Settling) {
+            self.approvals.clear();
+            if let Some(control) = &self.control {
+                control.abort();
+            }
+        }
     }
 
-    fn finish_reasoning(&mut self) {
-        reduce_conversation(
-            Arc::make_mut(&mut self.conversation),
-            ConversationAction::FinishReasoning,
-        );
+    fn refresh_view(&mut self) {
+        self.view = Arc::new(SessionView::from_document(
+            &self.document,
+            &self.session.title,
+            &self.tool_schemas,
+            Some(&self.view),
+        ));
     }
 
-    fn tool_result(&mut self, call_id: &str, result: ToolResult) {
-        let duration_ms = self.trajectory.tool_duration_ms(call_id);
-        reduce_conversation(
-            Arc::make_mut(&mut self.conversation),
-            ConversationAction::ToolFinished {
-                call_id: call_id.to_owned(),
-                output: result.output,
-                is_error: result.is_error,
-                duration_ms,
-            },
-        );
+    fn sync_agent_metadata(&mut self, agent: &Agent) {
+        let title_changed = self.session.title != agent.session_info().title;
+        self.session = agent.session_info().clone();
+        self.durable_revision = agent.session_revision();
+        if title_changed {
+            self.refresh_view();
+        }
     }
 
-    fn notice(&mut self, text: impl Into<String>) {
-        reduce_conversation(
-            Arc::make_mut(&mut self.conversation),
-            ConversationAction::AppendNotice(message(Role::Notice, text.into())),
-        );
-        self.transcript_updates = self.transcript_updates.saturating_add(1);
+    fn publish_presentation_change(
+        &mut self,
+        delta: &ProjectionDelta,
+        next_view: &Arc<SessionView>,
+    ) {
+        if delta.changed_conversation.is_empty() && !delta.conversation_order_changed {
+            return;
+        }
+
+        let next_ids = self.document.conversation_ids();
+        let previous_len = self.conversation_ids.len();
+        let append_only = next_ids.starts_with(&self.conversation_ids)
+            && next_ids.len() == next_view.conversation.messages.len();
+        let full_reset = !append_only;
+        if full_reset {
+            self.conversation_ids = next_ids.to_vec();
+            (self.message_keys, self.message_indices) =
+                presentation_indices(&self.conversation_ids, next_view);
+        } else {
+            for (index, id) in next_ids.iter().enumerate().skip(previous_len) {
+                let Some(message) = next_view.conversation.messages.get(index) else {
+                    continue;
+                };
+                self.message_keys.insert(id.clone(), message.key);
+                self.message_indices.insert(message.key, index);
+            }
+            self.conversation_ids
+                .extend_from_slice(next_ids.get(previous_len..).unwrap_or_default());
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        let message_ids = if full_reset {
+            next_view
+                .conversation
+                .messages
+                .iter()
+                .map(|message| message.key)
+                .collect()
+        } else {
+            delta
+                .changed_conversation
+                .iter()
+                .filter_map(|id| self.message_keys.get(id).copied())
+                .filter(|id| seen.insert(*id))
+                .collect()
+        };
+        self.presentation_sequence = self.presentation_sequence.saturating_add(1);
+        self.presentation_changes.push_back(PresentationChange {
+            sequence: self.presentation_sequence,
+            full_reset,
+            message_ids,
+        });
+        while self.presentation_changes.len() > PRESENTATION_CHANGE_HISTORY {
+            self.presentation_changes.pop_front();
+        }
     }
 }
 
@@ -751,27 +1056,66 @@ impl Drop for SessionRuntime {
     }
 }
 
-fn message(role: Role, text: String) -> Message {
-    Message {
-        key: next_message_id(),
-        revision: 0,
-        role,
-        tool_call_id: None,
-        title: None,
-        text,
-        payload: None,
-        schema: None,
-        pending: false,
-        failed: false,
-        expanded: false,
-        rating: None,
-        started_at_ms: None,
-        duration_ms: None,
-        turn: 0,
-        step: 0,
-        request_id: None,
-        search_text: String::new(),
+fn presentation_indices(
+    conversation_ids: &[ConversationItemId],
+    view: &SessionView,
+) -> (
+    HashMap<ConversationItemId, MessageId>,
+    HashMap<MessageId, usize>,
+) {
+    debug_assert_eq!(conversation_ids.len(), view.conversation.messages.len());
+    let mut keys = HashMap::with_capacity(conversation_ids.len());
+    let mut indices = HashMap::with_capacity(conversation_ids.len());
+    for (index, (id, message)) in conversation_ids
+        .iter()
+        .zip(view.conversation.messages.iter())
+        .enumerate()
+    {
+        keys.insert(id.clone(), message.key);
+        indices.insert(message.key, index);
     }
+    (keys, indices)
+}
+
+fn deferred_allow_all_config(
+    durable: &SessionConfig,
+    effective_allow_all_tools: bool,
+) -> Option<SessionConfig> {
+    if durable.allow_all_tools == effective_allow_all_tools {
+        return None;
+    }
+    let mut requested = durable.clone();
+    requested.allow_all_tools = effective_allow_all_tools;
+    Some(requested)
+}
+
+fn resolve_deferred_allow_all(
+    durable: &mut SessionConfig,
+    effective_allow_all_tools: &mut bool,
+    requested: SessionConfig,
+    persisted: bool,
+) {
+    if persisted {
+        *durable = requested;
+    }
+    *effective_allow_all_tools = durable.allow_all_tools;
+}
+
+fn settlement_config_failure(
+    settled_status: &SessionRuntimeStatus,
+    persistence_error: &str,
+) -> SessionRuntimeStatus {
+    let message = match settled_status {
+        SessionRuntimeStatus::Failed(run_error) => {
+            format!("{run_error}; could not save permission setting: {persistence_error}")
+        }
+        _ => format!("could not save permission setting: {persistence_error}"),
+    };
+    SessionRuntimeStatus::Failed(message)
+}
+
+fn millis_to_seconds(millis: i64) -> u64 {
+    u64::try_from(millis.max(0)).unwrap_or_default() / 1_000
 }
 
 fn reasoning_key(effort: &ReasoningEffort) -> String {
@@ -783,11 +1127,17 @@ fn reasoning_key(effort: &ReasoningEffort) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AppContext;
-
     use super::*;
 
+    fn lifecycle(status: SessionRuntimeStatus) -> RuntimeLifecycle {
+        RuntimeLifecycle {
+            status,
+            terminal: None,
+        }
+    }
+
     fn runtime() -> SessionRuntime {
+        let config = SessionConfig::default();
         let agent = Agent::new(
             Model::new("test", "key", "http://localhost", "model", 10_000),
             "test",
@@ -798,234 +1148,282 @@ mod tests {
             agent,
             "default".into(),
             PathBuf::from("sessions"),
-            ConversationState::default(),
-            TrajectoryProjection::default(),
-            SessionConfig::default(),
+            SessionDocument::default(),
+            config,
+        )
+    }
+
+    fn approval(call_id: &str) -> AgentEvent {
+        AgentEvent::ApprovalRequired(
+            serde_json::from_value(serde_json::json!({
+                "arguments": "{}",
+                "call_id": call_id,
+                "name": "shell"
+            }))
+            .expect("approval fixture must deserialize"),
         )
     }
 
     #[test]
-    fn agent_events_mutate_only_the_runtime_that_owns_the_channel() {
-        let mut first = runtime();
-        let mut second = runtime();
-
-        first.apply_events(vec![AgentEvent::TextDelta("first".into())]);
-        second.apply_events(vec![AgentEvent::RunFailed("second failed".into())]);
-
-        assert_eq!(first.conversation.messages.len(), 1);
-        assert_eq!(first.conversation.messages[0].text, "first");
-        assert!(matches!(first.status, SessionRuntimeStatus::Idle));
-        assert_eq!(second.conversation.messages.len(), 1);
-        assert_eq!(second.conversation.messages[0].text, "second failed");
-        assert!(matches!(
-            second.status,
-            SessionRuntimeStatus::Failed(ref message) if message == "second failed"
-        ));
-    }
-
-    #[test]
-    fn local_run_generations_cannot_alias_between_runtimes() {
-        let mut first = runtime();
-        let mut second = runtime();
-        first.active_run = Some(RunId(1));
-        second.active_run = Some(RunId(1));
-
-        first.apply_events(vec![AgentEvent::TextDelta("only first".into())]);
-
-        assert_eq!(first.conversation.messages.len(), 1);
-        assert!(second.conversation.messages.is_empty());
-        assert_eq!(second.active_run, Some(RunId(1)));
-    }
-
-    #[test]
-    fn one_frame_merges_visible_deltas_across_durable_chunk_events() {
-        let mut runtime = runtime();
-        runtime.apply_events(vec![
-            AgentEvent::TextDelta("hello ".into()),
-            AgentEvent::SessionEvent(kcastle_agent::RecordedEvent {
-                seq: 0,
-                time: kcastle_agent::EventTime {
-                    wall_time_ms: 1,
-                    clock_id: "runtime-batch".into(),
-                    monotonic_ns: 1,
-                },
-                source_event_seqs: Vec::new(),
-                surface_op: None,
-                event: kcastle_agent::SessionEvent::AssistantChunk {
-                    turn: 1,
-                    step: 1,
-                    chunk: kcastle_agent::AssistantChunk::OutputTextDelta {
-                        delta: "hello ".into(),
-                    },
-                },
-            }),
-            AgentEvent::TextDelta("world".into()),
-        ]);
-
-        assert_eq!(runtime.conversation.messages.len(), 1);
-        assert_eq!(runtime.conversation.messages[0].text, "hello world");
-        assert_eq!(runtime.transcript_updates, 2);
-        assert_eq!(runtime.trajectory.revision(), 2);
-    }
-
-    #[test]
-    fn live_tool_result_uses_the_durable_full_call_duration() {
-        let mut runtime = runtime();
-        let mut tool_message = message(Role::Tool, String::new());
-        tool_message.tool_call_id = Some("call-1".into());
-        tool_message.pending = true;
-        Arc::make_mut(&mut runtime.conversation)
-            .messages
-            .push(Arc::new(tool_message));
-        let recorded = |seq, millis, event| kcastle_agent::RecordedEvent {
-            seq,
-            time: kcastle_agent::EventTime {
-                wall_time_ms: millis,
-                clock_id: "runtime-tool".into(),
-                monotonic_ns: u64::try_from(millis).unwrap() * 1_000_000,
-            },
-            source_event_seqs: Vec::new(),
-            surface_op: None,
-            event,
+    fn lifecycle_gates_operations_by_state() {
+        use RuntimeOperation::{
+            ChangePermissionDuringRun, Configure, Rename, StartRun, SubmitDuringRun,
         };
-        runtime.apply_events(vec![
-            AgentEvent::SessionEvent(recorded(
-                0,
-                100,
-                kcastle_agent::SessionEvent::ToolCall {
-                    turn: 1,
-                    step: 1,
-                    call_id: "call-1".into(),
-                    parent_call_id: None,
-                    name: "shell".into(),
-                    arguments: "{}".into(),
-                },
-            )),
-            AgentEvent::SessionEvent(recorded(
-                1,
-                110,
-                kcastle_agent::SessionEvent::ToolExecutionStart {
-                    call_id: "call-1".into(),
-                },
-            )),
-            AgentEvent::SessionEvent(recorded(
-                2,
-                150,
-                kcastle_agent::SessionEvent::ToolExecutionFinish {
-                    call_id: "call-1".into(),
-                    outcome: kcastle_agent::ToolExecutionOutcome::Success,
-                },
-            )),
-            AgentEvent::SessionEvent(recorded(
-                3,
-                160,
-                kcastle_agent::SessionEvent::ToolResult {
-                    turn: 1,
-                    step: 1,
-                    call_id: "call-1".into(),
-                    output: "ok".into(),
-                    status: kcastle_agent::ToolResultStatus::Success,
-                    item: kcastle_agent::InputItem::from(kcastle_agent::EasyInputMessage::from(
-                        "ok",
-                    )),
-                },
-            )),
-        ]);
 
-        runtime.tool_result("call-1", ToolResult::ok("ok"));
+        for status in [
+            SessionRuntimeStatus::Idle,
+            SessionRuntimeStatus::Failed("retryable".into()),
+        ] {
+            let lifecycle = lifecycle(status);
+            assert!(lifecycle.allows(StartRun));
+            assert!(lifecycle.allows(Configure));
+            assert!(lifecycle.allows(Rename));
+            assert!(!lifecycle.allows(SubmitDuringRun));
+            assert!(!lifecycle.allows(ChangePermissionDuringRun));
+        }
 
-        let message = &runtime.conversation.messages[0];
-        assert!(!message.pending);
-        assert_eq!(message.duration_ms, Some(60));
+        let running = lifecycle(SessionRuntimeStatus::Running);
+        assert!(running.allows(SubmitDuringRun));
+        assert!(running.allows(ChangePermissionDuringRun));
+        assert!(!running.allows(StartRun));
+        assert!(!running.allows(Configure));
+        assert!(!running.allows(Rename));
+
+        for status in [
+            SessionRuntimeStatus::Creating,
+            SessionRuntimeStatus::Configuring,
+            SessionRuntimeStatus::Settling,
+        ] {
+            let lifecycle = lifecycle(status);
+            for operation in [
+                StartRun,
+                SubmitDuringRun,
+                Configure,
+                Rename,
+                ChangePermissionDuringRun,
+            ] {
+                assert!(!lifecycle.allows(operation));
+            }
+        }
     }
 
     #[test]
-    fn snapshots_share_projection_storage_until_the_runtime_mutates() {
-        let mut runtime = runtime();
-        let before = runtime.snapshot();
-        assert!(Arc::ptr_eq(&before.conversation, &runtime.conversation));
-        assert!(Arc::ptr_eq(&before.trajectory, &runtime.trajectory));
+    fn terminal_event_cannot_make_the_runtime_idle_before_join() {
+        let mut lifecycle = RuntimeLifecycle::default();
+        assert!(lifecycle.begin_running());
+        assert!(lifecycle.observe_terminal(RunTerminal::Finished));
 
-        runtime.apply_events(vec![AgentEvent::TextDelta("new".into())]);
-        let after = runtime.snapshot();
-        assert!(before.conversation.messages.is_empty());
-        assert_eq!(after.conversation.messages[0].text, "new");
-        assert!(!Arc::ptr_eq(&before.conversation, &after.conversation));
-        assert!(Arc::ptr_eq(&before.trajectory, &after.trajectory));
+        assert_eq!(lifecycle.status(), &SessionRuntimeStatus::Settling);
+        assert!(lifecycle.is_active());
+        assert_eq!(lifecycle.status_after_join(), SessionRuntimeStatus::Idle);
+        assert_eq!(lifecycle.status(), &SessionRuntimeStatus::Settling);
+
+        lifecycle.complete_join(SessionRuntimeStatus::Idle);
+        assert_eq!(lifecycle.status(), &SessionRuntimeStatus::Idle);
     }
 
     #[test]
-    fn snapshot_cow_reuses_unchanged_messages_instead_of_cloning_the_transcript() {
-        let mut runtime = runtime();
-        runtime.apply_events(vec![
-            AgentEvent::RunStarted("question".into()),
-            AgentEvent::TextDelta("first".into()),
-        ]);
-        let before = runtime.snapshot();
+    fn failed_terminal_event_stays_active_until_join_then_surfaces_error() {
+        let mut lifecycle = RuntimeLifecycle::default();
+        assert!(lifecycle.begin_running());
+        assert!(!lifecycle.observe_terminal(RunTerminal::Failed("provider failed".into())));
 
-        runtime.apply_events(vec![AgentEvent::TextDelta(" second".into())]);
-        let after = runtime.snapshot();
-
-        assert!(Arc::ptr_eq(
-            &before.conversation.messages[0],
-            &after.conversation.messages[0]
-        ));
-        assert!(!Arc::ptr_eq(
-            &before.conversation.messages[1],
-            &after.conversation.messages[1]
-        ));
-        assert_eq!(before.conversation.messages[1].text, "first");
-        assert_eq!(after.conversation.messages[1].text, "first second");
+        assert_eq!(lifecycle.status(), &SessionRuntimeStatus::Settling);
+        assert_eq!(
+            lifecycle.status_after_join(),
+            SessionRuntimeStatus::Failed("provider failed".into())
+        );
     }
 
     #[test]
-    fn completion_generation_advances_only_for_a_finished_response() {
-        let mut runtime = runtime();
-
-        runtime.apply_events(vec![AgentEvent::RunAborted]);
-        assert_eq!(runtime.completed_runs, 0);
-        assert_eq!(runtime.transcript_updates, 1);
-
-        runtime.apply_events(vec![AgentEvent::RunFinished(kcastle_agent::RunSummary {
-            output: "done".into(),
-            response_id: "response-1".into(),
-            usage: None,
-        })]);
-        assert_eq!(runtime.completed_runs, 1);
-        assert_eq!(runtime.transcript_updates, 2);
-    }
-
-    #[gpui::test]
-    fn allow_all_applies_during_a_run_and_clears_pending_approval(cx: &mut gpui::TestAppContext) {
-        let runtime = cx.new(|_| {
+    fn approvals_are_fifo_deduplicated_and_all_terminal_events_clear_them() {
+        for terminal in [
+            AgentEvent::RunFinished(kcastle_agent::RunSummary {
+                output: "done".into(),
+                response_id: "response".into(),
+                usage: None,
+            }),
+            AgentEvent::RunAborted,
+            AgentEvent::RunFailed("failed".into()),
+        ] {
             let mut runtime = runtime();
-            runtime.status = SessionRuntimeStatus::Running;
-            runtime.approval = Some(ApprovalState {
-                call_id: "call-1".into(),
-                name: "shell".into(),
-                arguments: "{}".into(),
-            });
-            runtime
+            assert!(runtime.lifecycle.begin_running());
+            runtime.apply_event(approval("call-1"));
+            runtime.apply_event(approval("call-2"));
+            runtime.apply_event(approval("call-1"));
+
+            assert_eq!(runtime.approvals.0.len(), 2);
+            assert_eq!(runtime.approvals.front().unwrap().call_id, "call-1");
+            assert_eq!(runtime.approvals.0[1].call_id, "call-2");
+
+            runtime.apply_event(terminal);
+            assert!(runtime.approvals.is_empty());
+            assert_eq!(runtime.lifecycle.status(), &SessionRuntimeStatus::Settling);
+        }
+    }
+
+    #[test]
+    fn duplicate_completion_does_not_double_count_a_run() {
+        let mut runtime = runtime();
+        assert!(runtime.lifecycle.begin_running());
+        let completion = AgentEvent::RunFinished(kcastle_agent::RunSummary {
+            output: "done".into(),
+            response_id: "response".into(),
+            usage: None,
         });
 
-        runtime.update(cx, |runtime, cx| {
-            assert!(runtime.set_allow_all_tools(true, cx));
+        runtime.apply_event(completion.clone());
+        runtime.apply_event(completion);
+
+        assert_eq!(runtime.completed_runs, 1);
+        assert_eq!(runtime.lifecycle.status(), &SessionRuntimeStatus::Settling);
+    }
+
+    #[tokio::test]
+    async fn settled_agent_metadata_refreshes_the_materialized_title() {
+        let mut runtime = runtime();
+        assert_eq!(runtime.view.conversation.title, "New chat");
+        let mut agent = runtime.agent.take().expect("idle runtime owns its agent");
+        agent.rename_session("First automatic title").await.unwrap();
+
+        runtime.sync_agent_metadata(&agent);
+        runtime.agent = Some(agent);
+
+        assert_eq!(runtime.session.title, "First automatic title");
+        assert_eq!(runtime.view.conversation.title, "First automatic title");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persisted_idle_config_syncs_agent_metadata_and_generation() {
+        let session_id = kcastle_agent::SessionId::new();
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-runtime-config-{}-{session_id}",
+            std::process::id()
+        ));
+        let sessions_dir = root.join("sessions");
+        let durable = SessionConfig::default();
+        let session = Session::create_in_project_with_id(
+            &sessions_dir,
+            "project",
+            durable.clone(),
+            session_id,
+        )
+        .await
+        .unwrap();
+        let path = session.info().path.clone();
+        let agent = Agent::new(
+            Model::new("test", "key", "http://localhost", "model", 10_000),
+            "test",
+            session,
+            &root,
+        );
+        let mut runtime = SessionRuntime::new(
+            agent,
+            "project".into(),
+            sessions_dir,
+            SessionDocument::default(),
+            durable,
+        );
+        // Make a stale metadata mirror deterministic even when create and update share one second.
+        runtime.session.updated_at = 0;
+        let initial_generation = runtime.metadata_generation;
+        let mut agent = runtime.agent.take().unwrap();
+        assert!(runtime.lifecycle.begin_configuring());
+        let requested = SessionConfig {
+            allow_all_tools: true,
+            ..SessionConfig::default()
+        };
+
+        agent.persist_session_config(&requested).await.unwrap();
+        runtime.complete_persisted_config(requested.clone(), None, &mut agent);
+        runtime.agent = Some(agent);
+
+        let loaded = Session::open_in_project(&path, "project").await.unwrap();
+        assert_eq!(loaded.config(), &requested);
+        assert_eq!(runtime.config, requested);
+        assert_eq!(runtime.session, *loaded.info());
+        assert_eq!(runtime.metadata_generation, initial_generation + 1);
+        assert!(runtime.matches_loaded_session(&loaded));
+        assert_eq!(runtime.lifecycle.status(), &SessionRuntimeStatus::Idle);
+
+        drop(loaded);
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_timestamp_is_converted_from_milliseconds_to_session_seconds() {
+        let mut runtime = runtime();
+        let expected_seconds = runtime.session.updated_at.saturating_add(60);
+        let committed_at_ms = i64::try_from(expected_seconds.saturating_mul(1_000)).unwrap();
+        let tx_id = kcastle_agent::TxId::from_raw("timestamp-units");
+        runtime.apply_receipt(CommitReceipt {
+            session_id: runtime.session.id.clone(),
+            tx_id: tx_id.clone(),
+            base_revision: 0,
+            revision: 1,
+            request_digest: "timestamp-units".into(),
+            committed_at_ms,
+            events: vec![kcastle_agent::RecordedEvent {
+                seq: 0,
+                tx_id,
+                time: kcastle_agent::EventTime {
+                    wall_time_ms: committed_at_ms,
+                    clock_id: "test-clock".into(),
+                    monotonic_ns: 0,
+                },
+                event: kcastle_agent::SessionEvent::InputSubmitted {
+                    input_id: kcastle_agent::InputId::from_raw("timestamp-input"),
+                    input: "timestamp".into(),
+                    origin: kcastle_agent::InputOrigin::Queue,
+                },
+            }],
         });
 
-        let snapshot = cx.read_entity(&runtime, |runtime, _| runtime.snapshot());
-        assert!(snapshot.allow_all_tools);
-        assert!(snapshot.approval.is_none());
+        assert_eq!(runtime.session.updated_at, expected_seconds);
+    }
 
-        runtime.update(cx, |runtime, _| {
-            runtime.apply_events(vec![AgentEvent::ApprovalRequired(
-                serde_json::from_value(serde_json::json!({
-                    "arguments": "{}",
-                    "call_id": "call-2",
-                    "name": "shell"
-                }))
-                .unwrap(),
-            )]);
-        });
-        assert!(cx.read_entity(&runtime, |runtime, _| runtime.approval.is_none()));
+    #[test]
+    fn deferred_allow_all_persistence_commits_or_rolls_back_atomically() {
+        let durable = SessionConfig::default();
+        let requested = deferred_allow_all_config(&durable, true).unwrap();
+        assert!(requested.allow_all_tools);
+
+        let mut committed = durable.clone();
+        let mut committed_effective = true;
+        resolve_deferred_allow_all(
+            &mut committed,
+            &mut committed_effective,
+            requested.clone(),
+            true,
+        );
+        assert!(committed.allow_all_tools);
+        assert!(committed_effective);
+        assert!(deferred_allow_all_config(&committed, committed_effective).is_none());
+
+        let mut rolled_back = durable;
+        let mut rolled_back_effective = true;
+        resolve_deferred_allow_all(
+            &mut rolled_back,
+            &mut rolled_back_effective,
+            requested,
+            false,
+        );
+        assert!(!rolled_back.allow_all_tools);
+        assert!(!rolled_back_effective);
+        assert!(deferred_allow_all_config(&rolled_back, rolled_back_effective).is_none());
+    }
+
+    #[test]
+    fn deferred_config_failure_preserves_the_run_failure_context() {
+        assert_eq!(
+            settlement_config_failure(
+                &SessionRuntimeStatus::Failed("provider failed".into()),
+                "disk full",
+            ),
+            SessionRuntimeStatus::Failed(
+                "provider failed; could not save permission setting: disk full".into()
+            )
+        );
     }
 }

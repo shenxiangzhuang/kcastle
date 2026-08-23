@@ -531,9 +531,9 @@ impl DesktopApp {
                                 let selected =
                                     active && same_path(&path, &self.core.session.current);
                                 let title = if selected
-                                    && self.core.conversation.title != "New chat"
+                                    && self.core.session_view.conversation.title != "New chat"
                                 {
-                                    self.core.conversation.title.clone()
+                                    self.core.session_view.conversation.title.clone()
                                 } else if session.title == "Untitled session" {
                                     "New Session".into()
                                 } else {
@@ -659,8 +659,8 @@ impl DesktopApp {
             .filter_map(|(project_index, project_name, session)| {
                 let selected = project_index == self.core.workspace.active_project
                     && same_path(&session.path, &self.core.session.current);
-                let title = if selected && self.core.conversation.title != "New chat" {
-                    self.core.conversation.title.clone()
+                let title = if selected && self.core.session_view.conversation.title != "New chat" {
+                    self.core.session_view.conversation.title.clone()
                 } else if session.title == "Untitled session" {
                     "New Session".into()
                 } else {

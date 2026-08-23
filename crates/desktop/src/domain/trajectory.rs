@@ -1,31 +1,15 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use kcastle_agent::{
-    AssistantChunk, EventTime, RecordedEvent, SessionEvent, StepOutcome, ToolResultStatus,
-    UserMessageMode,
+use im::{HashMap, Vector};
+use kcastle_agent::TokenUsage;
+
+use crate::domain::session_document::{
+    DisplayOrdinals, ItemStatus, ProjectionDelta, SessionDocument, SessionStats, TrajectoryItemView,
 };
-
-use crate::domain::MessageId;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TrajectoryLane {
-    Input,
-    Model,
-    Tools,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TrajectoryKind {
-    System,
-    User,
-    Context,
-    Steering,
-    Assistant,
-    Tool,
-    Compaction,
-    RequestFailure,
-}
+pub(crate) use crate::domain::session_document::{
+    TimingMetrics as RecordTiming, TrajectoryItemId, TrajectoryKind, TrajectoryLane,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrajectoryStatus {
@@ -59,63 +43,22 @@ pub(crate) struct TrajectoryStats {
     pub(crate) cached_tokens: u64,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RecordTiming {
-    pub(crate) started: Option<EventTime>,
-    pub(crate) first_token: Option<EventTime>,
-    pub(crate) execution_started: Option<EventTime>,
-    pub(crate) execution_finished: Option<EventTime>,
-    pub(crate) completed: Option<EventTime>,
-}
-
-impl RecordTiming {
-    pub(crate) fn duration_ns(&self) -> Option<u64> {
-        self.completed
-            .as_ref()?
-            .duration_since(self.started.as_ref()?)
-    }
-
-    pub(crate) fn ttft_ns(&self) -> Option<u64> {
-        self.first_token
-            .as_ref()?
-            .duration_since(self.started.as_ref()?)
-    }
-
-    pub(crate) fn generation_ns(&self) -> Option<u64> {
-        self.completed
-            .as_ref()?
-            .duration_since(self.first_token.as_ref()?)
-    }
-
-    pub(crate) fn execution_ns(&self) -> Option<u64> {
-        self.execution_finished
-            .as_ref()?
-            .duration_since(self.execution_started.as_ref()?)
-    }
-
-    pub(crate) fn pre_execution_ns(&self) -> Option<u64> {
-        self.execution_started
-            .as_ref()?
-            .duration_since(self.started.as_ref()?)
-    }
-
-    pub(crate) fn post_execution_ns(&self) -> Option<u64> {
-        self.completed
-            .as_ref()?
-            .duration_since(self.execution_finished.as_ref()?)
-    }
-}
-
+/// Immutable UI record materialized from one canonical document revision.
+///
+/// The stable domain identity is deliberately retained. Presentation code must
+/// never infer identity from the record's position or from a journal sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TrajectoryRecord {
-    pub(crate) id: MessageId,
+    pub(crate) id: TrajectoryItemId,
     pub(crate) source_seq: u64,
     pub(crate) kind: TrajectoryKind,
     pub(crate) lane: TrajectoryLane,
     pub(crate) title: String,
     pub(crate) text: String,
     pub(crate) payload: Option<String>,
-    pub(crate) raw: String,
+    /// Pre-normalized once when the immutable record is materialized. Rendering and hover/search
+    /// selectors can then scan without allocating lowercase copies on every GPUI notification.
+    pub(crate) search_text: String,
     pub(crate) turn: Option<u32>,
     pub(crate) step: Option<u32>,
     pub(crate) call_id: Option<String>,
@@ -126,887 +69,653 @@ pub(crate) struct TrajectoryRecord {
 
 impl TrajectoryRecord {
     pub(crate) fn matches(&self, query: &str) -> bool {
-        query.is_empty()
-            || self.title.to_lowercase().contains(query)
-            || self.text.to_lowercase().contains(query)
-            || self.raw.to_lowercase().contains(query)
+        query.is_empty() || self.search_text.contains(query)
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TrajectoryProjection {
-    pub(crate) records: Vec<Arc<TrajectoryRecord>>,
+    pub(crate) records: Vector<Arc<TrajectoryRecord>>,
+    index_by_id: HashMap<TrajectoryItemId, usize>,
     stats: TrajectoryStats,
+    document_revision: u64,
+    trajectory_revision: u64,
     geometry_revision: u64,
-    indices: Arc<TrajectoryIndices>,
+    stats_revision: u64,
+    projection_lineage: u64,
+    /// Monotonic revision for the small subset of record fields used by trajectory search and
+    /// ledger filtering. Timing- and usage-only receipts intentionally leave this unchanged.
+    search_revision: u64,
+    search_history: Vector<TrajectorySearchDelta>,
+    geometry_history: Vector<TrajectoryGeometryDelta>,
+    #[cfg(test)]
+    materialized_records: usize,
+}
+
+const SEARCH_HISTORY_LIMIT: usize = 256;
+const GEOMETRY_HISTORY_LIMIT: usize = 256;
+static NEXT_PROJECTION_LINEAGE: AtomicU64 = AtomicU64::new(1);
+
+/// One incremental search/filter transition. Indices name their final value in `records`; replaying
+/// every delta since a cached revision is therefore idempotent even when one streaming record is
+/// mentioned repeatedly. A reset is reserved for the rare case where row identity changes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TrajectorySearchDelta {
+    revision: u64,
+    changed_indices: Vector<usize>,
+    reset: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TrajectoryIndices {
-    step_starts: HashMap<(u32, u32), (u64, EventTime)>,
-    completed_steps: HashSet<(u32, u32)>,
-    completed_turns: HashSet<u32>,
-    assistants: HashMap<(u32, u32), usize>,
-    tools: HashMap<String, usize>,
-    compactions: HashMap<String, usize>,
+struct TrajectoryGeometryDelta {
+    from_revision: u64,
+    to_revision: u64,
+    changed_indices: Vector<usize>,
+    sequence_compatible: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TrajectoryGeometryChanges {
+    pub(crate) changed_indices: Vector<usize>,
 }
 
 impl TrajectoryProjection {
-    pub(crate) fn from_events(events: &[RecordedEvent]) -> Self {
-        let mut projection = Self::default();
-        for event in events {
-            projection.apply(event);
-        }
-        projection
+    pub(crate) fn from_document(document: &SessionDocument) -> Self {
+        Self::from_document_reusing(document, None)
     }
 
-    pub(crate) fn apply(&mut self, recorded: &RecordedEvent) {
-        match &recorded.event {
-            SessionEvent::StepStart { turn, step } => {
-                Arc::make_mut(&mut self.indices)
-                    .step_starts
-                    .insert((*turn, *step), (recorded.seq, recorded.time.clone()));
-            }
-            SessionEvent::ModelRequestStart { .. } => {}
-            SessionEvent::RequestHeader {
-                turn,
-                step,
-                model,
-                instructions,
-                tools,
-                ..
-            } => self.push_record(TrajectoryRecord {
-                id: record_id(recorded.seq),
-                source_seq: recorded.seq,
-                kind: TrajectoryKind::System,
-                lane: TrajectoryLane::Input,
-                title: "System".into(),
-                text: format!("{model} · {} tools", tools.len()),
-                payload: Some(instructions.clone()),
-                raw: pretty(recorded),
-                turn: Some(*turn),
-                step: Some(*step),
-                call_id: None,
-                status: TrajectoryStatus::Completed,
-                timing: point_timing(&recorded.time),
-                usage: None,
-            }),
-            SessionEvent::UserMessage {
-                turn,
-                step,
-                mode,
-                items,
-                ..
-            } => {
-                let (kind, title) = match mode {
-                    UserMessageMode::Initial | UserMessageMode::Queue => {
-                        (TrajectoryKind::User, "User")
-                    }
-                    UserMessageMode::Steer => (TrajectoryKind::Steering, "Steering"),
-                    UserMessageMode::Context => (TrajectoryKind::Context, "Context"),
-                };
-                self.push_record(TrajectoryRecord {
-                    id: record_id(recorded.seq),
-                    source_seq: recorded.seq,
-                    kind,
-                    lane: TrajectoryLane::Input,
-                    title: title.into(),
-                    text: items_text(items),
-                    payload: None,
-                    raw: pretty(recorded),
-                    turn: Some(*turn),
-                    step: Some(*step),
-                    call_id: None,
-                    status: TrajectoryStatus::Completed,
-                    timing: point_timing(&recorded.time),
-                    usage: None,
-                });
-            }
-            SessionEvent::AssistantChunk { turn, step, chunk } => {
-                let index = self.ensure_assistant(*turn, *step, recorded);
-                self.update_record(index, |record| {
-                    if record.timing.first_token.is_none() && chunk.is_non_empty_token() {
-                        record.timing.first_token = Some(recorded.time.clone());
-                    }
-                    match chunk {
-                        AssistantChunk::OutputTextDelta { delta }
-                        | AssistantChunk::ReasoningTextDelta { delta } => {
-                            record.text.push_str(delta)
-                        }
-                        AssistantChunk::ToolCallArgumentsDelta { delta, .. } => {
-                            record
-                                .payload
-                                .get_or_insert_with(String::new)
-                                .push_str(delta);
-                        }
-                        AssistantChunk::Usage { usage } => {
-                            record.usage = Some(usage_snapshot(usage));
-                        }
-                    }
-                    record.raw = pretty(recorded);
-                });
-            }
-            SessionEvent::AssistantMessage {
-                turn,
-                step,
-                items,
-                response,
-            } => {
-                let index = self.ensure_assistant(*turn, *step, recorded);
-                self.update_record(index, |record| {
-                    if record.text.is_empty() {
-                        record.text = items_text(items);
-                    }
-                    record.status = TrajectoryStatus::Completed;
-                    record.timing.completed = Some(recorded.time.clone());
-                    record.usage = response.usage.as_ref().map(usage_snapshot);
-                    record.raw = pretty(recorded);
-                });
-            }
-            SessionEvent::ToolCall {
-                turn,
-                step,
-                call_id,
-                name,
-                arguments,
-                ..
-            } => {
-                let index = self.records.len();
-                Arc::make_mut(&mut self.indices)
-                    .tools
-                    .insert(call_id.clone(), index);
-                self.push_record(TrajectoryRecord {
-                    id: record_id(recorded.seq),
-                    source_seq: recorded.seq,
-                    kind: TrajectoryKind::Tool,
-                    lane: TrajectoryLane::Tools,
-                    title: name.clone(),
-                    text: arguments.clone(),
-                    payload: Some(arguments.clone()),
-                    raw: pretty(recorded),
-                    turn: Some(*turn),
-                    step: Some(*step),
-                    call_id: Some(call_id.clone()),
-                    status: TrajectoryStatus::Running,
-                    timing: RecordTiming {
-                        started: Some(recorded.time.clone()),
-                        ..RecordTiming::default()
-                    },
-                    usage: None,
-                });
-            }
-            SessionEvent::ToolExecutionStart { call_id } => {
-                if let Some(index) = self.tool_index(call_id) {
-                    self.update_record(index, |record| {
-                        record.timing.execution_started = Some(recorded.time.clone());
-                    });
-                }
-            }
-            SessionEvent::ToolExecutionFinish { call_id, .. } => {
-                if let Some(index) = self.tool_index(call_id) {
-                    self.update_record(index, |record| {
-                        record.timing.execution_finished = Some(recorded.time.clone());
-                    });
-                }
-            }
-            SessionEvent::ToolResult {
-                call_id,
-                output,
-                status,
-                ..
-            } => {
-                if let Some(index) = self.tool_index(call_id) {
-                    self.update_record(index, |record| {
-                        record.text = output.clone();
-                        record.timing.completed = Some(recorded.time.clone());
-                        record.status = match status {
-                            ToolResultStatus::Success => TrajectoryStatus::Completed,
-                            ToolResultStatus::Error => TrajectoryStatus::Failed,
-                            ToolResultStatus::Denied => TrajectoryStatus::Denied,
-                            ToolResultStatus::NotFound
-                            | ToolResultStatus::AbortedBeforeDispatch => {
-                                TrajectoryStatus::NotExecuted
-                            }
-                            ToolResultStatus::UnknownSideEffects => TrajectoryStatus::Unknown,
-                        };
-                        record.raw = pretty(recorded);
-                    });
-                }
-            }
-            SessionEvent::CompactionStart {
-                compaction_id,
-                tokens_before,
-                ..
-            } => {
-                let index = self.records.len();
-                Arc::make_mut(&mut self.indices)
-                    .compactions
-                    .insert(compaction_id.clone(), index);
-                self.push_record(TrajectoryRecord {
-                    id: record_id(recorded.seq),
-                    source_seq: recorded.seq,
-                    kind: TrajectoryKind::Compaction,
-                    lane: TrajectoryLane::Model,
-                    title: "Compaction".into(),
-                    text: format!("{tokens_before} tokens before compaction"),
-                    payload: None,
-                    raw: pretty(recorded),
-                    turn: None,
-                    step: None,
-                    call_id: None,
-                    status: TrajectoryStatus::Running,
-                    timing: RecordTiming {
-                        started: Some(recorded.time.clone()),
-                        ..RecordTiming::default()
-                    },
-                    usage: None,
-                });
-            }
-            SessionEvent::CompactionEnd {
-                compaction_id,
-                summary,
-                outcome,
-                response,
-                ..
-            } => {
-                if let Some(index) = self.indices.compactions.get(compaction_id).copied() {
-                    self.update_record(index, |record| {
-                        record.text = summary.clone();
-                        record.timing.completed = Some(recorded.time.clone());
-                        record.status = if *outcome == StepOutcome::Completed {
-                            TrajectoryStatus::Completed
-                        } else {
-                            TrajectoryStatus::Failed
-                        };
-                        record.usage = response
-                            .as_ref()
-                            .and_then(|response| response.usage.as_ref())
-                            .map(usage_snapshot);
-                        record.raw = pretty(recorded);
-                    });
-                }
-            }
-            SessionEvent::StepEnd {
-                turn,
-                step,
-                outcome,
-                error,
-            } => {
-                let indices = Arc::make_mut(&mut self.indices);
-                indices.completed_turns.insert(*turn);
-                indices.completed_steps.insert((*turn, *step));
-                if *outcome != StepOutcome::Completed {
-                    if let Some(index) = self.indices.assistants.get(&(*turn, *step)).copied() {
-                        self.update_record(index, |record| {
-                            record.status = TrajectoryStatus::Failed;
-                        });
-                    } else {
-                        let (source_seq, started) = self
-                            .indices
-                            .step_starts
-                            .get(&(*turn, *step))
-                            .cloned()
-                            .unwrap_or((recorded.seq, recorded.time.clone()));
-                        self.push_record(TrajectoryRecord {
-                            id: record_id(source_seq),
-                            source_seq,
-                            kind: TrajectoryKind::RequestFailure,
-                            lane: TrajectoryLane::Model,
-                            title: "Request failed".into(),
-                            text: error
-                                .clone()
-                                .unwrap_or_else(|| "Request interrupted".into()),
-                            payload: None,
-                            raw: pretty(recorded),
-                            turn: Some(*turn),
-                            step: Some(*step),
-                            call_id: None,
-                            status: TrajectoryStatus::Failed,
-                            timing: RecordTiming {
-                                started: Some(started),
-                                completed: Some(recorded.time.clone()),
-                                ..RecordTiming::default()
-                            },
-                            usage: None,
-                        });
-                    }
-                }
-            }
-            _ => {}
+    pub(crate) fn from_document_reusing(
+        document: &SessionDocument,
+        previous: Option<&Self>,
+    ) -> Self {
+        let revisions = document.revisions();
+        let records: Vector<Arc<TrajectoryRecord>> = if let Some(previous) = previous
+            && previous.trajectory_revision == revisions.trajectory
+        {
+            previous.records.clone()
+        } else {
+            let ordinals = document.display_ordinals();
+            let previous_records = previous
+                .into_iter()
+                .flat_map(|projection| projection.records.iter())
+                .map(|record| (record.id.clone(), record))
+                .collect::<HashMap<_, _>>();
+
+            document
+                .trajectory()
+                .into_iter()
+                .map(|item| {
+                    let record = Arc::new(materialize_record(ordinals, item));
+                    previous_records
+                        .get(&record.id)
+                        .filter(|previous| previous.as_ref() == record.as_ref())
+                        .map_or(record, |previous| Arc::clone(previous))
+                })
+                .collect()
+        };
+        let stats = if let Some(previous) = previous
+            && previous.stats_revision == revisions.stats
+        {
+            previous.stats
+        } else {
+            stats_snapshot(document.stats())
+        };
+
+        let index_by_id = if let Some(previous) = previous
+            && previous.trajectory_revision == revisions.trajectory
+        {
+            previous.index_by_id.clone()
+        } else {
+            records
+                .iter()
+                .enumerate()
+                .map(|(index, record)| (record.id.clone(), index))
+                .collect()
+        };
+        #[cfg(test)]
+        let materialized_records = if let Some(previous) = previous
+            && previous.trajectory_revision == revisions.trajectory
+        {
+            previous.materialized_records
+        } else {
+            records.len()
+        };
+
+        let (search_revision, search_history) =
+            search_state_after_full_rebuild(previous, revisions.trajectory);
+        let geometry_history = geometry_state_after_full_rebuild(previous, revisions.geometry);
+        Self {
+            records,
+            index_by_id,
+            stats,
+            document_revision: revisions.document,
+            trajectory_revision: revisions.trajectory,
+            geometry_revision: revisions.geometry,
+            stats_revision: revisions.stats,
+            projection_lineage: previous
+                .filter(|value| value.projection_lineage != 0)
+                .map_or_else(next_projection_lineage, |value| value.projection_lineage),
+            search_revision,
+            search_history,
+            geometry_history,
+            #[cfg(test)]
+            materialized_records,
         }
     }
 
     pub(crate) fn stats(&self) -> TrajectoryStats {
-        TrajectoryStats {
-            turns: self.indices.completed_turns.len(),
-            steps: self.indices.completed_steps.len(),
-            ..self.stats
-        }
+        self.stats
     }
 
+    /// Geometry caches use only the canonical geometry revision. Text-only
+    /// streaming updates therefore cannot invalidate an unchanged timeline.
     pub(crate) fn revision(&self) -> u64 {
         self.geometry_revision
     }
 
-    pub(crate) fn tool_duration_ms(&self, call_id: &str) -> Option<u128> {
-        self.tool_index(call_id)
-            .and_then(|index| self.records[index].timing.duration_ns())
-            .map(|duration| u128::from(duration) / 1_000_000)
+    pub(crate) fn source_revision(&self) -> u64 {
+        self.document_revision
     }
 
-    fn ensure_assistant(&mut self, turn: u32, step: u32, recorded: &RecordedEvent) -> usize {
-        if let Some(index) = self.indices.assistants.get(&(turn, step)).copied() {
-            return index;
+    pub(crate) fn search_revision(&self) -> u64 {
+        self.search_revision
+    }
+
+    pub(crate) fn projection_lineage(&self) -> u64 {
+        self.projection_lineage
+    }
+
+    pub(crate) fn geometry_changes_since(
+        &self,
+        revision: u64,
+    ) -> Option<TrajectoryGeometryChanges> {
+        if revision == self.geometry_revision {
+            return Some(TrajectoryGeometryChanges::default());
         }
-        let (source_seq, started) = self
-            .indices
-            .step_starts
-            .get(&(turn, step))
-            .cloned()
-            .unwrap_or((recorded.seq, recorded.time.clone()));
-        let index = self.records.len();
-        Arc::make_mut(&mut self.indices)
-            .assistants
-            .insert((turn, step), index);
-        self.push_record(TrajectoryRecord {
-            id: record_id(source_seq),
-            source_seq,
-            kind: TrajectoryKind::Assistant,
-            lane: TrajectoryLane::Model,
-            title: "Assistant".into(),
-            text: String::new(),
-            payload: None,
-            raw: pretty(recorded),
-            turn: Some(turn),
-            step: Some(step),
-            call_id: None,
-            status: TrajectoryStatus::Running,
-            timing: RecordTiming {
-                started: Some(started),
-                ..RecordTiming::default()
+        if revision > self.geometry_revision {
+            return None;
+        }
+        let start = self
+            .geometry_history
+            .iter()
+            .position(|delta| delta.from_revision == revision)?;
+        let mut expected = revision;
+        let mut changed = std::collections::HashSet::new();
+        for delta in self.geometry_history.iter().skip(start) {
+            if delta.from_revision != expected || !delta.sequence_compatible {
+                return None;
+            }
+            changed.extend(delta.changed_indices.iter().copied());
+            expected = delta.to_revision;
+            if expected == self.geometry_revision {
+                let mut changed_indices = changed.into_iter().collect::<Vector<_>>();
+                changed_indices.sort();
+                return Some(TrajectoryGeometryChanges { changed_indices });
+            }
+        }
+        None
+    }
+
+    /// Returns only indices whose searchable text changed since `revision`. `None` means the
+    /// bounded history cannot prove continuity and the caller must rebuild once. Empty iteration
+    /// is the common timing/usage receipt path and never touches historical records.
+    pub(crate) fn search_changed_indices_since(
+        &self,
+        revision: u64,
+    ) -> Option<impl Iterator<Item = usize> + '_> {
+        if revision > self.search_revision {
+            return None;
+        }
+        let start = if revision == self.search_revision {
+            self.search_history.len()
+        } else {
+            let first_revision = self.search_history.front()?.revision;
+            let next_revision = revision.saturating_add(1);
+            if next_revision < first_revision {
+                return None;
+            }
+            let start = usize::try_from(next_revision.saturating_sub(first_revision)).ok()?;
+            let first = self.search_history.get(start)?;
+            if first.revision != revision.saturating_add(1)
+                || self
+                    .search_history
+                    .back()
+                    .is_none_or(|last| last.revision != self.search_revision)
+                || self
+                    .search_history
+                    .iter()
+                    .skip(start)
+                    .any(|delta| delta.reset)
+            {
+                return None;
+            }
+            start
+        };
+        Some(
+            self.search_history
+                .iter()
+                .skip(start)
+                .flat_map(search_delta_indices),
+        )
+    }
+
+    pub(crate) fn record_by_id(&self, id: &TrajectoryItemId) -> Option<&TrajectoryRecord> {
+        self.index_by_id
+            .get(id)
+            .and_then(|index| self.records.get(*index))
+            .map(AsRef::as_ref)
+    }
+
+    pub(crate) fn record_index(&self, id: &TrajectoryItemId) -> Option<usize> {
+        self.index_by_id.get(id).copied()
+    }
+
+    pub(crate) fn after_delta(
+        document: &SessionDocument,
+        delta: &ProjectionDelta,
+        previous: &Self,
+    ) -> Self {
+        if delta.trajectory_order_changed {
+            if let Some(projection) = Self::after_appended_order(document, delta, previous) {
+                return projection;
+            }
+            return Self::from_document_reusing(document, Some(previous));
+        }
+
+        let revisions = document.revisions();
+        let ordinals = document.display_ordinals();
+        let mut records = previous.records.clone();
+        let mut materialized = 0_usize;
+        let mut search_indices = Vector::new();
+        let mut search_reset = false;
+        let mut geometry_indices = Vector::new();
+        for id in &delta.changed_trajectory {
+            let Some(index) = previous.index_by_id.get(id).copied() else {
+                return Self::from_document_reusing(document, Some(previous));
+            };
+            let Some(item) = document.trajectory_by_id(id) else {
+                return Self::from_document_reusing(document, Some(previous));
+            };
+            let record = Arc::new(materialize_record(ordinals, item));
+            materialized = materialized.saturating_add(1);
+            if records[index].as_ref() != record.as_ref() {
+                let previous_record = &records[index];
+                if previous_record.turn != record.turn || previous_record.kind != record.kind {
+                    search_reset = true;
+                } else if previous_record.search_text != record.search_text {
+                    search_indices.push_back(index);
+                }
+                if revisions.geometry != previous.geometry_revision
+                    && !same_geometry(previous_record, &record)
+                {
+                    geometry_indices.push_back(index);
+                }
+                records.set(index, record);
+            }
+        }
+        let stats = if delta.stats_changed {
+            stats_snapshot(document.stats())
+        } else {
+            previous.stats
+        };
+        let (search_revision, search_history) =
+            advance_search_state(previous, search_indices, search_reset);
+        let geometry_history =
+            advance_geometry_state(previous, revisions.geometry, geometry_indices, true);
+        Self {
+            records,
+            index_by_id: previous.index_by_id.clone(),
+            stats,
+            document_revision: revisions.document,
+            trajectory_revision: revisions.trajectory,
+            geometry_revision: revisions.geometry,
+            stats_revision: revisions.stats,
+            projection_lineage: previous.projection_lineage,
+            search_revision,
+            search_history,
+            geometry_history,
+            #[cfg(test)]
+            materialized_records: previous.materialized_records.saturating_add(materialized),
+        }
+    }
+
+    fn after_appended_order(
+        document: &SessionDocument,
+        delta: &ProjectionDelta,
+        previous: &Self,
+    ) -> Option<Self> {
+        let canonical_ids = document.trajectory_ids();
+        let previous_len = previous.records.len();
+        let suffix = canonical_ids.get(previous_len..)?;
+        if canonical_ids.len() < previous_len
+            || suffix.is_empty()
+            || suffix
+                .iter()
+                .any(|id| previous.index_by_id.contains_key(id))
+            || canonical_ids.len() != previous_len.saturating_add(suffix.len())
+        {
+            return None;
+        }
+        // Every appended canonical ID must be named by this transaction. This
+        // rejects completion-time reorder/replacement and delegates that rare
+        // case to the full equivalence path.
+        if suffix
+            .iter()
+            .any(|id| !delta.changed_trajectory.contains(id))
+        {
+            return None;
+        }
+
+        let mut records = previous.records.clone();
+        let mut index_by_id = previous.index_by_id.clone();
+        let ordinals = document.display_ordinals();
+        let mut materialized = 0_usize;
+        let mut search_indices = Vector::new();
+        let mut search_reset = false;
+        let mut geometry_indices = Vector::new();
+        for id in suffix {
+            let item = document.trajectory_by_id(id)?;
+            let record = Arc::new(materialize_record(ordinals, item));
+            index_by_id.insert(id.clone(), records.len());
+            search_indices.push_back(records.len());
+            geometry_indices.push_back(records.len());
+            records.push_back(record);
+            materialized = materialized.saturating_add(1);
+        }
+        // A transaction may both append and update an existing row (for
+        // example, revealing an assistant and requesting its first tool).
+        for id in &delta.changed_trajectory {
+            if suffix.contains(id) {
+                continue;
+            }
+            let index = *index_by_id.get(id)?;
+            let item = document.trajectory_by_id(id)?;
+            let record = Arc::new(materialize_record(ordinals, item));
+            materialized = materialized.saturating_add(1);
+            if records[index].as_ref() != record.as_ref() {
+                let previous_record = &records[index];
+                if previous_record.turn != record.turn || previous_record.kind != record.kind {
+                    search_reset = true;
+                } else if previous_record.search_text != record.search_text {
+                    search_indices.push_back(index);
+                }
+                if delta.geometry_changed && !same_geometry(previous_record, &record) {
+                    geometry_indices.push_back(index);
+                }
+                records.set(index, record);
+            }
+        }
+        let revisions = document.revisions();
+        let (search_revision, search_history) =
+            advance_search_state(previous, search_indices, search_reset);
+        let geometry_history = advance_geometry_state(
+            previous,
+            revisions.geometry,
+            geometry_indices,
+            delta.geometry_changed,
+        );
+        Some(Self {
+            records,
+            index_by_id,
+            stats: if delta.stats_changed {
+                stats_snapshot(document.stats())
+            } else {
+                previous.stats
             },
-            usage: None,
-        });
-        index
+            document_revision: revisions.document,
+            trajectory_revision: revisions.trajectory,
+            geometry_revision: revisions.geometry,
+            stats_revision: revisions.stats,
+            projection_lineage: previous.projection_lineage,
+            search_revision,
+            search_history,
+            geometry_history,
+            #[cfg(test)]
+            materialized_records: previous.materialized_records.saturating_add(materialized),
+        })
     }
 
-    fn tool_index(&self, call_id: &str) -> Option<usize> {
-        self.indices.tools.get(call_id).copied()
-    }
-
-    fn push_record(&mut self, record: TrajectoryRecord) {
-        add_stats(&mut self.stats, record_stats(&record));
-        self.records.push(Arc::new(record));
-        self.geometry_revision = self.geometry_revision.saturating_add(1);
-    }
-
-    fn update_record(&mut self, index: usize, update: impl FnOnce(&mut TrajectoryRecord)) {
-        let before = record_stats(&self.records[index]);
-        let previous_timing = self.records[index].timing.clone();
-        update(Arc::make_mut(&mut self.records[index]));
-        if self.records[index].timing != previous_timing {
-            self.geometry_revision = self.geometry_revision.saturating_add(1);
-        }
-        let after = record_stats(&self.records[index]);
-        replace_stats(&mut self.stats, before, after);
+    #[cfg(test)]
+    pub(crate) fn materialized_records(&self) -> usize {
+        self.materialized_records
     }
 }
 
-fn record_stats(record: &TrajectoryRecord) -> TrajectoryStats {
-    let mut stats = TrajectoryStats::default();
-    if let Some(usage) = record.usage {
-        stats.input_tokens = u64::from(usage.input_tokens);
-        stats.output_tokens = u64::from(usage.output_tokens);
-        stats.cached_tokens = u64::from(usage.cached_tokens);
-    }
-    match record.kind {
-        TrajectoryKind::Assistant => {
-            if let Some(llm_ns) = record.timing.duration_ns() {
-                stats.llm_ns = llm_ns;
-                if let Some(ttft_ns) = record.timing.ttft_ns() {
-                    stats.ttft_ns = ttft_ns;
-                    stats.ttft_steps = 1;
-                }
-                if let Some(decode_ns) = record.timing.generation_ns()
-                    && let Some(usage) = record.usage
-                {
-                    stats.decode_ns = decode_ns;
-                    stats.decode_tokens = u64::from(usage.output_tokens);
-                }
-            }
-        }
-        TrajectoryKind::Tool => {
-            stats.tool_ns = record.timing.duration_ns().unwrap_or_default();
-        }
-        _ => {}
-    }
-    stats
+fn search_delta_indices(delta: &TrajectorySearchDelta) -> impl Iterator<Item = usize> + '_ {
+    delta.changed_indices.iter().copied()
 }
 
-fn add_stats(target: &mut TrajectoryStats, value: TrajectoryStats) {
-    target.llm_ns = target.llm_ns.saturating_add(value.llm_ns);
-    target.tool_ns = target.tool_ns.saturating_add(value.tool_ns);
-    target.ttft_ns = target.ttft_ns.saturating_add(value.ttft_ns);
-    target.ttft_steps = target.ttft_steps.saturating_add(value.ttft_steps);
-    target.decode_ns = target.decode_ns.saturating_add(value.decode_ns);
-    target.decode_tokens = target.decode_tokens.saturating_add(value.decode_tokens);
-    target.input_tokens = target.input_tokens.saturating_add(value.input_tokens);
-    target.output_tokens = target.output_tokens.saturating_add(value.output_tokens);
-    target.cached_tokens = target.cached_tokens.saturating_add(value.cached_tokens);
-}
-
-fn replace_stats(
-    target: &mut TrajectoryStats,
-    previous: TrajectoryStats,
-    current: TrajectoryStats,
-) {
-    target.llm_ns = target
-        .llm_ns
-        .saturating_sub(previous.llm_ns)
-        .saturating_add(current.llm_ns);
-    target.tool_ns = target
-        .tool_ns
-        .saturating_sub(previous.tool_ns)
-        .saturating_add(current.tool_ns);
-    target.ttft_ns = target
-        .ttft_ns
-        .saturating_sub(previous.ttft_ns)
-        .saturating_add(current.ttft_ns);
-    target.ttft_steps = target
-        .ttft_steps
-        .saturating_sub(previous.ttft_steps)
-        .saturating_add(current.ttft_steps);
-    target.decode_ns = target
-        .decode_ns
-        .saturating_sub(previous.decode_ns)
-        .saturating_add(current.decode_ns);
-    target.decode_tokens = target
-        .decode_tokens
-        .saturating_sub(previous.decode_tokens)
-        .saturating_add(current.decode_tokens);
-    target.input_tokens = target
-        .input_tokens
-        .saturating_sub(previous.input_tokens)
-        .saturating_add(current.input_tokens);
-    target.output_tokens = target
-        .output_tokens
-        .saturating_sub(previous.output_tokens)
-        .saturating_add(current.output_tokens);
-    target.cached_tokens = target
-        .cached_tokens
-        .saturating_sub(previous.cached_tokens)
-        .saturating_add(current.cached_tokens);
-}
-
-fn point_timing(time: &EventTime) -> RecordTiming {
-    RecordTiming {
-        started: Some(time.clone()),
-        completed: Some(time.clone()),
-        ..RecordTiming::default()
-    }
-}
-
-fn usage_snapshot(usage: &kcastle_agent::ResponseUsage) -> TrajectoryUsage {
-    TrajectoryUsage {
-        input_tokens: usage.input_tokens,
-        output_tokens: usage.output_tokens,
-        cached_tokens: usage.input_tokens_details.cached_tokens,
-    }
-}
-
-fn record_id(seq: u64) -> MessageId {
-    MessageId(seq.saturating_add(1))
-}
-
-fn pretty<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_default()
-}
-
-fn items_text<T: serde::Serialize>(items: &T) -> String {
-    let Ok(value) = serde_json::to_value(items) else {
-        return String::new();
+fn search_state_after_full_rebuild(
+    previous: Option<&TrajectoryProjection>,
+    trajectory_revision: u64,
+) -> (u64, Vector<TrajectorySearchDelta>) {
+    let Some(previous) = previous else {
+        return (1, Vector::new());
     };
-    let mut text = Vec::new();
-    collect_text(&value, &mut text);
-    text.join("\n")
+    if previous.trajectory_revision == trajectory_revision {
+        return (previous.search_revision, previous.search_history.clone());
+    }
+    advance_search_state(previous, Vector::new(), true)
 }
 
-fn collect_text(value: &serde_json::Value, text: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(object) => {
-            for (key, value) in object {
-                if key == "text"
-                    && let Some(value) = value.as_str().filter(|value| !value.is_empty())
-                {
-                    text.push(value.to_owned());
-                    continue;
-                }
-                if matches!(key.as_str(), "content" | "summary") {
-                    collect_text(value, text);
-                }
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_text(value, text);
-            }
-        }
-        serde_json::Value::String(value) if !value.is_empty() => text.push(value.clone()),
-        _ => {}
+fn advance_search_state(
+    previous: &TrajectoryProjection,
+    changed_indices: Vector<usize>,
+    reset: bool,
+) -> (u64, Vector<TrajectorySearchDelta>) {
+    if changed_indices.is_empty() && !reset {
+        return (previous.search_revision, previous.search_history.clone());
+    }
+    let revision = previous.search_revision.saturating_add(1);
+    let mut history = previous.search_history.clone();
+    history.push_back(TrajectorySearchDelta {
+        revision,
+        changed_indices,
+        reset,
+    });
+    while history.len() > SEARCH_HISTORY_LIMIT {
+        history.pop_front();
+    }
+    (revision, history)
+}
+
+fn geometry_state_after_full_rebuild(
+    previous: Option<&TrajectoryProjection>,
+    geometry_revision: u64,
+) -> Vector<TrajectoryGeometryDelta> {
+    let Some(previous) = previous else {
+        return Vector::new();
+    };
+    if previous.geometry_revision == geometry_revision {
+        return previous.geometry_history.clone();
+    }
+    advance_geometry_state(previous, geometry_revision, Vector::new(), false)
+}
+
+fn advance_geometry_state(
+    previous: &TrajectoryProjection,
+    geometry_revision: u64,
+    changed_indices: Vector<usize>,
+    sequence_compatible: bool,
+) -> Vector<TrajectoryGeometryDelta> {
+    if previous.geometry_revision == geometry_revision {
+        return previous.geometry_history.clone();
+    }
+    let mut history = previous.geometry_history.clone();
+    history.push_back(TrajectoryGeometryDelta {
+        from_revision: previous.geometry_revision,
+        to_revision: geometry_revision,
+        changed_indices,
+        sequence_compatible,
+    });
+    while history.len() > GEOMETRY_HISTORY_LIMIT {
+        history.pop_front();
+    }
+    history
+}
+
+fn same_geometry(previous: &TrajectoryRecord, current: &TrajectoryRecord) -> bool {
+    previous.kind == current.kind
+        && previous.lane == current.lane
+        && previous.timing == current.timing
+}
+
+fn next_projection_lineage() -> u64 {
+    NEXT_PROJECTION_LINEAGE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn materialize_record(
+    ordinals: &DisplayOrdinals,
+    item: TrajectoryItemView<'_>,
+) -> TrajectoryRecord {
+    let turn = item.turn_id.and_then(|turn_id| ordinals.turn(turn_id));
+    let step = item
+        .turn_id
+        .zip(item.step_id)
+        .and_then(|(turn_id, step_id)| ordinals.step(turn_id, step_id));
+    let call_id = match item.id {
+        TrajectoryItemId::Tool(call_id) => Some(call_id.to_string()),
+        _ => None,
+    };
+    let title = item.title.to_owned();
+    let text = item.text.to_owned();
+    let payload = item.payload.map(ToOwned::to_owned);
+    let search_text = normalized_search_text(&title, &text, payload.as_deref());
+    TrajectoryRecord {
+        id: item.id.clone(),
+        source_seq: item.source_seqs.first().copied().unwrap_or_default(),
+        kind: item.kind,
+        lane: item.lane,
+        title,
+        text,
+        payload,
+        search_text,
+        turn,
+        step,
+        call_id,
+        status: status_snapshot(item.status),
+        timing: item.timing.clone(),
+        usage: item.usage.map(usage_snapshot),
+    }
+}
+
+pub(crate) fn normalized_search_text(title: &str, text: &str, payload: Option<&str>) -> String {
+    let mut normalized = String::with_capacity(
+        title
+            .len()
+            .saturating_add(text.len())
+            .saturating_add(payload.map_or(0, str::len))
+            .saturating_add(2),
+    );
+    normalized.push_str(title);
+    normalized.push('\n');
+    normalized.push_str(text);
+    if let Some(payload) = payload {
+        normalized.push('\n');
+        normalized.push_str(payload);
+    }
+    normalized.make_ascii_lowercase();
+    // Unicode case folding can grow the string, so do it only when ASCII normalization was not
+    // sufficient. This keeps the common English/tool payload path allocation-stable.
+    if normalized.is_ascii() {
+        normalized
+    } else {
+        normalized.to_lowercase()
+    }
+}
+
+fn status_snapshot(status: ItemStatus) -> TrajectoryStatus {
+    match status {
+        ItemStatus::Pending | ItemStatus::Running => TrajectoryStatus::Running,
+        ItemStatus::Completed => TrajectoryStatus::Completed,
+        ItemStatus::Failed | ItemStatus::Aborted => TrajectoryStatus::Failed,
+        ItemStatus::Denied => TrajectoryStatus::Denied,
+        ItemStatus::NotExecuted => TrajectoryStatus::NotExecuted,
+        ItemStatus::Unknown => TrajectoryStatus::Unknown,
+    }
+}
+
+fn usage_snapshot(usage: TokenUsage) -> TrajectoryUsage {
+    TrajectoryUsage {
+        input_tokens: saturating_u32(usage.input_tokens()),
+        output_tokens: saturating_u32(usage.total_output_tokens()),
+        cached_tokens: saturating_u32(usage.cache_read_input_tokens),
+    }
+}
+
+fn stats_snapshot(stats: SessionStats) -> TrajectoryStats {
+    TrajectoryStats {
+        turns: stats.turns,
+        steps: stats.steps,
+        llm_ns: stats.llm_ns,
+        tool_ns: stats.tool_ns,
+        ttft_ns: stats.ttft_ns,
+        ttft_steps: stats.ttft_samples,
+        decode_ns: stats.decode_ns,
+        decode_tokens: stats.decode_tokens,
+        input_tokens: stats.input_tokens(),
+        output_tokens: stats.total_output_tokens(),
+        cached_tokens: stats.cache_read_input_tokens,
+    }
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+// Preserve the current UI-facing timing vocabulary while retaining the exact
+// canonical timing object instead of copying individual timestamps.
+impl RecordTiming {
+    pub(crate) fn generation_ns(&self) -> Option<u64> {
+        self.decode_ns()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::{
-        EasyInputMessage, FunctionCallOutputItemParam, InputItem, Item, SurfaceOp,
-        ToolExecutionOutcome, ToolResultStatus, UserMessageMode,
-    };
-
     use super::*;
 
-    fn event(seq: u64, millis: u64, event: SessionEvent) -> RecordedEvent {
-        RecordedEvent {
-            seq,
-            time: EventTime {
-                wall_time_ms: 1_000 + millis as i64,
-                clock_id: "projection-test".into(),
-                monotonic_ns: millis * 1_000_000,
-            },
-            source_event_seqs: Vec::new(),
-            surface_op: None,
-            event,
-        }
-    }
+    #[test]
+    fn projection_lineage_is_unique_per_fresh_document_projection() {
+        let document = SessionDocument::default();
+        let first = TrajectoryProjection::from_document(&document);
+        let same_projection = TrajectoryProjection::from_document_reusing(&document, Some(&first));
+        let reloaded = TrajectoryProjection::from_document(&document);
 
-    fn fixture() -> Vec<RecordedEvent> {
-        vec![
-            event(0, 0, SessionEvent::TurnStart { turn: 1 }),
-            event(1, 0, SessionEvent::StepStart { turn: 1, step: 1 }),
-            event(
-                2,
-                1,
-                SessionEvent::UserMessage {
-                    turn: 1,
-                    step: 1,
-                    input_id: None,
-                    mode: UserMessageMode::Initial,
-                    items: vec![InputItem::from(EasyInputMessage::from("run it"))],
-                },
-            ),
-            event(
-                3,
-                2,
-                SessionEvent::CompactionStart {
-                    compaction_id: "compaction-1".into(),
-                    tokens_before: 1_000,
-                    first_kept_id: 1,
-                },
-            ),
-            RecordedEvent {
-                source_event_seqs: vec![3],
-                ..event(
-                    4,
-                    102,
-                    SessionEvent::CompactionEnd {
-                        compaction_id: "compaction-1".into(),
-                        summary: "summary".into(),
-                        first_kept_id: 1,
-                        tokens_before: 1_000,
-                        response: None,
-                        outcome: StepOutcome::Completed,
-                    },
-                )
-            },
-            event(5, 110, SessionEvent::ModelRequestStart { turn: 1, step: 1 }),
-            event(
-                6,
-                120,
-                SessionEvent::AssistantChunk {
-                    turn: 1,
-                    step: 1,
-                    chunk: AssistantChunk::ToolCallArgumentsDelta {
-                        call_id: "call-1".into(),
-                        name: Some("shell".into()),
-                        delta: "{\"command\":\"true\"}".into(),
-                    },
-                },
-            ),
-            event(
-                7,
-                140,
-                SessionEvent::AssistantMessage {
-                    turn: 1,
-                    step: 1,
-                    items: vec![InputItem::from(EasyInputMessage::from("calling shell"))],
-                    response: kcastle_agent::ResponseMetadata {
-                        id: "response-1".into(),
-                        model: "test".into(),
-                        usage: None,
-                    },
-                },
-            ),
-            event(
-                8,
-                141,
-                SessionEvent::ToolCall {
-                    turn: 1,
-                    step: 1,
-                    call_id: "call-1".into(),
-                    parent_call_id: None,
-                    name: "shell".into(),
-                    arguments: "{\"command\":\"true\"}".into(),
-                },
-            ),
-            event(
-                9,
-                150,
-                SessionEvent::ToolExecutionStart {
-                    call_id: "call-1".into(),
-                },
-            ),
-            event(
-                10,
-                190,
-                SessionEvent::ToolExecutionFinish {
-                    call_id: "call-1".into(),
-                    outcome: ToolExecutionOutcome::Success,
-                },
-            ),
-            RecordedEvent {
-                source_event_seqs: vec![8, 9, 10],
-                surface_op: Some(SurfaceOp::Append),
-                ..event(
-                    11,
-                    200,
-                    SessionEvent::ToolResult {
-                        turn: 1,
-                        step: 1,
-                        call_id: "call-1".into(),
-                        output: "ok".into(),
-                        status: ToolResultStatus::Success,
-                        item: InputItem::from(Item::from(FunctionCallOutputItemParam {
-                            call_id: "call-1".into(),
-                            output: "ok".into(),
-                            id: None,
-                            status: None,
-                        })),
-                    },
-                )
-            },
-            event(
-                12,
-                201,
-                SessionEvent::StepEnd {
-                    turn: 1,
-                    step: 1,
-                    outcome: StepOutcome::Completed,
-                    error: None,
-                },
-            ),
-        ]
+        assert_ne!(first.projection_lineage(), 0);
+        assert_eq!(
+            same_projection.projection_lineage(),
+            first.projection_lineage()
+        );
+        assert_ne!(reloaded.projection_lineage(), first.projection_lineage());
     }
 
     #[test]
-    fn item_text_excludes_protocol_metadata_and_tool_call_arguments() {
-        let user = vec![
-            serde_json::from_value::<InputItem>(serde_json::json!({
-                "type": "message",
-                "role": "user",
-                "content": "hello"
-            }))
-            .unwrap(),
-        ];
-        assert_eq!(items_text(&user), "hello");
+    fn geometry_history_reports_only_changed_indices_and_rejects_resets() {
+        let previous = TrajectoryProjection {
+            geometry_revision: 10,
+            projection_lineage: next_projection_lineage(),
+            ..TrajectoryProjection::default()
+        };
+        let history = advance_geometry_state(&previous, 11, [77_777].into_iter().collect(), true);
+        let current = TrajectoryProjection {
+            geometry_revision: 11,
+            projection_lineage: previous.projection_lineage,
+            geometry_history: history,
+            ..TrajectoryProjection::default()
+        };
+        assert_eq!(
+            current.geometry_changes_since(10).unwrap().changed_indices,
+            [77_777].into_iter().collect::<Vector<_>>()
+        );
 
-        let tool_call = vec![
-            serde_json::from_value::<InputItem>(serde_json::json!({
-                "type": "function_call",
-                "arguments": "{\"command\":\"true\"}",
-                "call_id": "call-1",
-                "name": "shell"
-            }))
-            .unwrap(),
-        ];
-        assert_eq!(items_text(&tool_call), "");
-    }
-
-    #[test]
-    fn derives_assistant_and_full_tool_timing() {
-        let projection = TrajectoryProjection::from_events(&fixture());
-        let assistant = projection
-            .records
-            .iter()
-            .find(|record| record.kind == TrajectoryKind::Assistant)
-            .unwrap();
-        assert_eq!(assistant.timing.duration_ns(), Some(140_000_000));
-        assert_eq!(assistant.timing.ttft_ns(), Some(120_000_000));
-        assert_eq!(assistant.timing.generation_ns(), Some(20_000_000));
-
-        let compaction = projection
-            .records
-            .iter()
-            .find(|record| record.kind == TrajectoryKind::Compaction)
-            .unwrap();
-        assert_eq!(compaction.timing.duration_ns(), Some(100_000_000));
-
-        let tool = projection
-            .records
-            .iter()
-            .find(|record| record.kind == TrajectoryKind::Tool)
-            .unwrap();
-        assert_eq!(tool.timing.duration_ns(), Some(59_000_000));
-        assert_eq!(tool.timing.pre_execution_ns(), Some(9_000_000));
-        assert_eq!(tool.timing.execution_ns(), Some(40_000_000));
-        assert_eq!(tool.timing.post_execution_ns(), Some(10_000_000));
-    }
-
-    #[test]
-    fn live_projection_equals_replayed_projection() {
-        let events = fixture();
-        let replayed = TrajectoryProjection::from_events(&events);
-        let mut live = TrajectoryProjection::default();
-        for event in &events {
-            live.apply(event);
-        }
-        assert_eq!(live, replayed);
-    }
-
-    #[test]
-    fn incremental_stats_match_a_full_record_scan_after_every_event() {
-        let mut projection = TrajectoryProjection::default();
-        for event in fixture() {
-            projection.apply(&event);
-            let mut scanned = TrajectoryStats {
-                turns: projection.indices.completed_turns.len(),
-                steps: projection.indices.completed_steps.len(),
-                ..TrajectoryStats::default()
-            };
-            for record in &projection.records {
-                add_stats(&mut scanned, record_stats(record));
-            }
-            assert_eq!(projection.stats(), scanned);
-        }
-    }
-
-    #[test]
-    fn session_stats_match_dsh_wall_time_semantics() {
-        let stats = TrajectoryProjection::from_events(&fixture()).stats();
-        assert_eq!(stats.turns, 1);
-        assert_eq!(stats.steps, 1);
-        assert_eq!(stats.llm_ns, 140_000_000);
-        assert_eq!(stats.tool_ns, 59_000_000);
-        assert_eq!(stats.ttft_ns, 120_000_000);
-        assert_eq!(stats.ttft_steps, 1);
-    }
-
-    #[test]
-    fn interrupted_partial_assistant_is_visible_but_not_timed() {
-        let events = [
-            event(0, 0, SessionEvent::TurnStart { turn: 1 }),
-            event(1, 0, SessionEvent::StepStart { turn: 1, step: 1 }),
-            event(
-                2,
-                20,
-                SessionEvent::AssistantChunk {
-                    turn: 1,
-                    step: 1,
-                    chunk: AssistantChunk::OutputTextDelta {
-                        delta: "partial".into(),
-                    },
-                },
-            ),
-            event(
-                3,
-                30,
-                SessionEvent::StepEnd {
-                    turn: 1,
-                    step: 1,
-                    outcome: StepOutcome::Aborted,
-                    error: None,
-                },
-            ),
-        ];
-        let projection = TrajectoryProjection::from_events(&events);
-        let assistant = projection
-            .records
-            .iter()
-            .find(|record| record.kind == TrajectoryKind::Assistant)
-            .unwrap();
-        assert_eq!(assistant.text, "partial");
-        assert_eq!(assistant.status, TrajectoryStatus::Failed);
-        assert_eq!(assistant.timing.completed, None);
-        assert_eq!(projection.stats().llm_ns, 0);
-        assert_eq!(projection.stats().ttft_ns, 0);
-        assert_eq!(projection.stats().ttft_steps, 0);
-    }
-
-    #[test]
-    fn assistant_text_chunks_do_not_invalidate_timeline_geometry() {
-        let mut projection = TrajectoryProjection::default();
-        projection.apply(&event(0, 0, SessionEvent::StepStart { turn: 1, step: 1 }));
-        projection.apply(&event(
-            1,
-            10,
-            SessionEvent::AssistantChunk {
-                turn: 1,
-                step: 1,
-                chunk: AssistantChunk::OutputTextDelta {
-                    delta: "first".into(),
-                },
-            },
-        ));
-        let revision = projection.revision();
-        projection.apply(&event(
-            2,
-            20,
-            SessionEvent::AssistantChunk {
-                turn: 1,
-                step: 1,
-                chunk: AssistantChunk::OutputTextDelta {
-                    delta: " second".into(),
-                },
-            },
-        ));
-        assert_eq!(projection.revision(), revision);
-        assert_eq!(projection.records[0].text, "first second");
-    }
-
-    #[test]
-    fn projection_clone_reuses_unchanged_records_and_indices() {
-        let projection = TrajectoryProjection::from_events(&fixture());
-        let mut updated = projection.clone();
-        let unchanged_tool = projection
-            .records
-            .iter()
-            .position(|record| record.kind == TrajectoryKind::Tool)
-            .unwrap();
-        let assistant = projection
-            .records
-            .iter()
-            .position(|record| record.kind == TrajectoryKind::Assistant)
-            .unwrap();
-
-        updated.apply(&event(
-            13,
-            210,
-            SessionEvent::AssistantChunk {
-                turn: 1,
-                step: 1,
-                chunk: AssistantChunk::OutputTextDelta {
-                    delta: " ignored by completed timing".into(),
-                },
-            },
-        ));
-
-        assert!(Arc::ptr_eq(
-            &projection.records[unchanged_tool],
-            &updated.records[unchanged_tool]
-        ));
-        assert!(!Arc::ptr_eq(
-            &projection.records[assistant],
-            &updated.records[assistant]
-        ));
-        assert!(Arc::ptr_eq(&projection.indices, &updated.indices));
+        let reset_history = advance_geometry_state(&current, 12, Vector::new(), false);
+        let reset = TrajectoryProjection {
+            geometry_revision: 12,
+            projection_lineage: current.projection_lineage,
+            geometry_history: reset_history,
+            ..TrajectoryProjection::default()
+        };
+        assert!(reset.geometry_changes_since(10).is_none());
     }
 }

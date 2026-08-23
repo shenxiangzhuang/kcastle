@@ -1,8 +1,12 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-use kcastle_agent::{AgentEvent, Model, ReasoningEffort, SessionInfo, TranscriptItem};
+use kcastle_agent::{
+    AgentEvent, AssistantChunk, EventTime, Model, ReasoningEffort, RecordedEvent, SessionEvent,
+    SessionInfo, State, ToolResultStatus, TranscriptItem,
+};
 use markdown_stream::{Alignment, BlockKind, Event, InlineStyle};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -143,6 +147,11 @@ pub struct App {
     transcript_cache: Option<TranscriptCache>,
     streaming_entry: Option<usize>,
     tools: Vec<ToolRecord>,
+    applied_transactions: HashSet<String>,
+    seen_inputs: HashSet<String>,
+    request_channels: HashMap<String, RequestChannels>,
+    pending_tool_calls: HashMap<String, (String, String)>,
+    tool_requested_at: HashMap<String, EventTime>,
     active_tool_row: Option<usize>,
     input_history: Vec<String>,
     history_index: Option<usize>,
@@ -150,6 +159,12 @@ pub struct App {
     allow_all: bool,
     show_startup: bool,
     should_exit: bool,
+}
+
+#[derive(Debug, Default)]
+struct RequestChannels {
+    reasoning: bool,
+    output: bool,
 }
 
 impl App {
@@ -174,6 +189,11 @@ impl App {
             transcript_cache: None,
             streaming_entry: None,
             tools: Vec::new(),
+            applied_transactions: HashSet::new(),
+            seen_inputs: HashSet::new(),
+            request_channels: HashMap::new(),
+            pending_tool_calls: HashMap::new(),
+            tool_requested_at: HashMap::new(),
             active_tool_row: None,
             input_history: Vec::new(),
             history_index: None,
@@ -412,46 +432,15 @@ impl App {
 
     pub fn apply_event(&mut self, event: AgentEvent) -> Option<(String, bool)> {
         match event {
-            AgentEvent::SessionEvent(_) => {}
-            AgentEvent::RunStarted(input) => self.push_user(input),
-            AgentEvent::InputAdmitted { input, .. } => self.push_user(input),
+            AgentEvent::SessionCommitted(receipt) => {
+                if self.applied_transactions.insert(receipt.tx_id.to_string()) {
+                    for event in receipt.events {
+                        self.apply_committed_event(event);
+                    }
+                }
+            }
+            AgentEvent::RunStarted(_) => {}
             AgentEvent::ModelStarted(_) => {}
-            AgentEvent::ReasoningDelta(delta) => {
-                if let Some(Entry::Assistant { text, .. }) = self
-                    .streaming_entry
-                    .and_then(|index| self.entries.get_mut(index))
-                    .filter(|entry| {
-                        matches!(entry, Entry::Assistant { text, .. } if text.starts_with("Think · "))
-                    })
-                {
-                    text.push_str(&delta);
-                } else {
-                    self.active_tool_row = None;
-                    self.entries.push(Entry::Assistant {
-                        text: format!("Think · {delta}"),
-                        committed_lines: 0,
-                    });
-                    self.streaming_entry = Some(self.entries.len() - 1);
-                }
-            }
-            AgentEvent::TextDelta(delta) => {
-                if let Some(Entry::Assistant { text, .. }) = self
-                    .streaming_entry
-                    .and_then(|index| self.entries.get_mut(index))
-                    .filter(|entry| {
-                        matches!(entry, Entry::Assistant { text, .. } if !text.starts_with("Think · "))
-                    })
-                {
-                    text.push_str(&delta);
-                } else {
-                    self.active_tool_row = None;
-                    self.entries.push(Entry::Assistant {
-                        text: delta,
-                        committed_lines: 0,
-                    });
-                    self.streaming_entry = Some(self.entries.len() - 1);
-                }
-            }
             AgentEvent::ApprovalRequired(call) => {
                 if self.allow_all {
                     return Some((call.call_id, true));
@@ -465,66 +454,10 @@ impl App {
                     max_scroll: 0,
                 });
             }
-            AgentEvent::ToolStarted(call) => {
-                let tool_index = self.tools.len();
-                self.tools.push(ToolRecord {
-                    call_id: call.call_id,
-                    name: call.name,
-                    arguments: call.arguments,
-                    output: None,
-                    failed: None,
-                    started_at: Some(OffsetDateTime::now_utc()),
-                    started_instant: Some(Instant::now()),
-                    duration: None,
-                });
-                let row = self.active_tool_row.and_then(|index| {
-                    matches!(self.entries.get(index), Some(Entry::Tools(_))).then_some(index)
-                });
-                let row = if let Some(index) = row {
-                    if let Entry::Tools(tools) = &mut self.entries[index] {
-                        tools.push(tool_index);
-                    }
-                    index
-                } else {
-                    self.entries.push(Entry::Tools(vec![tool_index]));
-                    self.entries.len() - 1
-                };
-                self.active_tool_row = Some(row);
-                self.streaming_entry = Some(row);
-                self.invalidate_transcript();
-            }
-            AgentEvent::ToolFinished { call, result } => {
-                if let Some(ToolRecord {
-                    output,
-                    failed,
-                    started_instant,
-                    duration,
-                    ..
-                }) = self
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|tool| tool.call_id == call.call_id)
-                {
-                    *duration = started_instant.map(|started| started.elapsed());
-                    *started_instant = None;
-                    *output = Some(result.output);
-                    *failed = Some(result.is_error);
-                    self.invalidate_transcript();
-                }
-            }
             AgentEvent::CompactionStarted { .. } | AgentEvent::CompactionFinished { .. } => {}
-            AgentEvent::RunFinished(summary) => {
+            AgentEvent::RunFinished(_) => {
                 self.streaming_entry = None;
                 self.active_tool_row = None;
-                self.set_usage(summary.usage.as_ref().map(|usage| {
-                    (
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        usage.total_tokens,
-                        usage.input_tokens_details.cached_tokens,
-                    )
-                }));
             }
             AgentEvent::RunAborted => {
                 self.streaming_entry = None;
@@ -538,6 +471,220 @@ impl App {
             }
         }
         None
+    }
+
+    fn apply_committed_event(&mut self, recorded: RecordedEvent) {
+        let RecordedEvent { time, event, .. } = recorded;
+        match event {
+            SessionEvent::InputSubmitted {
+                input_id, input, ..
+            } => {
+                if self.seen_inputs.insert(input_id.to_string()) {
+                    self.push_user(input);
+                }
+            }
+            SessionEvent::AssistantChunk { request_id, chunk } => {
+                let request_id = request_id.to_string();
+                match chunk {
+                    AssistantChunk::ReasoningTextDelta { delta } => {
+                        if !delta.is_empty() {
+                            self.request_channels
+                                .entry(request_id)
+                                .or_default()
+                                .reasoning = true;
+                            self.append_reasoning_delta(delta);
+                        }
+                    }
+                    AssistantChunk::OutputTextDelta { delta } => {
+                        if !delta.is_empty() {
+                            self.request_channels.entry(request_id).or_default().output = true;
+                            self.append_output_delta(delta);
+                        }
+                    }
+                    AssistantChunk::ToolCallDelta { .. } | AssistantChunk::Usage { .. } => {}
+                }
+            }
+            SessionEvent::AssistantCompleted {
+                request_id,
+                items,
+                response,
+            } => {
+                let channels = self
+                    .request_channels
+                    .remove(request_id.as_str())
+                    .unwrap_or_default();
+                for item in transcript_from_items(items) {
+                    match item {
+                        TranscriptItem::Reasoning(text) if !channels.reasoning => {
+                            self.append_reasoning_delta(text);
+                        }
+                        TranscriptItem::Assistant(text) if !channels.output => {
+                            self.append_output_delta(text);
+                        }
+                        TranscriptItem::ToolCall {
+                            call_id,
+                            name,
+                            arguments,
+                        } => {
+                            self.pending_tool_calls.insert(call_id, (name, arguments));
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(usage) = response.usage {
+                    self.set_usage(Some((
+                        saturating_u32(usage.input_tokens()),
+                        saturating_u32(usage.total_output_tokens()),
+                        saturating_u32(
+                            usage
+                                .input_tokens()
+                                .saturating_add(usage.total_output_tokens()),
+                        ),
+                        saturating_u32(usage.cache_read_input_tokens),
+                    )));
+                }
+                self.streaming_entry = None;
+            }
+            SessionEvent::ModelRequestFailed { request_id, .. } => {
+                self.request_channels.remove(request_id.as_str());
+                self.streaming_entry = None;
+            }
+            SessionEvent::ToolCallRequested { call_id, .. } => {
+                let call_id = call_id.to_string();
+                if self.tools.iter().any(|tool| tool.call_id == call_id) {
+                    return;
+                }
+                let (name, arguments) = self
+                    .pending_tool_calls
+                    .remove(&call_id)
+                    .unwrap_or_else(|| (call_id.clone(), String::new()));
+                self.tool_requested_at.insert(call_id.clone(), time.clone());
+                self.push_tool(ToolRecord {
+                    call_id,
+                    name,
+                    arguments,
+                    output: None,
+                    failed: None,
+                    started_at: event_datetime(&time),
+                    started_instant: Some(Instant::now()),
+                    duration: None,
+                });
+            }
+            SessionEvent::ToolResultAttached {
+                call_id,
+                status,
+                item,
+            } => {
+                let call_id = call_id.to_string();
+                let output = transcript_from_items(vec![item])
+                    .into_iter()
+                    .find_map(|item| match item {
+                        TranscriptItem::ToolOutput { output, .. } => Some(output),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let requested_at = self.tool_requested_at.remove(&call_id);
+                if let Some(tool) = self
+                    .tools
+                    .iter_mut()
+                    .rev()
+                    .find(|tool| tool.call_id == call_id)
+                {
+                    tool.duration = requested_at
+                        .as_ref()
+                        .and_then(|started| time.duration_since(started))
+                        .map(Duration::from_nanos)
+                        .or_else(|| {
+                            tool.started_at.and_then(|started| {
+                                (event_datetime(&time)? - started).try_into().ok()
+                            })
+                        });
+                    tool.started_instant = None;
+                    tool.output = Some(output);
+                    tool.failed = Some(status != ToolResultStatus::Success);
+                    self.invalidate_transcript();
+                }
+            }
+            SessionEvent::RunStarted { .. }
+            | SessionEvent::RunTerminated { .. }
+            | SessionEvent::TurnStarted { .. }
+            | SessionEvent::TurnTerminated { .. }
+            | SessionEvent::StepStarted { .. }
+            | SessionEvent::StepTerminated { .. }
+            | SessionEvent::InputAttached { .. }
+            | SessionEvent::RequestSnapshot { .. }
+            | SessionEvent::ModelRequestStarted { .. }
+            | SessionEvent::ToolAuthorizationResolved { .. }
+            | SessionEvent::ToolDispatchIntended { .. }
+            | SessionEvent::ToolExecutionStarted { .. }
+            | SessionEvent::ToolExecutionFinished { .. }
+            | SessionEvent::CompactionStarted { .. }
+            | SessionEvent::CompactionFinished { .. } => {}
+        }
+    }
+
+    fn append_reasoning_delta(&mut self, delta: String) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(Entry::Assistant { text, .. }) = self
+            .streaming_entry
+            .and_then(|index| self.entries.get_mut(index))
+            .filter(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if text.starts_with("Think · "))
+            })
+        {
+            text.push_str(&delta);
+        } else {
+            self.active_tool_row = None;
+            self.entries.push(Entry::Assistant {
+                text: format!("Think · {delta}"),
+                committed_lines: 0,
+            });
+            self.streaming_entry = Some(self.entries.len() - 1);
+        }
+    }
+
+    fn append_output_delta(&mut self, delta: String) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(Entry::Assistant { text, .. }) = self
+            .streaming_entry
+            .and_then(|index| self.entries.get_mut(index))
+            .filter(|entry| {
+                matches!(entry, Entry::Assistant { text, .. } if !text.starts_with("Think · "))
+            })
+        {
+            text.push_str(&delta);
+        } else {
+            self.active_tool_row = None;
+            self.entries.push(Entry::Assistant {
+                text: delta,
+                committed_lines: 0,
+            });
+            self.streaming_entry = Some(self.entries.len() - 1);
+        }
+    }
+
+    fn push_tool(&mut self, tool: ToolRecord) {
+        let tool_index = self.tools.len();
+        self.tools.push(tool);
+        let row = self.active_tool_row.and_then(|index| {
+            matches!(self.entries.get(index), Some(Entry::Tools(_))).then_some(index)
+        });
+        let row = if let Some(index) = row {
+            if let Entry::Tools(tools) = &mut self.entries[index] {
+                tools.push(tool_index);
+            }
+            index
+        } else {
+            self.entries.push(Entry::Tools(vec![tool_index]));
+            self.entries.len() - 1
+        };
+        self.active_tool_row = Some(row);
+        self.streaming_entry = Some(row);
+        self.invalidate_transcript();
     }
 
     pub fn push_user(&mut self, value: String) {
@@ -570,6 +717,11 @@ impl App {
         self.entries.clear();
         self.streaming_entry = None;
         self.tools.clear();
+        self.applied_transactions.clear();
+        self.seen_inputs.clear();
+        self.request_channels.clear();
+        self.pending_tool_calls.clear();
+        self.tool_requested_at.clear();
         self.active_tool_row = None;
         let mut tool_row = None;
         for item in transcript {
@@ -635,6 +787,45 @@ impl App {
                     self.entries
                         .push(Entry::Notice(format!("Earlier context: {text}")));
                 }
+            }
+        }
+        self.invalidate_transcript();
+    }
+
+    pub fn restore_committed_metadata(&mut self, events: &[RecordedEvent]) {
+        let mut requested = HashMap::<String, EventTime>::new();
+        for recorded in events {
+            match &recorded.event {
+                SessionEvent::ToolCallRequested { call_id, .. } => {
+                    let call_id = call_id.to_string();
+                    requested.insert(call_id.clone(), recorded.time.clone());
+                    if let Some(tool) = self.tools.iter_mut().find(|tool| tool.call_id == call_id) {
+                        tool.started_at = event_datetime(&recorded.time);
+                    }
+                }
+                SessionEvent::ToolResultAttached {
+                    call_id,
+                    status,
+                    item,
+                } => {
+                    let call_id = call_id.to_string();
+                    let output = transcript_from_items(vec![item.clone()])
+                        .into_iter()
+                        .find_map(|item| match item {
+                            TranscriptItem::ToolOutput { output, .. } => Some(output),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    if let Some(tool) = self.tools.iter_mut().find(|tool| tool.call_id == call_id) {
+                        tool.output = Some(output);
+                        tool.failed = Some(*status != ToolResultStatus::Success);
+                        tool.duration = requested
+                            .get(&call_id)
+                            .and_then(|start| recorded.time.duration_since(start))
+                            .map(Duration::from_nanos);
+                    }
+                }
+                _ => {}
             }
         }
         self.invalidate_transcript();
@@ -1716,6 +1907,22 @@ fn render_tool_line(tools: &[(&'static str, Color)], width: u16) -> Line<'static
     Line::from(spans)
 }
 
+fn transcript_from_items(items: Vec<kcastle_agent::InputItem>) -> Vec<TranscriptItem> {
+    let mut state = State::default();
+    if state.append_items(items, None).is_err() {
+        return Vec::new();
+    }
+    state.transcript()
+}
+
+fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn event_datetime(time: &EventTime) -> Option<OffsetDateTime> {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(time.wall_time_ms) * 1_000_000).ok()
+}
+
 fn output_failed(output: &str) -> Option<bool> {
     output
         .lines()
@@ -2230,7 +2437,9 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use kcastle_agent::{
-        AgentEvent, Model, ReasoningEffort, RunSummary, SessionInfo, TranscriptItem,
+        AgentEvent, AssistantChunk, CallId, CommitReceipt, EventTime, InputId, InputItem,
+        InputOrigin, Model, ReasoningEffort, RecordedEvent, RequestId, ResponseInfo, RunSummary,
+        SessionEvent, SessionId, SessionInfo, ToolResultStatus, TranscriptItem, TxId,
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2265,14 +2474,102 @@ mod tests {
 
     fn start_tool(app: &mut App, call_id: &str) {
         let arguments = serde_json::json!({ "command": "true" }).to_string();
-        app.apply_event(AgentEvent::ToolStarted(
-            serde_json::from_value(serde_json::json!({
-                "arguments": arguments,
-                "call_id": call_id,
-                "name": "shell"
-            }))
-            .unwrap(),
-        ));
+        let item: InputItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call",
+            "arguments": arguments,
+            "call_id": call_id,
+            "name": "shell"
+        }))
+        .unwrap();
+        let request_id = RequestId::from_raw(format!("request-{call_id}"));
+        app.apply_event(committed(vec![
+            SessionEvent::AssistantCompleted {
+                request_id: request_id.clone(),
+                items: vec![item],
+                response: response(),
+            },
+            SessionEvent::ToolCallRequested {
+                request_id,
+                call_id: CallId::from_raw(call_id),
+                parent_call_id: None,
+            },
+        ]));
+    }
+
+    fn committed(events: Vec<SessionEvent>) -> AgentEvent {
+        committed_at(events, 1_000)
+    }
+
+    fn committed_at(events: Vec<SessionEvent>, start_ms: u64) -> AgentEvent {
+        let tx_id = TxId::random();
+        let events = events
+            .into_iter()
+            .enumerate()
+            .map(|(index, event)| RecordedEvent {
+                seq: index as u64 + 1,
+                tx_id: tx_id.clone(),
+                time: EventTime {
+                    wall_time_ms: i64::try_from(start_ms + index as u64).unwrap(),
+                    clock_id: "test-clock".into(),
+                    monotonic_ns: (start_ms + index as u64) * 1_000_000,
+                },
+                event,
+            })
+            .collect();
+        AgentEvent::SessionCommitted(CommitReceipt {
+            session_id: SessionId::from_raw("test-session"),
+            tx_id,
+            base_revision: 0,
+            revision: 1,
+            request_digest: "test".into(),
+            committed_at_ms: i64::try_from(start_ms).unwrap(),
+            events,
+        })
+    }
+
+    fn response() -> ResponseInfo {
+        ResponseInfo {
+            id: "response".into(),
+            model: "test-model".into(),
+            usage: None,
+        }
+    }
+
+    fn output_chunk(app: &mut App, request_id: &str, delta: impl Into<String>) {
+        app.apply_event(committed(vec![SessionEvent::AssistantChunk {
+            request_id: RequestId::from_raw(request_id),
+            chunk: AssistantChunk::OutputTextDelta {
+                delta: delta.into(),
+            },
+        }]));
+    }
+
+    fn reasoning_chunk(app: &mut App, request_id: &str, delta: impl Into<String>) {
+        app.apply_event(committed(vec![SessionEvent::AssistantChunk {
+            request_id: RequestId::from_raw(request_id),
+            chunk: AssistantChunk::ReasoningTextDelta {
+                delta: delta.into(),
+            },
+        }]));
+    }
+
+    fn submit_input(app: &mut App, input_id: &str, input: &str) {
+        app.apply_event(committed(vec![SessionEvent::InputSubmitted {
+            input_id: InputId::from_raw(input_id),
+            input: input.into(),
+            origin: InputOrigin::Steer,
+        }]));
+    }
+
+    fn session_info(path: &str, title: &str, created_at: u64) -> SessionInfo {
+        SessionInfo {
+            id: SessionId::from_raw(path),
+            project_id: "default".into(),
+            path: PathBuf::from(path),
+            title: title.into(),
+            created_at,
+            updated_at: created_at,
+        }
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2385,8 +2682,8 @@ mod tests {
     #[test]
     fn session_manager_navigates_and_confirms_before_delete() {
         let mut app = app();
-        let current = SessionInfo::legacy(PathBuf::from("current.jsonl"), "Current", 2);
-        let saved = SessionInfo::legacy(PathBuf::from("saved.jsonl"), "Saved", 1);
+        let current = session_info("current.session-v2", "Current", 2);
+        let saved = session_info("saved.session-v2", "Saved", 1);
         app.show_sessions(
             vec![saved.clone(), current.clone()],
             &current.path,
@@ -2451,10 +2748,10 @@ mod tests {
     #[test]
     fn resume_session_list_does_not_delete() {
         let mut app = app();
-        let saved = SessionInfo::legacy(PathBuf::from("saved.jsonl"), "Saved", 1);
+        let saved = session_info("saved.session-v2", "Saved", 1);
         app.show_sessions(
             vec![saved],
-            &PathBuf::from("current.jsonl"),
+            &PathBuf::from("current.session-v2"),
             false,
             None,
             None,
@@ -2791,13 +3088,13 @@ mod tests {
     fn text_output_starts_a_new_inline_tool_row() {
         let mut app = app();
         app.apply_event(AgentEvent::ModelStarted(1));
-        app.apply_event(AgentEvent::TextDelta("before".into()));
+        output_chunk(&mut app, "request-1", "before");
         start_tool(&mut app, "one");
         start_tool(&mut app, "two");
         app.apply_event(AgentEvent::ModelStarted(2));
         start_tool(&mut app, "three");
         app.apply_event(AgentEvent::ModelStarted(3));
-        app.apply_event(AgentEvent::TextDelta("after".into()));
+        output_chunk(&mut app, "request-3", "after");
         start_tool(&mut app, "four");
 
         assert!(matches!(
@@ -2816,9 +3113,9 @@ mod tests {
     #[test]
     fn reasoning_stream_does_not_merge_the_final_answer() {
         let mut app = app();
-        app.apply_event(AgentEvent::ReasoningDelta("inspect ".into()));
-        app.apply_event(AgentEvent::ReasoningDelta("workspace".into()));
-        app.apply_event(AgentEvent::TextDelta("done".into()));
+        reasoning_chunk(&mut app, "request", "inspect ");
+        reasoning_chunk(&mut app, "request", "workspace");
+        output_chunk(&mut app, "request", "done");
 
         assert!(matches!(
             app.entries.as_slice(),
@@ -2827,6 +3124,42 @@ mod tests {
                 Entry::Assistant { text: answer, .. }
             ] if reasoning == "Think · inspect workspace" && answer == "done"
         ));
+    }
+
+    #[test]
+    fn durable_rows_apply_once_and_tool_results_use_canonical_status_and_time() {
+        let mut app = app();
+        app.apply_event(AgentEvent::RunStarted("must stay transient".into()));
+        assert!(app.entries.is_empty());
+
+        let submitted = committed(vec![SessionEvent::InputSubmitted {
+            input_id: InputId::from_raw("input"),
+            input: "hello".into(),
+            origin: InputOrigin::Initial,
+        }]);
+        app.apply_event(submitted.clone());
+        app.apply_event(submitted);
+        assert!(matches!(app.entries.as_slice(), [Entry::User(value)] if value == "hello"));
+
+        start_tool(&mut app, "call");
+        let item: InputItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "call",
+            "output": "tool failed"
+        }))
+        .unwrap();
+        app.apply_event(committed_at(
+            vec![SessionEvent::ToolResultAttached {
+                call_id: CallId::from_raw("call"),
+                status: ToolResultStatus::Error,
+                item,
+            }],
+            2_001,
+        ));
+
+        assert_eq!(app.tools[0].output.as_deref(), Some("tool failed"));
+        assert_eq!(app.tools[0].failed, Some(true));
+        assert_eq!(app.tools[0].duration, Some(Duration::from_secs(1)));
     }
 
     #[test]
@@ -2843,10 +3176,34 @@ mod tests {
                 output: "exit_code=0".into(),
             },
         ]);
+        let item: InputItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call_output",
+            "call_id": "old",
+            "output": "exit_code=0"
+        }))
+        .unwrap();
+        let AgentEvent::SessionCommitted(receipt) = committed_at(
+            vec![
+                SessionEvent::ToolCallRequested {
+                    request_id: RequestId::from_raw("request"),
+                    call_id: CallId::from_raw("old"),
+                    parent_call_id: None,
+                },
+                SessionEvent::ToolResultAttached {
+                    call_id: CallId::from_raw("old"),
+                    status: ToolResultStatus::Success,
+                    item,
+                },
+            ],
+            1_000,
+        ) else {
+            unreachable!()
+        };
+        app.restore_committed_metadata(&receipt.events);
 
         assert_eq!(app.tools.len(), 1);
-        assert!(app.tools[0].started_at.is_none());
-        assert!(app.tools[0].duration.is_none());
+        assert!(app.tools[0].started_at.is_some());
+        assert_eq!(app.tools[0].duration, Some(Duration::from_millis(1)));
         assert_eq!(app.tools[0].failed, Some(false));
         assert!(
             app.transcript_lines(80)
@@ -2889,9 +3246,9 @@ mod tests {
     fn steering_does_not_split_the_streaming_assistant() {
         let mut app = app();
         app.apply_event(AgentEvent::ModelStarted(1));
-        app.apply_event(AgentEvent::TextDelta("**hel".into()));
-        app.push_user("steer".into());
-        app.apply_event(AgentEvent::TextDelta("lo**".into()));
+        output_chunk(&mut app, "request", "**hel");
+        submit_input(&mut app, "steer", "steer");
+        output_chunk(&mut app, "request", "lo**");
 
         assert!(matches!(
             app.entries.as_slice(),
@@ -2913,7 +3270,7 @@ mod tests {
     fn streaming_markdown_formats_only_complete_lines() {
         let mut app = app();
         app.apply_event(AgentEvent::ModelStarted(1));
-        app.apply_event(AgentEvent::TextDelta("**done**\n**partial".into()));
+        output_chunk(&mut app, "request", "**done**\n**partial");
         let lines = app.transcript_lines(40);
         assert!(lines.iter().flat_map(|line| &line.spans).any(|span| {
             span.content == "done" && span.style.add_modifier.contains(Modifier::BOLD)
@@ -2969,7 +3326,14 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(
-            session_label(&SessionInfo::legacy(PathBuf::new(), "saved", 0)),
+            session_label(&SessionInfo {
+                id: SessionId::from_raw("saved"),
+                project_id: "default".into(),
+                path: PathBuf::new(),
+                title: "saved".into(),
+                created_at: 0,
+                updated_at: 0,
+            }),
             format!("saved · {created_at}")
         );
     }
@@ -2989,7 +3353,7 @@ mod tests {
         let mut app = app();
         app.notice("old");
         app.apply_event(AgentEvent::ModelStarted(1));
-        app.apply_event(AgentEvent::TextDelta("live".into()));
+        output_chunk(&mut app, "request", "live");
         let history = app.take_committed_lines(40);
         assert!(history.iter().any(|line| line.to_string().contains("old")));
         assert!(matches!(
@@ -3002,7 +3366,7 @@ mod tests {
     fn streaming_output_drains_wrapped_prefix_into_terminal_history() {
         let mut app = app();
         app.apply_event(AgentEvent::ModelStarted(1));
-        app.apply_event(AgentEvent::TextDelta("word ".repeat(80)));
+        output_chunk(&mut app, "request", "word ".repeat(80));
 
         let history = app.take_committed_lines(20);
 

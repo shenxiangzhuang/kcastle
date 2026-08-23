@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use crate::domain::{Action, AppState, Effect, ScrollIntent, Surface, reduce_conversation};
+use crate::domain::conversation::refresh_message_search_text;
+use crate::domain::{Action, AppState, Effect, ScrollIntent, Surface};
 use crate::layout::resolve_layout;
 
 pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
@@ -22,7 +23,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             recompute_layout(state, &mut effects);
         }
         Action::SelectDetails(selected) => {
-            state.details.selected = selected;
+            state.details.selected = selected.clone();
             state.layout_input.details_visible = selected.is_some();
             recompute_layout(state, &mut effects);
         }
@@ -64,6 +65,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             };
             state.sidebar.options_open = false;
             state.sidebar.search_sessions = false;
+            state.trajectory.selected_range = None;
         }
         Action::SetSidebarGrouping(group_by_workspace) => {
             state.sidebar.group_by_workspace = group_by_workspace;
@@ -114,7 +116,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             details_tab,
             follow_chat_tail,
         } => {
-            state.details.selected = selected;
+            state.details.selected = selected.clone();
             state.details.tab = details_tab;
             state.follow_chat_tail = follow_chat_tail;
             if follow_chat_tail {
@@ -137,9 +139,26 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::SetActiveProject(index) => state.workspace.active_project = index,
         Action::RefreshSessions(sessions) => state.session.sessions = sessions,
-        Action::Conversation(action) => {
-            let expanded = reduce_conversation(Arc::make_mut(&mut state.conversation), *action);
-            if expanded && state.follow_chat_tail {
+        Action::AppendTransientNotice(message) => {
+            let mut message = *message;
+            if let Some(previous) = state
+                .transient_messages
+                .back()
+                .or_else(|| state.session_view.conversation.messages.back())
+            {
+                message.turn = previous.turn;
+                message.step = previous.step;
+                if message.request_id.is_none() {
+                    message.request_id.clone_from(&previous.request_id);
+                }
+            }
+            refresh_message_search_text(&mut message);
+            const MAX_TRANSIENT_NOTICES: usize = 8;
+            if state.transient_messages.len() == MAX_TRANSIENT_NOTICES {
+                state.transient_messages.pop_front();
+            }
+            state.transient_messages.push_back(Arc::new(message));
+            if state.follow_chat_tail {
                 effects.push(Effect::ApplyChatTail);
             }
         }
@@ -196,6 +215,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::domain::timeline::{AxisId, AxisRange, DomainRange, TimelineMode};
+    use crate::domain::{Message, MessageId, Role};
     use crate::layout::LayoutInput;
 
     #[test]
@@ -214,5 +235,61 @@ mod tests {
             state.sidebar.visible_sessions_by_project.get(&project),
             Some(&25)
         );
+    }
+
+    #[test]
+    fn dismissing_with_escape_clears_selection_without_losing_zoom() {
+        let mut state = AppState::new(LayoutInput::default());
+        let range = AxisRange {
+            axis: AxisId {
+                document_generation: 1,
+                geometry_revision: 2,
+                mode: TimelineMode::Duration,
+            },
+            range: DomainRange::new(10.0, 20.0),
+        };
+        state.trajectory.selected_range = Some(range);
+        state.trajectory.visible_range = Some(range);
+
+        reduce(&mut state, Action::DismissTransient);
+
+        assert_eq!(state.trajectory.selected_range, None);
+        assert_eq!(state.trajectory.visible_range, Some(range));
+    }
+
+    #[test]
+    fn transient_notices_never_mutate_the_canonical_session_view() {
+        let mut state = AppState::new(LayoutInput::default());
+        let canonical = Arc::clone(&state.session_view);
+
+        for index in 0..10 {
+            reduce(
+                &mut state,
+                Action::AppendTransientNotice(Box::new(Message {
+                    key: MessageId(index + 1),
+                    revision: 0,
+                    role: Role::Notice,
+                    tool_call_id: None,
+                    title: None,
+                    text: format!("notice {index}"),
+                    payload: None,
+                    schema: None,
+                    pending: false,
+                    failed: false,
+                    started_at_ms: None,
+                    duration_ms: None,
+                    turn: 0,
+                    step: 0,
+                    request_id: None,
+                    search_text: String::new(),
+                })),
+            );
+        }
+
+        assert!(Arc::ptr_eq(&state.session_view, &canonical));
+        assert_eq!(state.session_view.revision, canonical.revision);
+        assert_eq!(state.transient_messages.len(), 8);
+        assert_eq!(state.transient_messages.front().unwrap().text, "notice 2");
+        assert_eq!(state.transient_messages.back().unwrap().text, "notice 9");
     }
 }

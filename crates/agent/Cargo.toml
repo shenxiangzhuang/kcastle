@@ -13,7 +13,8 @@ categories = ["api-bindings", "command-line-utilities"]
 [dependencies]
 async-openai.workspace = true
 futures-util.workspace = true
-fs2.workspace = true
+im.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,4 +26,5 @@ uuid.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

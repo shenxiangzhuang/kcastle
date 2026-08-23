@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use kcastle_agent::SessionInfo;
 
-use crate::domain::{ComposerMenu, ConversationAction, DetailsTab, MessageId, TimelineMode};
+use crate::domain::timeline::AxisRange;
+use crate::domain::{ComposerMenu, DetailsTab, Message, TimelineMode, TrajectoryItemId};
 use crate::layout::LayoutInput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +18,7 @@ pub(crate) enum Action {
     ToggleSidebar,
     ShowChat,
     ShowTrajectory,
-    SelectDetails(Option<MessageId>),
+    SelectDetails(Option<TrajectoryItemId>),
     SetDetailsTab(DetailsTab),
     SetComposerMenu(Option<ComposerMenu>),
     MoveComposerHighlight {
@@ -34,14 +35,14 @@ pub(crate) enum Action {
     ToggleProjectExpanded(PathBuf),
     ExpandProject(PathBuf),
     SetTimelineMode(TimelineMode),
-    SetTimelineSelection(Option<(f64, f64)>),
-    SetTimelineViewport(Option<(f64, f64)>),
+    SetTimelineSelection(Option<AxisRange>),
+    SetTimelineViewport(Option<AxisRange>),
     ToggleTimelineUnixTime,
     ToggleTrajectoryTurns,
     ToggleTrajectoryCalls,
     ExpandTrajectoryGroups,
     RestoreSessionView {
-        selected: Option<MessageId>,
+        selected: Option<TrajectoryItemId>,
         details_tab: DetailsTab,
         follow_chat_tail: bool,
     },
@@ -53,7 +54,7 @@ pub(crate) enum Action {
     },
     SetActiveProject(usize),
     RefreshSessions(Vec<SessionInfo>),
-    Conversation(Box<ConversationAction>),
+    AppendTransientNotice(Box<Message>),
     Scroll(ScrollIntent),
     #[cfg_attr(not(test), allow(dead_code))]
     StreamDeltasReceived(usize),

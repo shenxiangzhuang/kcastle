@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    StatefulInteractiveElement, Styled, div, prelude::FluentBuilder, px, relative,
+    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Textarea;
@@ -91,10 +91,26 @@ impl DesktopApp {
             )
     }
 
-    pub(crate) fn docked_composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn docked_composer(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = palette(cx);
         let status = composer_status(&self.core);
         let full_status = status.clone();
+        let shaped_status: SharedString = status.clone().into();
+        let style = window.text_style();
+        let status_width = window
+            .text_system()
+            .shape_line(
+                shaped_status.clone(),
+                window.rem_size() * 0.75,
+                &[style.to_run(shaped_status.len())],
+                None,
+            )
+            .width;
+        let status_is_truncated = status_width > px(self.core.layout.composer_max_width.max(0.0));
         div()
             .flex()
             .flex_col()
@@ -104,24 +120,31 @@ impl DesktopApp {
             .pb_2()
             .gap_2()
             .child(self.composer_card(false, cx))
-            .child(
-                div()
-                    .id("composer-session-stats")
-                    .w_full()
-                    .max_w(px(self.core.layout.composer_max_width))
-                    .text_center()
-                    .text_xs()
-                    .truncate()
-                    .text_color(colors.muted_text)
-                    .child(status)
-                    .tooltip(move |window, cx| Tooltip::new(full_status.clone()).build(window, cx)),
-            )
+            .when(!status.is_empty(), |composer| {
+                composer.child(
+                    div()
+                        .id("composer-session-stats")
+                        .w_full()
+                        .max_w(px(self.core.layout.composer_max_width))
+                        .text_center()
+                        .text_xs()
+                        .truncate()
+                        .text_color(colors.muted_text)
+                        .child(status)
+                        .when(status_is_truncated, |status| {
+                            status.tooltip(move |window, cx| {
+                                Tooltip::new(full_status.clone()).build(window, cx)
+                            })
+                        }),
+                )
+            })
     }
 
     fn composer_card(&self, hero: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = palette(cx);
         let running = self.session_running();
-        let preparing = matches!(self.core.run, RunState::Preparing);
+        let selection_pending = self.selection_pending();
+        let preparing = selection_pending || matches!(self.core.run, RunState::Preparing);
         let empty = self.input.read(cx).value().trim().is_empty();
         let model_configured = self.models[self.selected_model].model.has_api_key();
         let elapsed = self
@@ -186,6 +209,7 @@ impl DesktopApp {
                                     .icon(IconName::Plus)
                                     .ghost()
                                     .compact()
+                                    .disabled(selection_pending)
                                     .tooltip("Commands")
                                     .on_key_down(cx.listener(|this, event, window, cx| {
                                         this.handle_root_key(event, window, cx)
@@ -216,6 +240,7 @@ impl DesktopApp {
                                 )
                                 .ghost()
                                 .compact()
+                                .disabled(selection_pending)
                                 .tooltip("Select tool approval behavior")
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
@@ -251,7 +276,7 @@ impl DesktopApp {
                                 } else {
                                     "Configure an OpenAI or DeepSeek provider"
                                 })
-                                .disabled(running)
+                                .disabled(running || selection_pending)
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
                                 }))
@@ -311,7 +336,7 @@ impl DesktopApp {
                     "command-export",
                     IconName::ArrowDown,
                     "Export session",
-                    "Save the current JSONL session log",
+                    "Export the current session as JSONL",
                     self.core.composer.highlighted_item == 0,
                     colors,
                     cx.listener(|this, _, window, cx| {

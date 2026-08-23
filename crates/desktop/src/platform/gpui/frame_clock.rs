@@ -6,13 +6,6 @@ use gpui::{ScrollHandle, Window, point, px};
 const VISUAL_UPDATE_INTERVAL_FRAMES: u8 = 3;
 const LAYOUT_SETTLE_FRAMES: u8 = 3;
 
-pub(crate) fn arm_next_frame(window: &mut Window, ready: tokio::sync::oneshot::Sender<()>) {
-    window.on_next_frame(move |_, _| {
-        let _ = ready.send(());
-    });
-    window.refresh();
-}
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DeferredScrollAlignment {
     generation: Rc<Cell<u64>>,

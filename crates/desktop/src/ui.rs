@@ -38,7 +38,7 @@ impl Render for DesktopApp {
                 main.child(self.conversation_header(cx))
                     .child(self.conversation_body(window, cx))
                     .children(self.approval_card(cx))
-                    .child(self.docked_composer(cx))
+                    .child(self.docked_composer(window, cx))
             });
         let content = match sidebar_mode {
             SidebarMode::Expanded => h_resizable("app-layout")

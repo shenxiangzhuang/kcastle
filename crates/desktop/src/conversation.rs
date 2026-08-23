@@ -159,9 +159,18 @@ impl DesktopApp {
                     .child(
                         transcript_content_column(self.core.layout.content_max_width)
                             .gap_4()
-                            .children(self.core.conversation.messages.iter().enumerate().map(
-                                |(index, message)| self.message_view(index, message, window, cx),
-                            )),
+                            .children(
+                                self.core
+                                    .session_view
+                                    .conversation
+                                    .messages
+                                    .iter()
+                                    .chain(self.core.transient_messages.iter())
+                                    .enumerate()
+                                    .map(|(index, message)| {
+                                        self.message_view(index, message, window, cx)
+                                    }),
+                            ),
                     ),
             )
             .children((!self.chat_at_bottom()).then(|| {
@@ -273,7 +282,9 @@ impl DesktopApp {
                                 .icon(IconName::ThumbsUp)
                                 .ghost()
                                 .compact()
-                                .when(message.rating == Some(true), |button| button.primary())
+                                .when(presentation.rating() == Some(true), |button| {
+                                    button.primary()
+                                })
                                 .tooltip("Good response")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.rate_message(index, true, cx)
@@ -284,7 +295,9 @@ impl DesktopApp {
                                 .icon(IconName::ThumbsDown)
                                 .ghost()
                                 .compact()
-                                .when(message.rating == Some(false), |button| button.danger())
+                                .when(presentation.rating() == Some(false), |button| {
+                                    button.danger()
+                                })
                                 .tooltip("Bad response")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.rate_message(index, false, cx)
@@ -305,7 +318,7 @@ impl DesktopApp {
                 .into_any_element(),
             Role::Reasoning => {
                 let preview = reasoning_preview(&message.text, message.pending);
-                let follow_summary_end = message.pending && !message.expanded;
+                let follow_summary_end = message.pending && !presentation.expanded();
                 presentation.align_reasoning_summary(follow_summary_end, message.revision, window);
                 let reasoning_summary_scroll = presentation.reasoning_summary_scroll();
                 div()
@@ -336,7 +349,7 @@ impl DesktopApp {
                                 },
                             ))
                             .child(
-                                Icon::new(if message.expanded {
+                                Icon::new(if presentation.expanded() {
                                     IconName::ChevronDown
                                 } else {
                                     IconName::ChevronRight
@@ -361,7 +374,7 @@ impl DesktopApp {
                                     })
                                     .into_any_element()
                             })
-                            .child(if message.expanded {
+                            .child(if presentation.expanded() {
                                 div().flex_1().into_any_element()
                             } else if message.pending {
                                 div()
@@ -386,7 +399,7 @@ impl DesktopApp {
                                     .into_any_element()
                             }),
                     )
-                    .when(message.expanded, |row| {
+                    .when(presentation.expanded(), |row| {
                         row.child(
                             div()
                                 .ml(px(22.0))
@@ -401,7 +414,7 @@ impl DesktopApp {
                     })
                     .into_any_element()
             }
-            Role::Tool => self.tool_row(index, message, cx),
+            Role::Tool => self.tool_row(index, message, presentation, cx),
             Role::Notice => div()
                 .flex()
                 .items_center()
@@ -432,6 +445,7 @@ impl DesktopApp {
         &self,
         index: usize,
         message: &Message,
+        presentation: &crate::platform::gpui::MessagePresentation,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = palette(cx);
@@ -467,7 +481,7 @@ impl DesktopApp {
                     .hover(move |row| row.bg(colors.hover))
                     .text_sm()
                     .child(
-                        Icon::new(if message.expanded {
+                        Icon::new(if presentation.expanded() {
                             IconName::ChevronDown
                         } else {
                             tool_icon(title)
@@ -508,7 +522,7 @@ impl DesktopApp {
                             }),
                     ),
             )
-            .when(message.expanded, |element| {
+            .when(presentation.expanded(), |element| {
                 element.child(
                     div()
                         .ml(px(22.0))

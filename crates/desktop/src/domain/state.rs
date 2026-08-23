@@ -2,9 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use im::Vector;
 use kcastle_agent::SessionInfo;
 
-use crate::domain::{ConversationState, LayoutGeneration, MessageId, RunId, TrajectoryProjection};
+use crate::domain::timeline::{AxisRange, TimelineMode};
+use crate::domain::{LayoutGeneration, Message, RunId, SessionView, TrajectoryItemId};
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
 
 pub(crate) const INITIAL_SESSION_LIMIT: usize = 5;
@@ -54,9 +56,9 @@ impl Default for SidebarState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DetailsState {
-    pub(crate) selected: Option<MessageId>,
+    pub(crate) selected: Option<TrajectoryItemId>,
     pub(crate) tab: DetailsTab,
 }
 
@@ -91,22 +93,16 @@ pub(crate) enum RunState {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum TimelineMode {
-    #[default]
-    Sequence,
-    Duration,
-    #[allow(dead_code)]
-    Actual,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct TrajectoryState {
     pub(crate) collapsed_turns: bool,
     pub(crate) collapsed_calls: bool,
     pub(crate) mode: TimelineMode,
-    pub(crate) selected_range: Option<(f64, f64)>,
-    pub(crate) visible_range: Option<(f64, f64)>,
+    /// Ranges are meaningful only in the projection that created them. Keeping
+    /// the axis alongside the coordinates makes stale view state unrepresentable
+    /// as a range on a newer document revision or another timeline mode.
+    pub(crate) selected_range: Option<AxisRange>,
+    pub(crate) visible_range: Option<AxisRange>,
     pub(crate) unix_time: bool,
 }
 
@@ -126,7 +122,11 @@ pub(crate) struct SessionState {
 
 #[derive(Debug)]
 pub(crate) struct AppState {
-    pub(crate) conversation: Arc<ConversationState>,
+    /// One revision-stamped aggregate published from one canonical document.
+    /// Conversation and trajectory can therefore never come from different commits.
+    pub(crate) session_view: Arc<SessionView>,
+    /// Bounded UI feedback that is intentionally excluded from the durable document.
+    pub(crate) transient_messages: Vector<Arc<Message>>,
     pub(crate) composer: ComposerState,
     pub(crate) sidebar: SidebarState,
     pub(crate) sidebar_requested: bool,
@@ -134,7 +134,6 @@ pub(crate) struct AppState {
     pub(crate) details: DetailsState,
     pub(crate) approval: Option<ApprovalState>,
     pub(crate) trajectory: TrajectoryState,
-    pub(crate) trajectory_data: Arc<TrajectoryProjection>,
     pub(crate) workspace: WorkspaceState,
     pub(crate) session: SessionState,
     pub(crate) follow_chat_tail: bool,
@@ -148,7 +147,8 @@ pub(crate) struct AppState {
 impl AppState {
     pub(crate) fn new(layout_input: LayoutInput) -> Self {
         Self {
-            conversation: Arc::new(ConversationState::default()),
+            session_view: Arc::new(SessionView::default()),
+            transient_messages: Vector::new(),
             composer: ComposerState::default(),
             sidebar: SidebarState::default(),
             sidebar_requested: true,
@@ -156,7 +156,6 @@ impl AppState {
             details: DetailsState::default(),
             approval: None,
             trajectory: TrajectoryState::default(),
-            trajectory_data: Arc::new(TrajectoryProjection::default()),
             workspace: WorkspaceState::default(),
             session: SessionState::default(),
             follow_chat_tail: true,
