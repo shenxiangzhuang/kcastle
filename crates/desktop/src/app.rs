@@ -3061,6 +3061,17 @@ fn matching_search_snippet(values: &[String], query: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn close_test_window(view: Entity<DesktopApp>, cx: &mut gpui::VisualTestContext) {
+        let weak_view = view.downgrade();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        assert!(
+            weak_view.upgrade().is_none(),
+            "closing the test window must release its app and session database handles"
+        );
+    }
+
     fn create_v2_session(
         directory: &Path,
         project_id: &str,
@@ -3361,6 +3372,7 @@ mod tests {
             assert_eq!(app.core.session.sessions[0].path, app.core.session.current);
         });
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3434,6 +3446,7 @@ mod tests {
             assert!(app.project_archived_sessions[&sessions_dir].is_empty());
         });
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3509,6 +3522,7 @@ mod tests {
             });
         });
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3626,6 +3640,7 @@ mod tests {
             assert_eq!(this.core.session.current, target.path);
         });
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3759,6 +3774,7 @@ mod tests {
             );
         });
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3944,6 +3960,7 @@ mod tests {
         });
         assert_ne!(config_reloaded_entity, reloaded_entity);
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -4096,6 +4113,7 @@ mod tests {
             "eviction must release the runtime entity and its owned document/view"
         );
 
+        close_test_window(view, cx);
         std::fs::remove_dir_all(root).unwrap();
     }
 
