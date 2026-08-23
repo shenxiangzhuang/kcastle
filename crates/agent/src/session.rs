@@ -653,6 +653,9 @@ mod tests {
         assert!(directory.join(SESSION_DATABASE_FILE).is_file());
         let catalog = Session::catalog_in_project(&directory, "project-a").unwrap();
         assert_eq!(catalog.sessions, vec![session.info.clone()]);
+        // A live Session intentionally owns the project's SQLite connection. Windows does not
+        // allow its database or WAL files to be removed until that capability is released.
+        drop(session);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -677,6 +680,7 @@ mod tests {
         );
         let restored = Session::restore(&archived).unwrap();
         assert_eq!(restored.id, session.info.id);
+        drop(session);
         fs::remove_dir_all(directory).unwrap();
     }
 
