@@ -1797,9 +1797,14 @@ impl EventValidator {
                 }
             }
             SessionEvent::UserMessage { turn, step, .. }
-            | SessionEvent::RequestHeader { turn, step, .. }
-            | SessionEvent::AssistantChunk { turn, step, .. } => {
+            | SessionEvent::RequestHeader { turn, step, .. } => {
                 require_active_step(recorded, self.active_step, *turn, *step)?;
+            }
+            SessionEvent::AssistantChunk { turn, step, .. } => {
+                require_active_step(recorded, self.active_step, *turn, *step)?;
+                if self.finalized_assistants.contains(&(*turn, *step)) {
+                    return invalid_event(recorded, "assistant message was already finalized");
+                }
             }
             SessionEvent::ModelRequestStart { turn, step } => {
                 require_active_step(recorded, self.active_step, *turn, *step)?;
@@ -2530,6 +2535,7 @@ mod tests {
     use async_openai::types::responses::{EasyInputMessage, InputItem};
 
     use super::{Session, SessionError, catalog_parse_count, session_parse_count};
+    use crate::ResponseMetadata;
     use crate::session_event::{
         AssistantChunk, EventTime, SESSION_FORMAT_VERSION, SessionEvent, SurfaceOp, TurnEndReason,
         UserMessageMode,
@@ -2675,6 +2681,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(recorded.seq, 0);
+    }
+
+    #[tokio::test]
+    async fn rejects_assistant_chunks_after_the_message_is_finalized() {
+        let session = Session::memory();
+        let (state, mut commit) = session.into_parts();
+        commit.prepare(&state).await.unwrap();
+        commit
+            .event(SessionEvent::TurnStart { turn: 1 }, vec![], None)
+            .await
+            .unwrap();
+        commit
+            .event(SessionEvent::StepStart { turn: 1, step: 1 }, vec![], None)
+            .await
+            .unwrap();
+        commit
+            .event(
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    items: vec![InputItem::from(EasyInputMessage::from("done"))],
+                    response: ResponseMetadata {
+                        id: "response-1".into(),
+                        model: "test".into(),
+                        usage: None,
+                    },
+                },
+                vec![],
+                Some(SurfaceOp::Append),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            commit
+                .event(
+                    SessionEvent::AssistantChunk {
+                        turn: 1,
+                        step: 1,
+                        chunk: AssistantChunk::OutputTextDelta {
+                            delta: "late".into(),
+                        },
+                    },
+                    vec![],
+                    None,
+                )
+                .await,
+            Err(SessionError::Invalid(_))
+        ));
     }
 
     #[tokio::test]

@@ -424,6 +424,18 @@ impl DesktopApp {
                             this.timeline_mouse_up(event, window, cx)
                         }),
                     )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                            this.timeline_mouse_up(event, window, cx)
+                        }),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                            this.timeline_mouse_up(event, window, cx)
+                        }),
+                    )
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                         this.timeline_wheel(event, window, cx)
                     })),
