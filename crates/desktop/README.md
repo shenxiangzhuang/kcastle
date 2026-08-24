@@ -29,6 +29,11 @@ model and permission choices are defaults for new sessions. Each project persist
 and append-only transactions in a SQLite WAL database in its configured sessions directory; the
 built-in Default project uses `~/.kcastle/sessions/default/sessions.sqlite3`. JSONL is export-only.
 
+Development and isolated acceptance runs can set `KCASTLE_DATA_DIR` to put settings, the project
+registry, and every project session store under a separate data root. An absolute path is
+recommended; a relative path is resolved from the process working directory. The variable must not
+be empty. Normal launches leave it unset and continue to use `~/.kcastle`.
+
 In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
@@ -38,15 +43,19 @@ has fixed Input, Model, and Tools swimlanes. Duration switches equal-width opera
 durations with idle time compressed, matching the DSH desktop surface; complete wall-clock timing
 remains an internal projection. Dragging across the overview focuses the interval, dims operations
 outside it, and scrolls the ledger to the focused records. Scroll to zoom around the pointer,
-right-drag to pan, double-click to clear the focus, or Shift-drag to focus and zoom together. Tool
+right-drag to pan, double-click or press Escape to clear the focus. Tool
 bars distinguish the full call lifecycle from nested execution time; assistant bars distinguish
 TTFT from generation. Hovering a bar restores its full color, outlines it, and reveals the DSH
 timing tooltip after a short delay; hovering empty lane space shows a vertical time cursor. The
 Timing tab uses the same recorded timestamps and can toggle Started
 between local and Unix time. The composer footer summarizes whole-session turn/step counts, LLM and
 tool wall time, average TTFT, decode throughput, cache hit rate, and token usage. Session catalog
-entries that fail validation are ignored by the desktop UI. Timeline mode, focus, viewport, and
-scroll positions are retained independently for each session. Timeline statistics update
+entries that fail validation are ignored by the desktop UI. Request boundary markers open an
+independent Request inspector whose Options, Usage, and Timing tabs use only canonical recorded
+data; System Prompt, Tools, and Tool Schema views share the same immutable request snapshot.
+Trajectory search, folds, selection, details history, focus, viewport, tail-follow state, and scroll
+position are retained independently for each session; Duration mode is a persisted desktop
+preference shared by sessions. Timeline statistics update
 incrementally, while geometry is cached by session, event revision, and mode and then cheaply
 reprojected for the current viewport; Duration coordinates use a merged busy-time index rather
 than rescanning every interval for every item.

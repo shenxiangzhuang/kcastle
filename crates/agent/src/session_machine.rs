@@ -18,6 +18,10 @@ use crate::state::State;
 #[cfg(test)]
 use crate::state::StateEntry;
 
+/// Increment when an existing serialized event sequence can no longer be interpreted with the
+/// same validity and state-transition semantics.
+pub(crate) const SESSION_MACHINE_SEMANTICS_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingInput {
     pub input_id: InputId,

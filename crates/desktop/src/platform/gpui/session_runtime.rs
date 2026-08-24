@@ -10,7 +10,7 @@ use kcastle_agent::{
 };
 
 use crate::domain::session_document::SessionDocument;
-use crate::domain::{ApprovalState, RunId, SessionView, TrajectoryItemId};
+use crate::domain::{ApprovalState, RunId, SessionView};
 use crate::settings::EnterBehavior;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,15 +385,6 @@ impl SessionRuntime {
     pub(crate) fn mark_failed_for_test(&mut self, message: impl Into<String>) {
         debug_assert!(!self.lifecycle.is_active());
         self.lifecycle.fail(message);
-    }
-
-    pub(crate) fn details_raw(&self, id: &TrajectoryItemId) -> String {
-        self.document.details_raw(id).unwrap_or_default()
-    }
-
-    pub(crate) fn details_raw_revision(&self, id: &TrajectoryItemId) -> Option<(usize, u64)> {
-        let source_seqs = self.document.details(id)?.source_seqs;
-        Some((source_seqs.len(), *source_seqs.last()?))
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {

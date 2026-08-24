@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::domain::timeline::AxisRange;
-use crate::domain::{ComposerMenu, DetailsTab, Message, TimelineMode, TrajectoryItemId};
+use crate::domain::{
+    ComposerMenu, DetailsSelection, DetailsTab, Message, TimelineMode, TrajectoryItemId,
+};
 use crate::layout::LayoutInput;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,7 +19,7 @@ pub(crate) enum Action {
     ToggleSidebar,
     ShowChat,
     ShowTrajectory,
-    SelectDetails(Option<TrajectoryItemId>),
+    SelectDetails(Option<DetailsSelection>),
     SetDetailsTab(DetailsTab),
     SetComposerMenu(Option<ComposerMenu>),
     MoveComposerHighlight {
@@ -35,13 +38,15 @@ pub(crate) enum Action {
     SetTimelineMode(TimelineMode),
     SetTimelineSelection(Option<AxisRange>),
     SetTimelineViewport(Option<AxisRange>),
-    ToggleTimelineUnixTime,
-    ToggleTrajectoryTurns,
-    ToggleTrajectoryCalls,
+    ToggleDetailsUnixTime,
+    ToggleTrajectoryTurn(u32),
+    ToggleTrajectoryAssistant(TrajectoryItemId),
+    SetTrajectoryTurnsCollapsed(HashSet<u32>),
+    SetTrajectoryAssistantsCollapsed(HashSet<TrajectoryItemId>),
     ExpandTrajectoryGroups,
     RestoreSessionView {
-        selected: Option<TrajectoryItemId>,
-        details_tab: DetailsTab,
+        selected: Option<DetailsSelection>,
+        details_tab_history: Vec<DetailsTab>,
         follow_chat_tail: bool,
     },
     ActivateWorkspace {

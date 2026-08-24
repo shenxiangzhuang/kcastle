@@ -24,6 +24,8 @@ pub(crate) struct SessionView {
     claimed_message_keys: PersistentHashSet<MessageId>,
     #[cfg(test)]
     materialized_messages: usize,
+    #[cfg(test)]
+    materialized_message_text_bytes: usize,
 }
 
 impl SessionView {
@@ -40,6 +42,8 @@ impl SessionView {
         let revisions = document.revisions();
         let reuse_conversation = previous
             .is_some_and(|previous| previous.conversation_revision == revisions.conversation);
+        #[cfg(test)]
+        let mut materialized_message_text_bytes_delta = 0_usize;
         let messages = if let Some(previous) = previous
             && previous.conversation_revision == revisions.conversation
         {
@@ -67,7 +71,15 @@ impl SessionView {
                         .as_ref()
                         .and_then(|id| trajectory_by_id.get(id).copied());
                     let previous = previous_messages.get(&key).copied();
-                    materialize_message(item, key, ordinals, timing, tool_schemas, previous)
+                    let message =
+                        materialize_message(item, key, ordinals, timing, tool_schemas, previous);
+                    #[cfg(test)]
+                    {
+                        materialized_message_text_bytes_delta =
+                            materialized_message_text_bytes_delta
+                                .saturating_add(projected_message_owned_text_bytes(&message));
+                    }
+                    message
                 })
                 .collect::<Vector<_>>()
         };
@@ -105,6 +117,13 @@ impl SessionView {
                     .saturating_add(messages.len())
             })
         };
+        #[cfg(test)]
+        let materialized_message_text_bytes =
+            previous.map_or(materialized_message_text_bytes_delta, |previous| {
+                previous
+                    .materialized_message_text_bytes
+                    .saturating_add(materialized_message_text_bytes_delta)
+            });
 
         let stats = document.stats();
         let conversation = ConversationState {
@@ -125,6 +144,8 @@ impl SessionView {
             claimed_message_keys,
             #[cfg(test)]
             materialized_messages,
+            #[cfg(test)]
+            materialized_message_text_bytes,
         }
     }
 
@@ -152,6 +173,8 @@ impl SessionView {
             return Self::from_document(document, title, tool_schemas, Some(previous));
         };
         let mut materialized = 0_usize;
+        #[cfg(test)]
+        let mut materialized_message_text_bytes = 0_usize;
         for id in appended {
             let Some(item) = document.conversation_by_id(id) else {
                 return Self::from_document(document, title, tool_schemas, Some(previous));
@@ -161,6 +184,11 @@ impl SessionView {
                 .as_ref()
                 .and_then(|trajectory_id| trajectory.record_by_id(trajectory_id));
             let message = materialize_message(item, key, ordinals, timing, tool_schemas, None);
+            #[cfg(test)]
+            {
+                materialized_message_text_bytes = materialized_message_text_bytes
+                    .saturating_add(projected_message_owned_text_bytes(&message));
+            }
             conversation_indices.insert(id.clone(), messages.len());
             messages.push_back(message);
             materialized = materialized.saturating_add(1);
@@ -190,6 +218,11 @@ impl SessionView {
                 tool_schemas,
                 prior,
             );
+            #[cfg(test)]
+            {
+                materialized_message_text_bytes = materialized_message_text_bytes
+                    .saturating_add(projected_message_owned_text_bytes(&message));
+            }
             materialized = materialized.saturating_add(1);
             messages.set(index, message);
         }
@@ -213,12 +246,21 @@ impl SessionView {
             claimed_message_keys,
             #[cfg(test)]
             materialized_messages: previous.materialized_messages.saturating_add(materialized),
+            #[cfg(test)]
+            materialized_message_text_bytes: previous
+                .materialized_message_text_bytes
+                .saturating_add(materialized_message_text_bytes),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn materialized_messages(&self) -> usize {
         self.materialized_messages
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_message_text_bytes(&self) -> usize {
+        self.materialized_message_text_bytes
     }
 }
 
@@ -322,6 +364,18 @@ fn materialize_message(
         message.revision = previous.revision.saturating_add(1);
     }
     Arc::new(message)
+}
+
+#[cfg(test)]
+fn projected_message_owned_text_bytes(message: &Message) -> usize {
+    message
+        .title
+        .as_deref()
+        .map_or(0, str::len)
+        .saturating_add(message.text.len())
+        .saturating_add(message.payload.as_deref().map_or(0, str::len))
+        .saturating_add(message.schema.as_deref().map_or(0, str::len))
+        .saturating_add(message.search_text.len())
 }
 
 #[cfg(test)]
@@ -680,5 +734,112 @@ mod tests {
         {
             assert!(same_canonical_message(incremental, full));
         }
+    }
+
+    #[test]
+    fn ten_thousand_chunks_do_not_duplicate_large_search_prefixes() {
+        const CHUNKS: usize = 10_000;
+        const CHUNK: &str = "0123456789";
+        const BODY_BYTES: usize = CHUNKS * CHUNK.len();
+
+        let run_id = RunId::from("copy-work-run");
+        let turn_id = TurnId::from("copy-work-turn");
+        let step_id = StepId::from("copy-work-step");
+        let request_id = RequestId::from("copy-work-request");
+        let mut document = SessionDocument::from_events(vec![
+            recorded(
+                0,
+                SessionEvent::RunStarted {
+                    run_id: run_id.clone(),
+                },
+            ),
+            recorded(
+                1,
+                SessionEvent::TurnStarted {
+                    run_id,
+                    turn_id: turn_id.clone(),
+                },
+            ),
+            recorded(
+                2,
+                SessionEvent::StepStarted {
+                    turn_id,
+                    step_id: step_id.clone(),
+                },
+            ),
+            recorded(
+                3,
+                SessionEvent::RequestSnapshot {
+                    request_id: request_id.clone(),
+                    step_id,
+                    reason: RequestHeaderReason::Initial,
+                    model: "fixture".to_owned(),
+                    instructions: None,
+                    tools: Vec::new(),
+                    reasoning_effort: None,
+                    max_output_tokens: None,
+                    session_config: SessionConfig::default(),
+                },
+            ),
+            recorded(
+                4,
+                SessionEvent::ModelRequestStarted {
+                    request_id: request_id.clone(),
+                },
+            ),
+        ])
+        .unwrap();
+        let schemas = HashMap::new();
+        let previous = SessionView::from_document(&document, "Copy work", &schemas, None);
+        let record_bytes_before = previous.trajectory.materialized_record_text_bytes();
+        let message_bytes_before = previous.materialized_message_text_bytes();
+        let first_seq = document.cursor().next_seq;
+        let batch = (0..CHUNKS)
+            .map(|index| {
+                recorded(
+                    first_seq.saturating_add(u64::try_from(index).unwrap()),
+                    SessionEvent::AssistantChunk {
+                        request_id: request_id.clone(),
+                        chunk: AssistantChunk::OutputTextDelta {
+                            delta: CHUNK.to_owned(),
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        let delta = document.apply_batch(batch).unwrap();
+        let current = SessionView::after_delta(&document, &delta, "Copy work", &schemas, &previous);
+        let record = current
+            .trajectory
+            .records
+            .iter()
+            .find(|record| record.kind == crate::domain::TrajectoryKind::Assistant)
+            .unwrap();
+        let message = current
+            .conversation
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Assistant)
+            .unwrap();
+        let copied_projection_text = current
+            .trajectory
+            .materialized_record_text_bytes()
+            .saturating_sub(record_bytes_before)
+            .saturating_add(
+                current
+                    .materialized_message_text_bytes()
+                    .saturating_sub(message_bytes_before),
+            );
+
+        assert_eq!(record.text.len(), BODY_BYTES);
+        assert_eq!(message.text.len(), BODY_BYTES);
+        assert!(record.matches("0123456789"));
+        assert!(record.search_text.len() < 128);
+        assert!(message.search_text.is_empty());
+        assert!(
+            copied_projection_text <= BODY_BYTES.saturating_mul(2).saturating_add(512),
+            "one publication may own only the conversation and trajectory body copies; copied {copied_projection_text} bytes for a {BODY_BYTES}-byte response"
+        );
     }
 }

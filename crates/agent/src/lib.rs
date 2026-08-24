@@ -28,6 +28,8 @@ pub use session_event::{
     ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnEndReason, TurnId, TxId,
 };
 pub use session_machine::{PendingInput, PlannedBatch, SessionMachine, SessionMachineError};
-pub use session_store::{CommitReceipt, SESSION_DATABASE_FILE, SessionStoreError};
+pub use session_store::{
+    CommitReceipt, SESSION_DATABASE_FILE, SessionErrorClass, SessionStoreError,
+};
 pub use state::{ResponseMetadata, State, StateEntry, TranscriptItem};
 pub use tool::{AgentTool, Env, ShellTool, ToolResult};

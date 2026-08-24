@@ -11,7 +11,7 @@ use crate::session_event::RecordedEvent;
 use crate::session_machine::{PendingInput, SessionMachine, SessionMachineError};
 use crate::session_store::{
     ArchiveFilter, CreateStoredSession, LoadedSession, MetadataUpdate, SESSION_DATABASE_FILE,
-    SessionStore, SessionStoreError, StoredSessionMetadata,
+    SessionErrorClass, SessionStore, SessionStoreError, StoredSessionMetadata, classify_io_error,
 };
 use crate::state::State;
 
@@ -31,6 +31,22 @@ pub enum SessionError {
     Invalid(String),
     #[error("unsupported session format {found}; expected {expected}")]
     UnsupportedFormat { found: u32, expected: u32 },
+}
+
+impl SessionError {
+    pub fn classification(&self) -> SessionErrorClass {
+        match self {
+            Self::Store(error) => error.classification(),
+            Self::Machine(_) | Self::Invalid(_) | Self::UnsupportedFormat { .. } => {
+                SessionErrorClass::DeterministicInvalid
+            }
+            Self::Io(error) => classify_io_error(error),
+        }
+    }
+
+    pub fn is_deterministic_invalid(&self) -> bool {
+        self.classification() == SessionErrorClass::DeterministicInvalid
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,6 +727,36 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, SessionError::Invalid(_)));
+    }
+
+    #[test]
+    fn session_error_classification_preserves_transient_io_and_invalid_history() {
+        let transient = SessionError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "temporary storage timeout",
+        ));
+        assert_eq!(transient.classification(), SessionErrorClass::Transient);
+
+        let invalid = SessionError::Store(SessionStoreError::Corrupt("bad journal".into()));
+        assert!(invalid.is_deterministic_invalid());
+    }
+
+    #[test]
+    fn a_non_database_catalog_is_deterministically_invalid() {
+        let directory = temp_directory("corrupt-catalog");
+        fs::write(
+            directory.join(SESSION_DATABASE_FILE),
+            b"not a sqlite database",
+        )
+        .unwrap();
+
+        let error = Session::catalog_in_project(&directory, "project-a").unwrap_err();
+        assert_eq!(
+            error.classification(),
+            SessionErrorClass::DeterministicInvalid
+        );
+
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

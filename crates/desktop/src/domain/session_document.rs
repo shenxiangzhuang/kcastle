@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use kcastle_agent::{
     AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
-    RequestHeaderReason, RequestId, SessionEvent, StepId, StepOutcome, TokenUsage,
-    ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnId,
+    RequestHeaderReason, RequestId, RunId, SessionConfig, SessionEvent, StepId, StepOutcome,
+    TokenUsage, ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnId,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -14,6 +15,7 @@ pub(crate) struct SessionDocument {
     graph: ExecutionGraph,
     conversation_order: Vec<ConversationItemId>,
     trajectory_order: Vec<TrajectoryItemId>,
+    request_order: Vec<TrajectoryRequestKey>,
     display_ordinals: DisplayOrdinals,
     stats: SessionStats,
     revisions: ProjectionRevisions,
@@ -85,20 +87,26 @@ pub(crate) struct ProjectionRevisions {
     pub(crate) document: u64,
     pub(crate) conversation: u64,
     pub(crate) trajectory: u64,
+    pub(crate) requests: u64,
     pub(crate) geometry: u64,
     pub(crate) stats: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ExecutionGraph {
+    active_step: Option<StepId>,
     steps: HashMap<StepId, StepNode>,
     inputs: HashMap<InputId, InputNode>,
     requests: HashMap<RequestId, ResponseNode>,
+    /// First model/tool trajectory record owned by each step. All provider
+    /// attempts in one step share this presentation boundary, including a
+    /// failed attempt followed by a successful retry.
+    request_boundary_by_step: HashMap<StepId, TrajectoryItemId>,
     tools: HashMap<CallId, ToolNode>,
+    tools_by_request: HashMap<RequestId, Vec<CallId>>,
     compactions: HashMap<CompactionId, CompactionNode>,
     prompts: HashMap<u64, PromptNode>,
-    failures: HashMap<StepId, RequestFailureNode>,
-    last_prompt: Option<PromptSnapshot>,
+    last_prompt: Option<Arc<PromptSnapshot>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +152,8 @@ struct ToolCallMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResponseNode {
     step_id: StepId,
+    options: Arc<ModelRequestOptions>,
+    prompt: Arc<PromptSnapshot>,
     segments: Vec<ResponseSegment>,
     active_segment: Option<usize>,
     combined_text: String,
@@ -154,12 +164,16 @@ struct ResponseNode {
     visible: bool,
     timing: TimingMetrics,
     usage: Option<TokenUsage>,
+    response_id: Option<Arc<str>>,
+    response_model: Option<Arc<str>>,
+    error: Option<Arc<str>>,
     source_seqs: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolNode {
     request_id: RequestId,
+    parent_call_id: Option<CallId>,
     name: String,
     arguments: String,
     output: String,
@@ -170,17 +184,78 @@ struct ToolNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CompactionNode {
+    run_id: RunId,
+    owner_step_id: Option<StepId>,
+    tokens_before: usize,
+    first_kept_id: u64,
     summary: String,
     usage: Option<TokenUsage>,
+    response_id: Option<Arc<str>>,
+    response_model: Option<Arc<str>>,
     status: ItemStatus,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
 }
 
+/// Exact ordinary-provider request header committed by `RequestSnapshot`.
+///
+/// This deliberately preserves the recorded values without manufacturing a
+/// provider, retry policy, sampling temperature, or any other field which is
+/// absent from the durable event contract.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct PromptSnapshot {
-    instructions: String,
-    tools_json: String,
+pub(crate) struct ModelRequestOptions {
+    pub(crate) reason: RequestHeaderReason,
+    pub(crate) model: Arc<str>,
+    pub(crate) reasoning_effort: Option<Arc<str>>,
+    pub(crate) max_output_tokens: Option<u32>,
+    pub(crate) session_config: SessionConfig,
+}
+
+/// One immutable provider prompt payload shared by its request, prompt-change
+/// record, and every tool relation derived from that request. Tool schemas are
+/// byte ranges into `tools_json`, so inspecting an individual schema never
+/// duplicates the (potentially large) catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PromptSnapshot {
+    instructions: Arc<str>,
+    tools_json: Arc<str>,
+    tool_schemas: Arc<[PromptToolSchema]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PromptToolSchema {
+    name: Option<Arc<str>>,
+    json_range: std::ops::Range<usize>,
+}
+
+impl PromptSnapshot {
+    pub(crate) fn instructions(&self) -> &str {
+        &self.instructions
+    }
+
+    pub(crate) fn tools_json(&self) -> &str {
+        &self.tools_json
+    }
+
+    pub(crate) fn tool_count(&self) -> usize {
+        self.tool_schemas.len()
+    }
+
+    pub(crate) fn tool_schemas(&self) -> impl ExactSizeIterator<Item = (Option<&str>, &str)> + '_ {
+        self.tool_schemas.iter().map(|schema| {
+            (
+                schema.name.as_deref(),
+                &self.tools_json[schema.json_range.clone()],
+            )
+        })
+    }
+
+    pub(crate) fn tool_schema(&self, name: &str) -> Option<&str> {
+        self.tool_schemas
+            .iter()
+            .find(|schema| schema.name.as_deref() == Some(name))
+            .and_then(|schema| self.tools_json.get(schema.json_range.clone()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,14 +271,8 @@ struct PromptNode {
     step_id: StepId,
     kind: PromptChangeKind,
     summary: String,
-    instructions: String,
-    timing: TimingMetrics,
-    source_seqs: Vec<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RequestFailureNode {
-    error: String,
+    current: Arc<PromptSnapshot>,
+    previous: Option<Arc<PromptSnapshot>>,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
 }
@@ -357,7 +426,21 @@ pub(crate) enum TrajectoryItemId {
     Assistant(RequestId),
     Tool(CallId),
     Compaction(CompactionId),
-    RequestFailure(StepId),
+}
+
+/// Stable identity of one provider operation represented in the trajectory.
+/// Ordinary model generation and compaction share one session-global order,
+/// while retaining their native durable IDs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum TrajectoryRequestKey {
+    Model(RequestId),
+    Compaction(CompactionId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrajectoryRequestPurpose {
+    Assistant,
+    Compaction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -387,7 +470,6 @@ pub(crate) enum TrajectoryKind {
     Assistant,
     Tool,
     Compaction,
-    RequestFailure,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +510,56 @@ pub(crate) struct TrajectoryItemView<'a> {
     pub(crate) turn_id: Option<&'a TurnId>,
     pub(crate) step_id: Option<&'a StepId>,
     pub(crate) source_seqs: &'a [u64],
+    pub(crate) details: TrajectoryItemDetailsView<'a>,
+}
+
+/// Relationships which are durable but do not belong in a row's compact
+/// summary. The immutable trajectory projection materializes this separately,
+/// preserving valid combinations rather than a collection of unrelated
+/// optional fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum TrajectoryItemDetailsView<'a> {
+    #[default]
+    None,
+    PromptChange {
+        kind: PromptChangeKind,
+        current: &'a Arc<PromptSnapshot>,
+        previous: Option<&'a Arc<PromptSnapshot>>,
+    },
+    Tool {
+        request_id: &'a RequestId,
+        parent_call_id: Option<&'a CallId>,
+        prompt: &'a Arc<PromptSnapshot>,
+        schema_name: &'a str,
+    },
+}
+
+/// Borrowed canonical request selector. Presentation projections own the
+/// materialized strings, ordinal labels, and cumulative usage derived from this
+/// view; the execution graph remains the only durable-content read model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RequestItemView<'a> {
+    pub(crate) key: &'a TrajectoryRequestKey,
+    pub(crate) purpose: TrajectoryRequestPurpose,
+    pub(crate) source_seq: u64,
+    pub(crate) status: ItemStatus,
+    pub(crate) error: Option<&'a str>,
+    pub(crate) turn_id: Option<&'a TurnId>,
+    pub(crate) step_id: Option<&'a StepId>,
+    pub(crate) anchor: Option<TrajectoryItemId>,
+    pub(crate) result: Option<TrajectoryItemId>,
+    pub(crate) options: Option<&'a Arc<ModelRequestOptions>>,
+    pub(crate) prompt: Option<&'a Arc<PromptSnapshot>>,
+    pub(crate) response_id: Option<&'a str>,
+    pub(crate) response_model: Option<&'a str>,
+    pub(crate) timing: &'a TimingMetrics,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) tool_call_count: usize,
+    pub(crate) subtool_call_count: usize,
+    pub(crate) compaction_run_id: Option<&'a RunId>,
+    pub(crate) compaction_tokens_before: Option<usize>,
+    pub(crate) compaction_first_kept_id: Option<u64>,
+    pub(crate) source_seqs: &'a [u64],
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -436,8 +568,10 @@ pub(crate) struct ProjectionDelta {
     pub(crate) last_seq: Option<u64>,
     pub(crate) changed_conversation: Vec<ConversationItemId>,
     pub(crate) changed_trajectory: Vec<TrajectoryItemId>,
+    pub(crate) changed_requests: Vec<TrajectoryRequestKey>,
     pub(crate) conversation_order: OrderMutation,
     pub(crate) trajectory_order: OrderMutation,
+    pub(crate) request_order: OrderMutation,
     pub(crate) geometry_changed: bool,
     pub(crate) stats_changed: bool,
     pub(crate) revisions: ProjectionRevisions,
@@ -500,9 +634,11 @@ impl std::error::Error for ProjectionError {}
 struct EventChanges {
     conversation: Vec<ConversationItemId>,
     trajectory: Vec<TrajectoryItemId>,
+    requests: Vec<TrajectoryRequestKey>,
     ordinal_context: Vec<TrajectoryItemId>,
     conversation_order: OrderMutation,
     trajectory_order: OrderMutation,
+    request_order: OrderMutation,
     geometry: bool,
     stats: bool,
 }
@@ -556,6 +692,7 @@ impl SessionDocument {
         let mut delta = ProjectionDelta::default();
         let mut changed_conversation = HashSet::new();
         let mut changed_trajectory = HashSet::new();
+        let mut changed_requests = HashSet::new();
         for recorded in events {
             delta.first_seq.get_or_insert(recorded.seq);
             delta.last_seq = Some(recorded.seq);
@@ -564,6 +701,7 @@ impl SessionDocument {
                 &mut delta,
                 &mut changed_conversation,
                 &mut changed_trajectory,
+                &mut changed_requests,
             );
             self.events.push(recorded);
             self.cursor.next_seq = self.cursor.next_seq.saturating_add(1);
@@ -602,32 +740,22 @@ impl SessionDocument {
         &self.trajectory_order
     }
 
+    pub(crate) fn request_ids(&self) -> &[TrajectoryRequestKey] {
+        &self.request_order
+    }
+
+    pub(crate) fn request_by_key<'a>(
+        &'a self,
+        key: &'a TrajectoryRequestKey,
+    ) -> Option<RequestItemView<'a>> {
+        self.request_item(key)
+    }
+
     pub(crate) fn trajectory_by_id<'a>(
         &'a self,
         id: &'a TrajectoryItemId,
     ) -> Option<TrajectoryItemView<'a>> {
         self.trajectory_item(id)
-    }
-
-    pub(crate) fn details<'a>(
-        &'a self,
-        id: &'a TrajectoryItemId,
-    ) -> Option<TrajectoryItemView<'a>> {
-        self.trajectory_item(id)
-    }
-
-    pub(crate) fn details_raw(&self, id: &TrajectoryItemId) -> Option<String> {
-        let source_seqs = self.details(id)?.source_seqs;
-        let mut raw = Vec::with_capacity(source_seqs.len());
-        for seq in source_seqs {
-            let event = usize::try_from(*seq)
-                .ok()
-                .and_then(|index| self.events.get(index))
-                .filter(|event| event.seq == *seq)
-                .or_else(|| self.events.iter().find(|event| event.seq == *seq))?;
-            raw.push(serde_json::to_string_pretty(event).ok()?);
-        }
-        Some(raw.join("\n"))
     }
 
     fn apply_recorded(
@@ -636,10 +764,12 @@ impl SessionDocument {
         delta: &mut ProjectionDelta,
         changed_conversation: &mut HashSet<ConversationItemId>,
         changed_trajectory: &mut HashSet<TrajectoryItemId>,
+        changed_requests: &mut HashSet<TrajectoryRequestKey>,
     ) {
         let stats_before = self.stats;
         let mut changes = EventChanges::default();
         self.apply_event(recorded, &mut changes);
+        self.observe_request_boundaries(&mut changes);
         let mut ordinal_ids = changes.ordinal_context.clone();
         if changes.trajectory_order.changed() {
             ordinal_ids.extend(changes.trajectory.iter().cloned());
@@ -667,6 +797,9 @@ impl SessionDocument {
         if !changes.trajectory.is_empty() || changes.trajectory_order.changed() {
             self.revisions.trajectory = self.revisions.trajectory.saturating_add(1);
         }
+        if !changes.requests.is_empty() || changes.request_order.changed() {
+            self.revisions.requests = self.revisions.requests.saturating_add(1);
+        }
         if changes.geometry {
             self.revisions.geometry = self.revisions.geometry.saturating_add(1);
         }
@@ -684,10 +817,55 @@ impl SessionDocument {
                 delta.changed_trajectory.push(id);
             }
         }
+        for key in changes.requests {
+            if changed_requests.insert(key.clone()) {
+                delta.changed_requests.push(key);
+            }
+        }
         delta.conversation_order.merge(changes.conversation_order);
         delta.trajectory_order.merge(changes.trajectory_order);
+        delta.request_order.merge(changes.request_order);
         delta.geometry_changed |= changes.geometry;
         delta.stats_changed |= changes.stats;
+    }
+
+    /// Maintain the step-to-request-boundary relation while applying the same
+    /// event that introduces a trajectory record. Looking up a request's
+    /// boundary is consequently O(1) and never scans trajectory history.
+    fn observe_request_boundaries(&mut self, changes: &mut EventChanges) {
+        let changed_len = changes.trajectory.len();
+        for index in 0..changed_len {
+            let candidate = {
+                let id = &changes.trajectory[index];
+                self.trajectory_item(id).and_then(|item| {
+                    if !matches!(item.kind, TrajectoryKind::Assistant | TrajectoryKind::Tool) {
+                        return None;
+                    }
+                    item.step_id.map(|step_id| (step_id.clone(), id.clone()))
+                })
+            };
+            let Some((step_id, id)) = candidate else {
+                continue;
+            };
+            let inserted = match self.graph.request_boundary_by_step.entry(step_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(id);
+                    true
+                }
+                std::collections::hash_map::Entry::Occupied(_) => false,
+            };
+            if inserted {
+                changes.requests.extend(
+                    self.graph
+                        .steps
+                        .get(&step_id)
+                        .into_iter()
+                        .flat_map(|step| step.request_ids.iter())
+                        .cloned()
+                        .map(TrajectoryRequestKey::Model),
+                );
+            }
+        }
     }
 
     fn apply_event(&mut self, recorded: &RecordedEvent, changes: &mut EventChanges) {
@@ -701,6 +879,9 @@ impl SessionDocument {
                 self.stats.turns = self.stats.turns.saturating_add(1);
             }
             SessionEvent::StepStarted { turn_id, step_id } => {
+                self.graph.active_step = Some(step_id.clone());
+                self.display_ordinals
+                    .observe(Some(turn_id.clone()), Some(step_id.clone()));
                 self.graph.steps.insert(
                     step_id.clone(),
                     StepNode {
@@ -725,59 +906,41 @@ impl SessionDocument {
                     .clone();
 
                 let terminal_status = status_from_step_outcome(*outcome);
-                let mut has_visible_response = false;
                 for request_id in request_ids {
+                    changes
+                        .requests
+                        .push(TrajectoryRequestKey::Model(request_id.clone()));
                     let response = self
                         .graph
                         .requests
                         .get_mut(&request_id)
                         .expect("step request is indexed");
-                    has_visible_response |= response.visible;
-                    if response.visible && response.status != ItemStatus::Completed {
+                    if response.status != ItemStatus::Completed {
                         response.status = terminal_status;
+                        if response.error.is_none() {
+                            response.error = error.as_deref().map(Arc::from);
+                        }
+                        if response.timing.completed.is_none() {
+                            response.timing.completed = Some(EventTimeRef::from(time));
+                        }
                         response.source_seqs.push(seq);
-                        changes
-                            .trajectory
-                            .push(TrajectoryItemId::Assistant(request_id.clone()));
-                        for segment in &response.segments {
+                        if response.visible {
                             changes
-                                .conversation
-                                .push(ConversationItemId::ResponseSegment {
-                                    request_id: request_id.clone(),
-                                    ordinal: segment.ordinal,
-                                });
+                                .trajectory
+                                .push(TrajectoryItemId::Assistant(request_id.clone()));
+                            for segment in &response.segments {
+                                changes
+                                    .conversation
+                                    .push(ConversationItemId::ResponseSegment {
+                                        request_id: request_id.clone(),
+                                        ordinal: segment.ordinal,
+                                    });
+                            }
                         }
                     }
                 }
-                if !has_visible_response && !matches!(outcome, StepOutcome::Completed) {
-                    let failure_id = TrajectoryItemId::RequestFailure(step_id.clone());
-                    if let Some(failure) = self.graph.failures.get_mut(step_id) {
-                        failure.source_seqs.push(seq);
-                        changes.trajectory.push(failure_id);
-                    } else {
-                        self.graph.failures.insert(
-                            step_id.clone(),
-                            RequestFailureNode {
-                                error: error
-                                    .clone()
-                                    .unwrap_or_else(|| "model request did not complete".to_owned()),
-                                timing: TimingMetrics {
-                                    started: self
-                                        .graph
-                                        .steps
-                                        .get(step_id)
-                                        .map(|step| EventTimeRef::from(&step.started)),
-                                    completed: Some(EventTimeRef::from(time)),
-                                    ..TimingMetrics::default()
-                                },
-                                source_seqs: vec![seq],
-                            },
-                        );
-                        self.trajectory_order.push(failure_id.clone());
-                        changes.trajectory.push(failure_id);
-                        changes.trajectory_order.append();
-                        changes.geometry = true;
-                    }
+                if self.graph.active_step.as_ref() == Some(step_id) {
+                    self.graph.active_step = None;
                 }
             }
             SessionEvent::InputSubmitted {
@@ -839,12 +1002,32 @@ impl SessionDocument {
                 model,
                 instructions,
                 tools,
-                ..
+                reasoning_effort,
+                max_output_tokens,
+                session_config,
             } => {
+                let prompt = materialize_prompt_snapshot(instructions.as_deref(), tools);
+                let previous_prompt = self.graph.last_prompt.clone();
+                let prompt = previous_prompt
+                    .as_ref()
+                    .filter(|previous| previous.as_ref() == prompt.as_ref())
+                    .cloned()
+                    .unwrap_or(prompt);
+                let prompt_kind =
+                    prompt_change_kind(previous_prompt.as_deref(), prompt.as_ref(), *reason);
+                let options = Arc::new(ModelRequestOptions {
+                    reason: *reason,
+                    model: Arc::from(model.as_str()),
+                    reasoning_effort: reasoning_effort.as_deref().map(Arc::from),
+                    max_output_tokens: *max_output_tokens,
+                    session_config: session_config.clone(),
+                });
                 self.graph.requests.insert(
                     request_id.clone(),
                     ResponseNode {
                         step_id: step_id.clone(),
+                        options,
+                        prompt: Arc::clone(&prompt),
                         segments: Vec::new(),
                         active_segment: None,
                         combined_text: String::new(),
@@ -855,6 +1038,9 @@ impl SessionDocument {
                         visible: false,
                         timing: TimingMetrics::default(),
                         usage: None,
+                        response_id: None,
+                        response_model: None,
+                        error: None,
                         source_seqs: vec![seq],
                     },
                 );
@@ -864,14 +1050,12 @@ impl SessionDocument {
                     .expect("request step was validated")
                     .request_ids
                     .push(request_id.clone());
+                let request_key = TrajectoryRequestKey::Model(request_id.clone());
+                self.request_order.push(request_key.clone());
+                changes.requests.push(request_key);
+                changes.request_order.append();
 
-                let current_prompt = PromptSnapshot {
-                    instructions: instructions.clone().unwrap_or_default(),
-                    tools_json: serde_json::to_string(tools).unwrap_or_else(|_| "[]".to_owned()),
-                };
-                let prompt_kind =
-                    prompt_change_kind(self.graph.last_prompt.as_ref(), &current_prompt, *reason);
-                self.graph.last_prompt = Some(current_prompt.clone());
+                self.graph.last_prompt = Some(Arc::clone(&prompt));
                 if let Some(kind) = prompt_kind {
                     let id = TrajectoryItemId::PromptChange(seq);
                     self.graph.prompts.insert(
@@ -880,7 +1064,8 @@ impl SessionDocument {
                             step_id: step_id.clone(),
                             kind,
                             summary: format!("{model} · {} tools", tools.len()),
-                            instructions: current_prompt.instructions,
+                            current: Arc::clone(&prompt),
+                            previous: previous_prompt,
                             timing: point_timing(time),
                             source_seqs: vec![seq],
                         },
@@ -909,6 +1094,9 @@ impl SessionDocument {
                 // time is double-counted as both compaction and model time.
                 response.timing.started = Some(EventTimeRef::from(time));
                 response.source_seqs.push(seq);
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Model(request_id.clone()));
             }
             SessionEvent::ModelRequestFailed { request_id, error } => {
                 let before = response_contribution(
@@ -917,27 +1105,23 @@ impl SessionDocument {
                         .get(request_id)
                         .expect("model request failure was validated"),
                 );
-                let (step_id, was_visible, segment_ids, timing) = {
+                let (was_visible, segment_ids) = {
                     let response = self
                         .graph
                         .requests
                         .get_mut(request_id)
                         .expect("model request failure was validated");
                     response.status = ItemStatus::Failed;
+                    response.error = Some(Arc::from(error.as_str()));
+                    response.timing.completed = Some(EventTimeRef::from(time));
                     response.source_seqs.push(seq);
                     (
-                        response.step_id.clone(),
                         response.visible,
                         response
                             .segments
                             .iter()
                             .map(|segment| segment.ordinal)
                             .collect::<Vec<_>>(),
-                        TimingMetrics {
-                            started: response.timing.started.clone(),
-                            completed: Some(EventTimeRef::from(time)),
-                            ..TimingMetrics::default()
-                        },
                     )
                 };
                 let after = response_contribution(
@@ -947,8 +1131,12 @@ impl SessionDocument {
                         .expect("model request failure was validated"),
                 );
                 self.stats.replace_contribution(before, after);
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Model(request_id.clone()));
 
                 if was_visible {
+                    changes.geometry = true;
                     changes
                         .trajectory
                         .push(TrajectoryItemId::Assistant(request_id.clone()));
@@ -960,20 +1148,6 @@ impl SessionDocument {
                                 ordinal,
                             });
                     }
-                } else if !self.graph.failures.contains_key(&step_id) {
-                    let id = TrajectoryItemId::RequestFailure(step_id.clone());
-                    self.graph.failures.insert(
-                        step_id.clone(),
-                        RequestFailureNode {
-                            error: error.clone(),
-                            timing,
-                            source_seqs: vec![seq],
-                        },
-                    );
-                    self.trajectory_order.push(id.clone());
-                    changes.trajectory.push(id);
-                    changes.trajectory_order.append();
-                    changes.geometry = true;
                 }
             }
             SessionEvent::AssistantChunk { request_id, chunk } => {
@@ -1069,6 +1243,9 @@ impl SessionDocument {
                         .expect("assistant chunk was validated"),
                 );
                 self.stats.replace_contribution(before, after);
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Model(request_id.clone()));
 
                 if let Some((ordinal, created)) = conversation_change {
                     let id = ConversationItemId::ResponseSegment {
@@ -1145,6 +1322,9 @@ impl SessionDocument {
                     response.tool_payload =
                         format_tool_payload(&response.tool_calls, &response.tool_call_order);
                     response.usage = response_info.usage.or(response.usage);
+                    response.response_id = Some(Arc::from(response_info.id.as_str()));
+                    response.response_model = Some(Arc::from(response_info.model.as_str()));
+                    response.error = None;
                     response.status = ItemStatus::Completed;
                     response.timing.completed = Some(EventTimeRef::from(time));
                     reconcile_completed_segments(response, items, seq);
@@ -1165,6 +1345,9 @@ impl SessionDocument {
                         .expect("assistant completion was validated"),
                 );
                 self.stats.replace_contribution(before, after);
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Model(request_id.clone()));
 
                 if old_segment_ids != segment_ids {
                     if old_segment_ids.is_empty() {
@@ -1236,8 +1419,11 @@ impl SessionDocument {
             SessionEvent::ToolCallRequested {
                 request_id,
                 call_id,
-                ..
+                parent_call_id,
             } => {
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Model(request_id.clone()));
                 let (became_visible, placeholder, metadata) = {
                     let response = self
                         .graph
@@ -1295,10 +1481,16 @@ impl SessionDocument {
                     mut source_seqs,
                 } = metadata;
                 source_seqs.push(seq);
+                self.graph
+                    .tools_by_request
+                    .entry(request_id.clone())
+                    .or_default()
+                    .push(call_id.clone());
                 self.graph.tools.insert(
                     call_id.clone(),
                     ToolNode {
                         request_id: request_id.clone(),
+                        parent_call_id: parent_call_id.clone(),
                         name,
                         arguments,
                         output: String::new(),
@@ -1430,12 +1622,23 @@ impl SessionDocument {
                     .push(TrajectoryItemId::Tool(call_id.clone()));
                 changes.geometry = true;
             }
-            SessionEvent::CompactionStarted { compaction_id, .. } => {
+            SessionEvent::CompactionStarted {
+                compaction_id,
+                run_id,
+                tokens_before,
+                first_kept_id,
+            } => {
                 self.graph.compactions.insert(
                     compaction_id.clone(),
                     CompactionNode {
+                        run_id: run_id.clone(),
+                        owner_step_id: self.graph.active_step.clone(),
+                        tokens_before: *tokens_before,
+                        first_kept_id: *first_kept_id,
                         summary: String::new(),
                         usage: None,
+                        response_id: None,
+                        response_model: None,
                         status: ItemStatus::Running,
                         timing: TimingMetrics {
                             started: Some(EventTimeRef::from(time)),
@@ -1444,6 +1647,10 @@ impl SessionDocument {
                         source_seqs: vec![seq],
                     },
                 );
+                let request_key = TrajectoryRequestKey::Compaction(compaction_id.clone());
+                self.request_order.push(request_key.clone());
+                changes.requests.push(request_key);
+                changes.request_order.append();
                 let conversation_id = ConversationItemId::Compaction(compaction_id.clone());
                 let trajectory_id = TrajectoryItemId::Compaction(compaction_id.clone());
                 self.conversation_order.push(conversation_id.clone());
@@ -1467,6 +1674,12 @@ impl SessionDocument {
                     .expect("compaction finish was validated");
                 compaction.summary = summary.clone().unwrap_or_default();
                 compaction.usage = response.as_ref().and_then(|response| response.usage);
+                compaction.response_id = response
+                    .as_ref()
+                    .map(|response| Arc::from(response.id.as_str()));
+                compaction.response_model = response
+                    .as_ref()
+                    .map(|response| Arc::from(response.model.as_str()));
                 compaction.status = status_from_step_outcome(*outcome);
                 compaction.timing.completed = Some(EventTimeRef::from(time));
                 compaction.source_seqs.push(seq);
@@ -1476,6 +1689,9 @@ impl SessionDocument {
                 changes
                     .trajectory
                     .push(TrajectoryItemId::Compaction(compaction_id.clone()));
+                changes
+                    .requests
+                    .push(TrajectoryRequestKey::Compaction(compaction_id.clone()));
                 changes.geometry = true;
             }
         }
@@ -1483,6 +1699,90 @@ impl SessionDocument {
 }
 
 impl SessionDocument {
+    fn request_item<'a>(&'a self, key: &'a TrajectoryRequestKey) -> Option<RequestItemView<'a>> {
+        match key {
+            TrajectoryRequestKey::Model(request_id) => {
+                let response = self.graph.requests.get(request_id)?;
+                let (tool_call_count, subtool_call_count) = self
+                    .graph
+                    .tools_by_request
+                    .get(request_id)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|call_id| self.graph.tools.get(call_id))
+                    .fold((0_usize, 0_usize), |(root, nested), tool| {
+                        if tool.parent_call_id.is_some() {
+                            (root, nested.saturating_add(1))
+                        } else {
+                            (root.saturating_add(1), nested)
+                        }
+                    });
+                let result = response
+                    .visible
+                    .then(|| TrajectoryItemId::Assistant(request_id.clone()));
+                let anchor = self
+                    .graph
+                    .request_boundary_by_step
+                    .get(&response.step_id)
+                    .cloned();
+                Some(RequestItemView {
+                    key,
+                    purpose: TrajectoryRequestPurpose::Assistant,
+                    source_seq: response.source_seqs.first().copied().unwrap_or_default(),
+                    status: response.status,
+                    error: response.error.as_deref(),
+                    turn_id: self.turn_for_step(&response.step_id),
+                    step_id: Some(&response.step_id),
+                    result,
+                    anchor,
+                    options: Some(&response.options),
+                    prompt: Some(&response.prompt),
+                    response_id: response.response_id.as_deref(),
+                    response_model: response.response_model.as_deref(),
+                    timing: &response.timing,
+                    usage: response.usage,
+                    tool_call_count,
+                    subtool_call_count,
+                    compaction_run_id: None,
+                    compaction_tokens_before: None,
+                    compaction_first_kept_id: None,
+                    source_seqs: &response.source_seqs,
+                })
+            }
+            TrajectoryRequestKey::Compaction(compaction_id) => {
+                let compaction = self.graph.compactions.get(compaction_id)?;
+                let anchor = TrajectoryItemId::Compaction(compaction_id.clone());
+                Some(RequestItemView {
+                    key,
+                    purpose: TrajectoryRequestPurpose::Compaction,
+                    source_seq: compaction.source_seqs.first().copied().unwrap_or_default(),
+                    status: compaction.status,
+                    // CompactionFinished currently carries an outcome but no durable error text.
+                    error: None,
+                    turn_id: compaction
+                        .owner_step_id
+                        .as_ref()
+                        .and_then(|step_id| self.turn_for_step(step_id)),
+                    step_id: compaction.owner_step_id.as_ref(),
+                    anchor: Some(anchor.clone()),
+                    result: Some(anchor),
+                    options: None,
+                    prompt: None,
+                    response_id: compaction.response_id.as_deref(),
+                    response_model: compaction.response_model.as_deref(),
+                    timing: &compaction.timing,
+                    usage: compaction.usage,
+                    tool_call_count: 0,
+                    subtool_call_count: 0,
+                    compaction_run_id: Some(&compaction.run_id),
+                    compaction_tokens_before: Some(compaction.tokens_before),
+                    compaction_first_kept_id: Some(compaction.first_kept_id),
+                    source_seqs: &compaction.source_seqs,
+                })
+            }
+        }
+    }
+
     fn conversation_item<'a>(
         &'a self,
         id: &'a ConversationItemId,
@@ -1583,13 +1883,18 @@ impl SessionDocument {
                     lane: TrajectoryLane::Input,
                     title: prompt_title(prompt.kind),
                     text: &prompt.summary,
-                    payload: nonempty(&prompt.instructions),
+                    payload: nonempty(prompt.current.instructions()),
                     status: ItemStatus::Completed,
                     timing: &prompt.timing,
                     usage: None,
                     turn_id,
                     step_id,
                     source_seqs: &prompt.source_seqs,
+                    details: TrajectoryItemDetailsView::PromptChange {
+                        kind: prompt.kind,
+                        current: &prompt.current,
+                        previous: prompt.previous.as_ref(),
+                    },
                 })
             }
             TrajectoryItemId::Input(input_id) => {
@@ -1612,6 +1917,7 @@ impl SessionDocument {
                     turn_id: step_id.and_then(|step_id| self.turn_for_step(step_id)),
                     step_id,
                     source_seqs: &input.source_seqs,
+                    details: TrajectoryItemDetailsView::None,
                 })
             }
             TrajectoryItemId::Assistant(request_id) => {
@@ -1634,6 +1940,7 @@ impl SessionDocument {
                     turn_id: self.turn_for_step(&response.step_id),
                     step_id: Some(&response.step_id),
                     source_seqs: &response.source_seqs,
+                    details: TrajectoryItemDetailsView::None,
                 })
             }
             TrajectoryItemId::Tool(call_id) => {
@@ -1652,6 +1959,12 @@ impl SessionDocument {
                     turn_id: self.turn_for_step(&response.step_id),
                     step_id: Some(&response.step_id),
                     source_seqs: &tool.source_seqs,
+                    details: TrajectoryItemDetailsView::Tool {
+                        request_id: &tool.request_id,
+                        parent_call_id: tool.parent_call_id.as_ref(),
+                        prompt: &response.prompt,
+                        schema_name: &tool.name,
+                    },
                 })
             }
             TrajectoryItemId::Compaction(compaction_id) => {
@@ -1673,23 +1986,7 @@ impl SessionDocument {
                     turn_id: None,
                     step_id: None,
                     source_seqs: &compaction.source_seqs,
-                })
-            }
-            TrajectoryItemId::RequestFailure(step_id) => {
-                let failure = self.graph.failures.get(step_id)?;
-                Some(TrajectoryItemView {
-                    id,
-                    kind: TrajectoryKind::RequestFailure,
-                    lane: TrajectoryLane::Model,
-                    title: "Request failed",
-                    text: &failure.error,
-                    payload: None,
-                    status: ItemStatus::Failed,
-                    timing: &failure.timing,
-                    usage: None,
-                    turn_id: self.turn_for_step(step_id),
-                    step_id: Some(step_id),
-                    source_seqs: &failure.source_seqs,
+                    details: TrajectoryItemDetailsView::None,
                 })
             }
         }
@@ -1841,6 +2138,47 @@ fn append_response_text(
     segment.source_seqs.push(source_seq);
     response.combined_text.push_str(delta);
     (segment.ordinal, created)
+}
+
+fn materialize_prompt_snapshot<T: serde::Serialize>(
+    instructions: Option<&str>,
+    tools: &[T],
+) -> Arc<PromptSnapshot> {
+    let mut tools_json = String::from("[");
+    let mut tool_schemas = Vec::with_capacity(tools.len());
+    for (index, tool) in tools.iter().enumerate() {
+        if index > 0 {
+            tools_json.push(',');
+        }
+        let schema_json =
+            serde_json::to_string(tool).expect("a committed provider tool schema is serializable");
+        let start = tools_json.len();
+        tools_json.push_str(&schema_json);
+        let end = tools_json.len();
+        let name = serde_json::from_str::<serde_json::Value>(&schema_json)
+            .ok()
+            .and_then(|schema| {
+                schema
+                    .get("name")
+                    .or_else(|| {
+                        schema
+                            .get("function")
+                            .and_then(|function| function.get("name"))
+                    })
+                    .and_then(serde_json::Value::as_str)
+                    .map(Arc::from)
+            });
+        tool_schemas.push(PromptToolSchema {
+            name,
+            json_range: start..end,
+        });
+    }
+    tools_json.push(']');
+    Arc::new(PromptSnapshot {
+        instructions: Arc::from(instructions.unwrap_or_default()),
+        tools_json: Arc::from(tools_json),
+        tool_schemas: Arc::from(tool_schemas),
+    })
 }
 
 fn prompt_change_kind(
@@ -2536,7 +2874,7 @@ pub(crate) mod tests {
              Tool|Tools|shell|ok|Completed|Some(8000000)\n\
              Compaction|Model|Compaction|compacted|Completed|Some(1000000)\n\
              User|Input|User|continue|Completed|Some(0)\n\
-             Assistant|Model|Assistant|partial|Failed|None"
+             Assistant|Model|Assistant|partial|Failed|Some(2000000)"
         );
 
         let conversation = document
@@ -2786,7 +3124,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn partial_assistant_is_visible_but_has_no_completed_timing() {
+    fn failed_partial_assistant_closes_request_timing() {
         let document = SessionDocument::from_events(fixture()).unwrap();
         let partial = document
             .trajectory()
@@ -2794,20 +3132,17 @@ pub(crate) mod tests {
             .find(|item| item.text == "partial")
             .unwrap();
         assert_eq!(partial.status, ItemStatus::Failed);
-        assert_eq!(partial.timing.duration_ns(), None);
+        assert_eq!(partial.timing.duration_ns(), Some(2_000_000));
         assert_eq!(partial.timing.ttft_ns(), Some(1_000_000));
     }
 
     #[test]
-    fn raw_details_are_derived_from_the_same_stable_entity() {
+    fn details_selector_uses_the_same_stable_entity_as_the_trajectory() {
         let document = SessionDocument::from_events(fixture()).unwrap();
         let id = TrajectoryItemId::Assistant(RequestId::from("request-1"));
-        let details = document.details(&id).unwrap();
+        let details = document.trajectory_by_id(&id).unwrap();
         assert_eq!(details.text, "hello");
-        let raw = document.details_raw(&id).unwrap();
-        assert!(raw.contains("request_snapshot"));
-        assert!(raw.contains("assistant_chunk"));
-        assert!(raw.contains("assistant_completed"));
+        assert!(!details.source_seqs.is_empty());
     }
 
     #[test]
@@ -2892,6 +3227,14 @@ pub(crate) mod tests {
         assert!(completed.geometry_changed);
         assert!(completed.stats_changed);
         assert!(!completed.trajectory_order.changed());
+
+        document.apply_batch(events[10..27].to_vec()).unwrap();
+        let failed = document.apply_batch(vec![events[27].clone()]).unwrap();
+        assert!(failed.geometry_changed);
+        assert_eq!(
+            failed.changed_trajectory,
+            vec![TrajectoryItemId::Assistant(RequestId::from("request-2"))]
+        );
     }
 
     proptest! {

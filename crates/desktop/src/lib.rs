@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use gpui::{
@@ -40,6 +41,7 @@ use settings::{Appearance, ProviderModel, ProviderProfile, SettingsStore};
 
 pub(crate) const APP_NAME: &str = "Kcastle";
 pub(crate) const INSTRUCTIONS: &str = "You are Kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
+const DATA_ROOT_ENV: &str = "KCASTLE_DATA_DIR";
 
 fn init_ui(cx: &mut App) {
     gpui_component::init(cx);
@@ -50,7 +52,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .enable_all()
         .build()?;
     let _runtime = runtime.enter();
-    let root = home_dir()?.join(".kcastle");
+    let root = data_root()?;
     let (startup, appearance) = desktop_startup(root.clone())?;
     let application = gpui_platform::application().with_assets(DesktopAssets);
     application.on_reopen(move |cx| {
@@ -125,7 +127,7 @@ fn open_desktop_window(
     cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(900.0), px(620.0))),
+            window_min_size: Some(size(px(720.0), px(620.0))),
             titlebar: Some(TitlebarOptions {
                 title: Some(APP_NAME.into()),
                 appears_transparent: true,
@@ -208,21 +210,80 @@ pub(crate) fn build_model(
     .with_provider_reasoning(&provider.provider_id)
 }
 
-fn home_dir() -> Result<PathBuf, Box<dyn Error>> {
-    env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
+fn data_root() -> Result<PathBuf, Box<dyn Error>> {
+    resolve_data_root(
+        env::var_os(DATA_ROOT_ENV),
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+    )
+    .map_err(Into::into)
+}
+
+fn resolve_data_root(
+    override_root: Option<OsString>,
+    home: Option<OsString>,
+    user_profile: Option<OsString>,
+) -> Result<PathBuf, &'static str> {
+    if let Some(root) = override_root {
+        if root.is_empty() {
+            return Err("KCASTLE_DATA_DIR cannot be empty");
+        }
+        return Ok(PathBuf::from(root));
+    }
+    home.or(user_profile)
         .map(PathBuf::from)
-        .ok_or_else(|| "cannot locate the home directory".into())
+        .map(|home| home.join(".kcastle"))
+        .ok_or("cannot locate the home directory")
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-    use super::{desktop_startup, models_from_profiles};
+    use super::{desktop_startup, models_from_profiles, resolve_data_root};
+
+    #[test]
+    fn data_root_defaults_to_the_home_directory() {
+        assert_eq!(
+            resolve_data_root(None, Some(OsString::from("/users/test")), None).unwrap(),
+            PathBuf::from("/users/test/.kcastle")
+        );
+        assert_eq!(
+            resolve_data_root(None, None, Some(OsString::from("C:/Users/test"))).unwrap(),
+            PathBuf::from("C:/Users/test/.kcastle")
+        );
+    }
+
+    #[test]
+    fn data_root_override_is_verbatim_and_must_not_be_empty() {
+        assert_eq!(
+            resolve_data_root(
+                Some(OsString::from("/tmp/kcastle-acceptance")),
+                Some(OsString::from("/users/test")),
+                None,
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/kcastle-acceptance")
+        );
+        assert_eq!(
+            resolve_data_root(
+                Some(OsString::from("relative/acceptance")),
+                Some(OsString::from("/users/test")),
+                None,
+            )
+            .unwrap(),
+            PathBuf::from("relative/acceptance")
+        );
+        assert_eq!(
+            resolve_data_root(Some(OsString::new()), None, None),
+            Err("KCASTLE_DATA_DIR cannot be empty")
+        );
+    }
 
     #[test]
     fn desktop_startup_can_be_rebuilt_after_last_window_closes() {

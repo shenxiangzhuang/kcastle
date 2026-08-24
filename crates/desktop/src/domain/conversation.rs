@@ -53,18 +53,10 @@ impl Default for ConversationState {
 }
 
 pub(crate) fn refresh_message_search_text(message: &mut Message) {
-    message.search_text = message_search_text(message);
-}
-
-fn message_search_text(message: &Message) -> String {
-    [
-        message.title.as_deref().unwrap_or_default(),
-        message.payload.as_deref().unwrap_or_default(),
-        message.schema.as_deref().unwrap_or_default(),
-        message.text.as_str(),
-    ]
-    .join("\n")
-    .to_lowercase()
+    // Conversation search has no consumer; trajectory search owns its own allocation-free
+    // selectors. Keep the compatibility field empty instead of duplicating a growing streamed
+    // response (and a temporary `join`) on every publication.
+    message.search_text.clear();
 }
 
 #[cfg(test)]
