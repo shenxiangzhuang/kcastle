@@ -1,25 +1,30 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    AppContext, Bounds, Context, Entity, FocusHandle, PathPromptOptions, Pixels, Point,
-    ScrollHandle, ScrollWheelEvent, Subscription, UniformListScrollHandle, Window, point, px,
+    AppContext, Bounds, Context, Entity, FocusHandle, ListAlignment, ListOffset, ListState,
+    PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, Subscription, Window, point,
+    px,
 };
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::{Theme, ThemeMode};
+#[cfg(test)]
+use kcastle_agent::SessionStoreError;
 use kcastle_agent::{
-    ARCHIVE_DIRECTORY, Agent, Model, Session, SessionConfig, SessionId, SessionInfo,
+    ARCHIVE_DIRECTORY, Agent, Model, Session, SessionCatalog, SessionConfig, SessionError,
+    SessionErrorClass, SessionId, SessionInfo,
 };
 
 use crate::dialogs::Modal;
 use crate::domain::session_document::SessionDocument;
-use crate::domain::timeline::{AxisId, AxisRange};
+use crate::domain::timeline::{AxisId, AxisRange, DomainRange};
 use crate::domain::{
-    Action, AppState, ComposerMenu, DetailsTab, Effect, Message, Role, RunState, ScrollIntent,
-    Surface, TimelineMode, TrajectoryItemId, next_message_id, reduce,
+    Action, AppState, ComposerMenu, DetailsSelection, DetailsTab, Effect, LayoutGeneration,
+    Message, Role, RunState, ScrollIntent, Surface, TimelineMode, TrajectoryItemId,
+    TrajectoryRequestKey, next_message_id, reduce,
 };
 use crate::layout::{LayoutInput, ScrollAnchor, ScrollRestore, resolve_scroll_restore};
 use crate::platform::NativeTitlebarController;
@@ -29,7 +34,9 @@ use crate::platform::gpui::{
 };
 use crate::project::{ProjectId, ProjectStore};
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
-use crate::trajectory::TimelineModelCache;
+use crate::trajectory::{
+    TimelineModelCache, TrajectoryDetailsLayoutState, TrajectoryDetailsMarkdownCache,
+};
 use crate::updater::AvailableUpdate;
 
 #[derive(Clone)]
@@ -91,24 +98,68 @@ pub(crate) fn active_model_index(
 #[derive(Clone, Debug)]
 struct SessionViewState {
     chat_anchor: ScrollAnchor,
-    trajectory_offset: Point<Pixels>,
+    trajectory_offset: Option<ListOffset>,
+    trajectory_follow_tail: bool,
+    trajectory_query: String,
     details_offset: Point<Pixels>,
-    selected_trajectory: Option<TrajectoryItemId>,
-    details_tab: DetailsTab,
-    timeline_mode: TimelineMode,
-    timeline_selection: Option<AxisRange>,
-    timeline_viewport: Option<AxisRange>,
+    selected_details: Option<DetailsSelection>,
+    details_tab_history: Vec<DetailsTab>,
+    collapsed_turns: HashSet<u32>,
+    collapsed_assistants: HashSet<TrajectoryItemId>,
+    timeline_selection: Option<SavedTimelineRange>,
+    timeline_viewport: Option<SavedTimelineRange>,
+}
+
+/// A timeline range saved by meaning rather than by one in-memory projection identity.
+///
+/// `AxisRange` deliberately carries a projection lineage so a stale live range cannot be applied
+/// to another document. Session view state outlives the bounded runtime/document cache, though, so
+/// persisting that lineage would also reject a legitimate range when the same session is replayed
+/// into a fresh projection. Saving the mode plus domain coordinates lets restore issue a new,
+/// correctly stamped range for the current canonical projection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SavedTimelineRange {
+    mode: TimelineMode,
+    range: DomainRange,
+}
+
+impl SavedTimelineRange {
+    fn capture(range: AxisRange) -> Self {
+        Self {
+            mode: range.axis.mode,
+            range: range.range,
+        }
+    }
+
+    fn restore(
+        self,
+        mode: TimelineMode,
+        document_generation: u64,
+        geometry_revision: u64,
+    ) -> Option<AxisRange> {
+        (self.mode == mode).then_some(AxisRange {
+            axis: AxisId {
+                document_generation,
+                geometry_revision,
+                mode,
+            },
+            range: self.range,
+        })
+    }
 }
 
 impl Default for SessionViewState {
     fn default() -> Self {
         Self {
             chat_anchor: ScrollAnchor::Tail,
-            trajectory_offset: point(px(0.0), px(0.0)),
+            trajectory_offset: None,
+            trajectory_follow_tail: true,
+            trajectory_query: String::new(),
             details_offset: point(px(0.0), px(0.0)),
-            selected_trajectory: None,
-            details_tab: DetailsTab::Summary,
-            timeline_mode: TimelineMode::Sequence,
+            selected_details: None,
+            details_tab_history: vec![DetailsTab::Summary],
+            collapsed_turns: HashSet::new(),
+            collapsed_assistants: HashSet::new(),
             timeline_selection: None,
             timeline_viewport: None,
         }
@@ -139,6 +190,13 @@ struct ProjectSessionRuntimes {
 type RuntimeKey = (ProjectId, SessionId);
 type OpenSessionKey = (ProjectId, PathBuf);
 
+#[derive(Default)]
+struct SessionCatalogCache {
+    project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
+    session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
+    session_catalog_indices: HashMap<RuntimeKey, usize>,
+}
+
 const MAX_CACHED_TERMINAL_RUNTIMES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +205,18 @@ enum SessionOpenCompletion {
     WarmCache,
     Reload(u64),
     Ignore,
+}
+
+fn invalid_session_open_error(error: &SessionError) -> bool {
+    should_clear_catalog_after_error(error)
+}
+
+fn should_clear_catalog_after_error(error: &SessionError) -> bool {
+    error.classification() == SessionErrorClass::DeterministicInvalid
+}
+
+fn session_open_error_notice(error: &SessionError) -> Option<String> {
+    (!invalid_session_open_error(error)).then(|| format!("Could not open session: {error}"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,19 +270,26 @@ pub(crate) struct DesktopApp {
     pub(crate) input: Entity<TextareaState>,
     pub(crate) session_search: Entity<InputState>,
     pub(crate) trajectory_search: Entity<InputState>,
+    trajectory_query_value: String,
     pub(crate) modal: Option<Modal>,
     pub(crate) modal_focus: FocusHandle,
     pub(crate) composer_menu_focus: FocusHandle,
     pub(crate) scroll: ScrollHandle,
     chat_tail_alignment: DeferredScrollAlignment,
-    pub(crate) trajectory_scroll: UniformListScrollHandle,
+    pub(crate) trajectory_scroll: ListState,
+    pub(crate) trajectory_scroll_restore: Cell<Option<ListOffset>>,
+    pub(crate) trajectory_follow_tail: Cell<bool>,
+    pending_trajectory_query_restore: RefCell<Option<String>>,
+    pub(crate) trajectory_list_structure: Cell<Option<(u64, u64, u64, bool)>>,
     pub(crate) details_scroll: ScrollHandle,
-    pub(crate) selected_details_raw: Arc<str>,
-    selected_details_raw_revision: Option<(TrajectoryItemId, usize, u64)>,
     pub(crate) timeline_bounds: Option<Bounds<Pixels>>,
+    pub(crate) trajectory_ledger_width: Option<(LayoutGeneration, Pixels)>,
     pub(crate) timeline_drag: Option<TimelineDragState>,
     pub(crate) timeline_hover: Option<TimelineHoverState>,
+    pub(crate) request_marker_hover: Option<TrajectoryRequestKey>,
     pub(crate) timeline_model_cache: RefCell<Option<TimelineModelCache>>,
+    pub(crate) trajectory_details_layout: TrajectoryDetailsLayoutState,
+    pub(crate) trajectory_details_markdown: RefCell<TrajectoryDetailsMarkdownCache>,
     pub(crate) models: Vec<ConfiguredModel>,
     pub(crate) selected_model: usize,
     pub(crate) selected_reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
@@ -234,7 +311,7 @@ pub(crate) struct DesktopApp {
     inflight_session_opens: HashMap<OpenSessionKey, u64>,
     pending_runtime_selection: Option<PendingRuntimeSelection>,
     native_titlebar: NativeTitlebarController,
-    view_states: HashMap<String, SessionViewState>,
+    view_states: HashMap<RuntimeKey, SessionViewState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -285,10 +362,12 @@ impl DesktopApp {
                 sessions: HashMap::from([(current_session_id, runtime.clone())]),
             },
         );
-        let project_sessions = load_project_sessions(&project_store);
+        let SessionCatalogCache {
+            project_sessions,
+            session_search_documents,
+            session_catalog_indices,
+        } = load_session_catalog_cache(&project_store);
         let project_archived_sessions = load_project_archived_sessions(&project_store);
-        let session_catalog_indices =
-            build_session_catalog_indices(&project_store, &project_sessions);
         let viewport = window.viewport_size();
         let mut core = AppState::new(LayoutInput {
             viewport_width: f32::from(viewport.width),
@@ -296,12 +375,16 @@ impl DesktopApp {
             rem_size: f32::from(window.rem_size()),
             ..LayoutInput::default()
         });
+        core.trajectory.mode = if settings.trajectory_actual_duration() {
+            TimelineMode::Duration
+        } else {
+            TimelineMode::Sequence
+        };
         core.workspace.cwd = project.path.clone();
         core.workspace.active_project = active_project;
         core.workspace.expanded_projects = HashSet::from([project.path.clone()]);
         core.workspace.sessions_dir = project.sessions_dir.clone();
         core.session.current = current_session.clone();
-        let session_search_documents = build_session_search_documents(&project_store);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 14)
@@ -342,8 +425,9 @@ impl DesktopApp {
         let trajectory_subscription = cx.subscribe_in(
             &trajectory_search,
             window,
-            |_this, _, event: &InputEvent, _, cx| {
+            |this, search, event: &InputEvent, _, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.trajectory_query_value = search.read(cx).value().to_string();
                     cx.notify();
                 }
             },
@@ -360,6 +444,30 @@ impl DesktopApp {
             this.native_titlebar.sync(window);
             this.sync_window_layout(window, cx);
         });
+        let trajectory_scroll = ListState::new(0, ListAlignment::Bottom, px(1_000.0));
+        let trajectory_follow_tail = Cell::new(true);
+        let trajectory_scroll_owner = cx.entity().downgrade();
+        trajectory_scroll.set_scroll_handler({
+            move |event, _, cx| {
+                let _ = trajectory_scroll_owner.update(cx, |this, _| {
+                    let follows = if !event.is_scrolled {
+                        true
+                    } else if event.count > 0 && event.visible_range.end == event.count {
+                        this.trajectory_scroll
+                            .bounds_for_item(event.count - 1)
+                            .is_some_and(|last| {
+                                let remaining = (last.bottom()
+                                    - this.trajectory_scroll.viewport_bounds().bottom())
+                                .max(px(0.0));
+                                remaining <= px(2.0)
+                            })
+                    } else {
+                        false
+                    };
+                    this.trajectory_follow_tail.set(follows);
+                });
+            }
+        });
         let app = Self {
             core,
             layout_runtime: GpuiLayoutRuntime::default(),
@@ -369,19 +477,26 @@ impl DesktopApp {
             input,
             session_search,
             trajectory_search,
+            trajectory_query_value: String::new(),
             modal: None,
             modal_focus: cx.focus_handle(),
             composer_menu_focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             chat_tail_alignment: DeferredScrollAlignment::default(),
-            trajectory_scroll: UniformListScrollHandle::new(),
+            trajectory_scroll,
+            trajectory_scroll_restore: Cell::new(None),
+            trajectory_follow_tail,
+            pending_trajectory_query_restore: RefCell::new(None),
+            trajectory_list_structure: Cell::new(None),
             details_scroll: ScrollHandle::new(),
-            selected_details_raw: Arc::from(""),
-            selected_details_raw_revision: None,
             timeline_bounds: None,
+            trajectory_ledger_width: None,
             timeline_drag: None,
             timeline_hover: None,
+            request_marker_hover: None,
             timeline_model_cache: RefCell::new(None),
+            trajectory_details_layout: TrajectoryDetailsLayoutState::default(),
+            trajectory_details_markdown: RefCell::new(TrajectoryDetailsMarkdownCache::default()),
             models,
             selected_model,
             selected_reasoning_effort,
@@ -500,22 +615,25 @@ impl DesktopApp {
                 },
             );
         }
-        if location.is_none()
-            && !observation.session.path.as_os_str().is_empty()
-            && !self
+        if location.is_none() && !observation.session.path.as_os_str().is_empty() {
+            let project = self
                 .project_store
                 .projects()
                 .iter()
                 .find(|project| project.id.as_str() == observation.session.project_id)
-                .and_then(|project| self.project_sessions.get(&project.sessions_dir))
-                .is_some_and(|sessions| {
-                    sessions
-                        .iter()
-                        .any(|info| info.id == observation.session.id)
-                })
-        {
-            self.refresh_project_session_cache();
-            self.refresh_session_search_documents();
+                .cloned();
+            if let Some(project) = project
+                && !self
+                    .project_sessions
+                    .get(&project.sessions_dir)
+                    .is_some_and(|sessions| {
+                        sessions
+                            .iter()
+                            .any(|info| info.id == observation.session.id)
+                    })
+            {
+                self.refresh_project_catalog(&project.id);
+            }
         }
         if became_terminal {
             self.evict_terminal_runtimes(cx);
@@ -526,7 +644,6 @@ impl DesktopApp {
         }
         let snapshot = runtime.read(cx).snapshot();
         self.apply_selected_runtime_snapshot(snapshot);
-        self.refresh_selected_details_raw(cx);
         if selected_transcript_updates > 0 {
             self.dispatch_local(
                 Action::StreamDeltasReceived(selected_transcript_updates),
@@ -858,6 +975,13 @@ impl DesktopApp {
     }
 
     fn select_runtime(&mut self, runtime: Entity<SessionRuntime>, cx: &mut Context<Self>) {
+        if runtime.entity_id() != self.selected_runtime.entity_id() {
+            // A session load is asynchronous, so the user may keep changing search, tabs, tail
+            // following, or scroll positions after the click that started it. Capture once more
+            // at the atomic handoff; the earlier eager capture remains useful for a failed load,
+            // while this one guarantees a successful load cannot drop those later edits.
+            self.save_current_view_state();
+        }
         let location = self.runtime_location(&runtime);
         if let Some(key) = &location {
             self.unread_sessions.remove(key);
@@ -868,6 +992,7 @@ impl DesktopApp {
         self.pending_runtime_selection = None;
         self.timeline_drag = None;
         self.timeline_hover = None;
+        self.request_marker_hover = None;
         let snapshot = runtime.read(cx).snapshot();
         if let Some((project_id, _)) = &location
             && let Some(runtimes) = self.project_runtimes.get_mut(project_id)
@@ -885,7 +1010,6 @@ impl DesktopApp {
             self.touch_runtime(key);
         }
         self.restore_current_view_state(cx);
-        self.refresh_selected_details_raw(cx);
         self.evict_terminal_runtimes(cx);
         cx.notify();
     }
@@ -1074,15 +1198,8 @@ impl DesktopApp {
     }
 
     pub(crate) fn dispatch(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        let details_may_change = matches!(
-            &action,
-            Action::SetDetailsTab(_) | Action::SelectDetails(_) | Action::RestoreSessionView { .. }
-        );
         let effects = self.transition(action);
         run_effects(self, effects, window, cx);
-        if details_may_change {
-            self.refresh_selected_details_raw(cx);
-        }
         cx.notify();
     }
 
@@ -1101,16 +1218,9 @@ impl DesktopApp {
     }
 
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
-        let details_may_change = matches!(
-            &action,
-            Action::SetDetailsTab(_) | Action::SelectDetails(_) | Action::RestoreSessionView { .. }
-        );
         for effect in self.transition(action) {
             let Effect::ApplyChatTail = effect;
             self.layout_runtime.request_tail_realign();
-        }
-        if details_may_change {
-            self.refresh_selected_details_raw(cx);
         }
         cx.notify();
     }
@@ -1350,26 +1460,46 @@ impl DesktopApp {
         cx.notify();
     }
 
-    fn view_state_key(&self) -> String {
-        let session = if self.core.session.current.as_os_str().is_empty() {
-            "<new>".into()
-        } else {
-            self.core.session.current.display().to_string()
-        };
-        format!("{}\n{session}", self.core.workspace.cwd.display())
+    fn view_state_key(&self) -> Option<RuntimeKey> {
+        // Derive the identity from the selected runtime, not the mutable workspace/session
+        // projection in `core`. During a cross-project async open the workspace already names the
+        // target while the selected runtime still owns the source session; combining those fields
+        // would save a chimeric key and lose every edit made while loading.
+        self.runtime_location(&self.selected_runtime)
     }
 
     fn save_current_view_state(&mut self) {
-        let key = self.view_state_key();
+        let Some(key) = self.view_state_key() else {
+            return;
+        };
         let state = self.view_states.entry(key).or_default();
         if self.core.surface == Surface::Trajectory {
-            state.trajectory_offset = self.trajectory_scroll.0.borrow().base_handle.offset();
-            state.selected_trajectory = self.core.details.selected.clone();
-            state.details_tab = self.core.details.tab;
+            state.trajectory_follow_tail = self.trajectory_follow_tail.get();
+            state.trajectory_offset = (!state.trajectory_follow_tail).then(|| {
+                self.trajectory_scroll_restore
+                    .get()
+                    .unwrap_or_else(|| self.trajectory_scroll.logical_scroll_top())
+            });
+            state
+                .trajectory_query
+                .clone_from(&self.trajectory_query_value);
+            state.selected_details = self.core.details.selected.clone();
+            state
+                .details_tab_history
+                .clone_from(&self.core.details.tab_history);
             state.details_offset = self.details_scroll.offset();
-            state.timeline_mode = self.core.trajectory.mode;
-            state.timeline_selection = self.core.trajectory.selected_range;
-            state.timeline_viewport = self.core.trajectory.visible_range;
+            state.collapsed_turns = self.core.trajectory.collapsed_turns.clone();
+            state.collapsed_assistants = self.core.trajectory.collapsed_assistants.clone();
+            state.timeline_selection = self
+                .core
+                .trajectory
+                .selected_range
+                .map(SavedTimelineRange::capture);
+            state.timeline_viewport = self
+                .core
+                .trajectory
+                .visible_range
+                .map(SavedTimelineRange::capture);
         } else {
             state.chat_anchor = self
                 .layout_runtime
@@ -1377,58 +1507,79 @@ impl DesktopApp {
         }
     }
 
-    fn restore_current_view_state(&mut self, cx: &mut Context<Self>) {
+    fn restore_current_view_state(&mut self, _cx: &mut Context<Self>) {
         let state = self
-            .view_states
-            .get(&self.view_state_key())
+            .view_state_key()
+            .and_then(|key| self.view_states.get(&key))
             .cloned()
             .unwrap_or_default();
         if self.core.surface == Surface::Trajectory {
-            let _ = self.transition(Action::SetTimelineMode(state.timeline_mode));
-            let _ = self.transition(Action::SetTimelineSelection(state.timeline_selection));
-            let _ = self.transition(Action::SetTimelineViewport(state.timeline_viewport));
+            let _ = self.transition(Action::SetTrajectoryTurnsCollapsed(
+                state.collapsed_turns.clone(),
+            ));
+            let _ = self.transition(Action::SetTrajectoryAssistantsCollapsed(
+                state.collapsed_assistants.clone(),
+            ));
+            let projection = &self.core.session_view.trajectory;
+            let mode = self.core.trajectory.mode;
+            let lineage = projection.projection_lineage();
+            let revision = projection.revision();
+            let selection = state
+                .timeline_selection
+                .and_then(|range| range.restore(mode, lineage, revision));
+            let viewport = state
+                .timeline_viewport
+                .and_then(|range| range.restore(mode, lineage, revision));
+            let _ = self.transition(Action::SetTimelineSelection(selection));
+            let _ = self.transition(Action::SetTimelineViewport(viewport));
             self.timeline_drag = None;
             self.timeline_hover = None;
-            self.trajectory_scroll
-                .0
-                .borrow()
-                .base_handle
-                .set_offset(state.trajectory_offset);
-            let selected = state.selected_trajectory.filter(|selected| {
-                self.core
-                    .session_view
-                    .trajectory
-                    .records
-                    .iter()
-                    .any(|record| &record.id == selected)
+            self.request_marker_hover = None;
+            self.trajectory_follow_tail
+                .set(state.trajectory_follow_tail);
+            *self.pending_trajectory_query_restore.borrow_mut() =
+                Some(state.trajectory_query.clone());
+            self.trajectory_query_value = state.trajectory_query.clone();
+            // The new session's row count is not known until its ledger projection is rendered.
+            // Applying the offset before then would clamp it against the previous session's list.
+            self.trajectory_scroll_restore.set(state.trajectory_offset);
+            self.trajectory_list_structure.set(None);
+            let selected = state.selected_details.filter(|selected| {
+                let trajectory = &self.core.session_view.trajectory;
+                match selected {
+                    DetailsSelection::Record(id) => trajectory.record_index(id).is_some(),
+                    DetailsSelection::Request(key) => trajectory.request_index(key).is_some(),
+                }
             });
             let _ = self.transition(Action::RestoreSessionView {
                 selected: selected.clone(),
-                details_tab: state.details_tab,
+                details_tab_history: state.details_tab_history.clone(),
                 follow_chat_tail: matches!(state.chat_anchor, ScrollAnchor::Tail),
             });
-            if let Some(selected) = selected
-                && let Some(index) = self
-                    .core
-                    .session_view
-                    .trajectory
-                    .records
-                    .iter()
-                    .position(|record| record.id == selected)
-            {
-                self.scroll_trajectory_to_record(index, cx);
-            }
             self.details_scroll.set_offset(state.details_offset);
-            self.refresh_selected_details_raw(cx);
         } else {
             let _ = self.transition(Action::RestoreSessionView {
                 selected: None,
-                details_tab: state.details_tab,
+                details_tab_history: state.details_tab_history,
                 follow_chat_tail: matches!(state.chat_anchor, ScrollAnchor::Tail),
             });
             self.layout_runtime.pending_chat_anchor =
                 Some((self.core.layout_generation, state.chat_anchor));
             self.layout_runtime.restore_scheduled = false;
+        }
+    }
+
+    pub(crate) fn apply_pending_trajectory_query_restore(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(query) = self.pending_trajectory_query_restore.borrow_mut().take() else {
+            return;
+        };
+        if self.trajectory_search.read(cx).value().as_ref() != query.as_str() {
+            self.trajectory_search
+                .update(cx, |search, cx| search.set_value(query, window, cx));
         }
     }
 
@@ -1592,7 +1743,11 @@ impl DesktopApp {
             };
             let message_id = record.id.clone();
             let mut effects = self.transition(Action::ShowTrajectory);
-            effects.extend(self.transition(Action::SelectDetails(Some(message_id))));
+            effects.extend(
+                self.transition(Action::SelectDetails(Some(DetailsSelection::Record(
+                    message_id,
+                )))),
+            );
             run_effects(self, effects, window, cx);
             self.dispatch_local(Action::SetDetailsTab(DetailsTab::Summary), cx);
             self.details_scroll.set_offset(point(px(0.0), px(0.0)));
@@ -1622,32 +1777,6 @@ impl DesktopApp {
         {
             cx.notify();
         }
-    }
-
-    pub(crate) fn refresh_selected_details_raw(&mut self, cx: &Context<Self>) {
-        if self.core.details.tab != DetailsTab::Raw {
-            self.selected_details_raw = Arc::from("");
-            self.selected_details_raw_revision = None;
-            return;
-        }
-        let Some(id) = self.core.details.selected.as_ref() else {
-            self.selected_details_raw = Arc::from("");
-            self.selected_details_raw_revision = None;
-            return;
-        };
-        let Some((source_count, source_revision)) =
-            self.selected_runtime.read(cx).details_raw_revision(id)
-        else {
-            self.selected_details_raw = Arc::from("");
-            self.selected_details_raw_revision = None;
-            return;
-        };
-        let revision = (id.clone(), source_count, source_revision);
-        if self.selected_details_raw_revision.as_ref() == Some(&revision) {
-            return;
-        }
-        self.selected_details_raw = Arc::from(self.selected_runtime.read(cx).details_raw(id));
-        self.selected_details_raw_revision = Some(revision);
     }
 
     pub(crate) fn set_composer_menu(&mut self, menu: Option<ComposerMenu>, cx: &mut Context<Self>) {
@@ -1872,9 +2001,22 @@ impl DesktopApp {
                                     if let Some(path) = paths.into_iter().next() {
                                         match this.project_store.add(path) {
                                             Ok(index) => {
-                                                this.refresh_project_session_cache();
-                                                this.refresh_session_search_documents();
-                                                this.switch_project(index, window, cx)
+                                                if let Some(project) =
+                                                    this.project_store.project(index).cloned()
+                                                {
+                                                    this.project_sessions
+                                                        .entry(project.sessions_dir.clone())
+                                                        .or_default();
+                                                    this.project_archived_sessions
+                                                        .entry(project.sessions_dir.clone())
+                                                        .or_default();
+                                                    this.reload_archived_sessions(index);
+                                                    if index == this.core.workspace.active_project {
+                                                        this.refresh_project_catalog(&project.id);
+                                                    } else {
+                                                        this.switch_project(index, window, cx);
+                                                    }
+                                                }
                                             }
                                             Err(error) => this
                                                 .notice(format!("Could not add project: {error}")),
@@ -1960,7 +2102,7 @@ impl DesktopApp {
             window,
             cx,
         );
-        self.refresh_session_search_documents();
+        self.refresh_project_catalog(&project.id);
         let remembered = self
             .project_runtimes
             .get(&project.id)
@@ -2054,11 +2196,17 @@ impl DesktopApp {
         }
         self.inflight_session_opens
             .retain(|(project_id, _), _| project_id != &project.id);
-        self.session_catalog_indices
-            .retain(|(project_id, _), _| project_id != &project.id);
         self.unread_sessions
             .retain(|(project_id, _)| project_id != &project.id);
-        self.refresh_project_session_cache();
+        remove_project_catalog_members(
+            &project.id,
+            &project.sessions_dir,
+            &self.project_sessions,
+            &mut self.session_search_documents,
+            &mut self.session_catalog_indices,
+        );
+        self.project_sessions.remove(&project.sessions_dir);
+        self.project_archived_sessions.remove(&project.sessions_dir);
         let next = if index < self.core.workspace.active_project {
             self.core.workspace.active_project - 1
         } else if index == self.core.workspace.active_project {
@@ -2167,6 +2315,10 @@ impl DesktopApp {
                                                 input.focus(window, cx);
                                             });
                                         } else {
+                                            this.discard_invalid_session_catalog_entry(
+                                                project_index,
+                                                &key.1,
+                                            );
                                             let fell_back = this.resolve_failed_runtime_selection(
                                                 generation,
                                                 &project_id,
@@ -2183,39 +2335,52 @@ impl DesktopApp {
                                                     );
                                                 });
                                             }
-                                            this.notice(
-                                                "Could not open session: its projection is invalid",
-                                            );
                                             this.input
                                                 .update(cx, |input, cx| input.focus(window, cx));
                                         }
+                                    } else if runtime.is_none() {
+                                        this.discard_invalid_session_catalog_entry(
+                                            project_index,
+                                            &key.1,
+                                        );
                                     }
                                 }
                             }
-                            Err(error) if is_current_intent => {
+                            Err(error) => {
+                                let invalid = invalid_session_open_error(&error);
                                 if let Some(project_index) = resolved_project_index {
-                                    let fell_back = this.resolve_failed_runtime_selection(
-                                        generation,
-                                        &project_id,
-                                        &key.1,
-                                        project_index,
-                                        cx,
-                                    );
-                                    if fell_back {
-                                        this.input.update(cx, |input, cx| {
-                                            input.set_placeholder(
-                                                "Describe what you want to build",
-                                                window,
-                                                cx,
-                                            );
-                                        });
+                                    if invalid {
+                                        this.discard_invalid_session_catalog_entry(
+                                            project_index,
+                                            &key.1,
+                                        );
+                                    }
+                                    if is_current_intent {
+                                        let fell_back = this.resolve_failed_runtime_selection(
+                                            generation,
+                                            &project_id,
+                                            &key.1,
+                                            project_index,
+                                            cx,
+                                        );
+                                        if fell_back {
+                                            this.input.update(cx, |input, cx| {
+                                                input.set_placeholder(
+                                                    "Describe what you want to build",
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
                                     }
                                 }
-                                let message = format!("Could not open session: {error}");
-                                this.notice(message);
-                                this.input.update(cx, |input, cx| input.focus(window, cx));
+                                if is_current_intent {
+                                    if let Some(message) = session_open_error_notice(&error) {
+                                        this.notice(message);
+                                    }
+                                    this.input.update(cx, |input, cx| input.focus(window, cx));
+                                }
                             }
-                            Err(_) => {}
                         }
                         cx.notify();
                     });
@@ -2366,14 +2531,29 @@ impl DesktopApp {
     }
 
     fn reload_project_session_list(&mut self, project_index: usize) {
-        let sessions_dir = self
+        let project_id = self
             .project_store
             .project(project_index)
-            .map(|project| project.sessions_dir.clone());
-        if let Some(sessions_dir) = sessions_dir {
-            self.reload_sessions(&sessions_dir);
+            .map(|project| project.id.clone());
+        if let Some(project_id) = project_id {
+            self.refresh_project_catalog(&project_id);
         }
-        self.refresh_session_search_documents();
+    }
+
+    fn discard_invalid_session_catalog_entry(&mut self, project_index: usize, path: &Path) {
+        let Some(project) = self.project_store.project(project_index).cloned() else {
+            return;
+        };
+        if let Some(session_id) = remove_session_catalog_entry(
+            &project.id,
+            &project.sessions_dir,
+            path,
+            &mut self.project_sessions,
+            &mut self.session_search_documents,
+            &mut self.session_catalog_indices,
+        ) {
+            self.unread_sessions.remove(&(project.id, session_id));
+        }
     }
 
     fn reload_archived_sessions(&mut self, project_index: usize) {
@@ -2387,10 +2567,11 @@ impl DesktopApp {
                 self.project_archived_sessions
                     .insert(sessions_dir.clone(), catalog.sessions);
             }
-            Err(_) => {
+            Err(error) if should_clear_catalog_after_error(&error) => {
                 self.project_archived_sessions
                     .insert(sessions_dir, Vec::new());
             }
+            Err(_) => {}
         }
     }
 
@@ -2489,6 +2670,32 @@ impl DesktopApp {
         cx.notify();
     }
 
+    pub(crate) fn set_trajectory_actual_duration(
+        &mut self,
+        enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = self.settings.set_trajectory_actual_duration(enabled) {
+            self.notice(format!(
+                "Could not save trajectory duration preference: {error}"
+            ));
+        }
+        for state in self.view_states.values_mut() {
+            state.timeline_selection = None;
+            state.timeline_viewport = None;
+        }
+        self.dispatch(
+            Action::SetTimelineMode(if enabled {
+                TimelineMode::Duration
+            } else {
+                TimelineMode::Sequence
+            }),
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn session_document_matches(&self, path: &Path, query: &str) -> bool {
         self.session_search_documents
             .get(path)
@@ -2503,10 +2710,6 @@ impl DesktopApp {
 
     pub(crate) fn session_modified_at(&self, session: &SessionInfo) -> u64 {
         session.updated_at
-    }
-
-    fn refresh_session_search_documents(&mut self) {
-        self.session_search_documents = build_session_search_documents(&self.project_store);
     }
 
     fn upsert_runtime_session_metadata(&mut self, project_id: &ProjectId, session: &SessionInfo) {
@@ -2562,78 +2765,14 @@ impl DesktopApp {
         else {
             return false;
         };
-        let Ok(catalog) = Session::catalog_in_project(&project.sessions_dir, project.id.as_str())
-        else {
-            return false;
-        };
-
-        if let Some(previous) = self.project_sessions.get(&project.sessions_dir) {
-            for session in previous {
-                self.session_search_documents.remove(&session.path);
-            }
-        }
-        for (path, search) in catalog.search {
-            self.session_search_documents.insert(
-                path,
-                session_search_document(search.values, search.searchable),
-            );
-        }
-        self.project_sessions
-            .insert(project.sessions_dir.clone(), catalog.sessions);
-        self.session_catalog_indices
-            .retain(|(indexed_project_id, _), _| indexed_project_id != project_id);
-        if let Some(sessions) = self.project_sessions.get(&project.sessions_dir) {
-            self.session_catalog_indices.extend(
-                sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
-            );
-        }
-        true
-    }
-
-    fn reload_sessions(&mut self, sessions_dir: &Path) -> Vec<SessionInfo> {
-        let project_id = self
-            .project_store
-            .projects()
-            .iter()
-            .find(|project| project.sessions_dir == sessions_dir)
-            .map(|project| project.id.clone());
-        let storage_project_id = project_id
-            .as_ref()
-            .map(ProjectId::as_str)
-            .unwrap_or(kcastle_agent::DEFAULT_PROJECT_ID);
-        let sessions = match Session::catalog_in_project(sessions_dir, storage_project_id) {
-            Ok(catalog) => catalog.sessions,
-            Err(_) => self
-                .project_sessions
-                .get(sessions_dir)
-                .cloned()
-                .unwrap_or_default(),
-        };
-        self.project_sessions
-            .insert(sessions_dir.to_owned(), sessions.clone());
-        if let Some(project_id) = project_id {
-            self.session_catalog_indices
-                .retain(|(indexed_project_id, _), _| indexed_project_id != &project_id);
-            self.session_catalog_indices.extend(
-                sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
-            );
-        }
-        sessions
-    }
-
-    fn refresh_project_session_cache(&mut self) {
-        let sessions = load_project_sessions(&self.project_store);
-        let archived_sessions = load_project_archived_sessions(&self.project_store);
-        self.project_sessions = sessions;
-        self.project_archived_sessions = archived_sessions;
-        self.session_catalog_indices =
-            build_session_catalog_indices(&self.project_store, &self.project_sessions);
+        apply_project_catalog_result(
+            &project.id,
+            &project.sessions_dir,
+            Session::catalog_in_project(&project.sessions_dir, project.id.as_str()),
+            &mut self.project_sessions,
+            &mut self.session_search_documents,
+            &mut self.session_catalog_indices,
+        )
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
@@ -2834,23 +2973,37 @@ fn presentation_namespace(project_id: &ProjectId, session_id: &SessionId) -> Str
     format!("{}:{project_id}{}", project_id.len(), session_id.as_str())
 }
 
-fn build_session_search_documents(
+fn load_session_catalog_cache(project_store: &ProjectStore) -> SessionCatalogCache {
+    load_session_catalog_cache_with(project_store, |directory, project_id| {
+        Session::catalog_in_project(directory, project_id)
+    })
+}
+
+fn load_session_catalog_cache_with(
     project_store: &ProjectStore,
-) -> HashMap<PathBuf, SessionSearchDocument> {
-    let mut documents = HashMap::new();
+    mut load: impl FnMut(&Path, &str) -> Result<SessionCatalog, SessionError>,
+) -> SessionCatalogCache {
+    let project_count = project_store.projects().len();
+    let mut cache = SessionCatalogCache {
+        project_sessions: HashMap::with_capacity(project_count),
+        session_search_documents: HashMap::new(),
+        session_catalog_indices: HashMap::new(),
+    };
     for project in project_store.projects() {
-        let Ok(catalog) = Session::catalog_in_project(&project.sessions_dir, project.id.as_str())
-        else {
-            continue;
-        };
-        for (path, search) in catalog.search {
-            documents.insert(
-                path,
-                session_search_document(search.values, search.searchable),
-            );
-        }
+        cache
+            .project_sessions
+            .entry(project.sessions_dir.clone())
+            .or_default();
+        apply_project_catalog_result(
+            &project.id,
+            &project.sessions_dir,
+            load(&project.sessions_dir, project.id.as_str()),
+            &mut cache.project_sessions,
+            &mut cache.session_search_documents,
+            &mut cache.session_catalog_indices,
+        );
     }
-    documents
+    cache
 }
 
 fn session_search_document(values: Arc<[String]>, searchable: Arc<str>) -> SessionSearchDocument {
@@ -2866,38 +3019,129 @@ fn session_search_document(values: Arc<[String]>, searchable: Arc<str>) -> Sessi
     }
 }
 
-fn load_project_sessions(project_store: &ProjectStore) -> HashMap<PathBuf, Vec<SessionInfo>> {
-    let mut sessions = HashMap::new();
-    for project in project_store.projects() {
-        match Session::catalog_in_project(&project.sessions_dir, project.id.as_str()) {
-            Ok(catalog) => {
-                sessions.insert(project.sessions_dir.clone(), catalog.sessions);
-            }
-            Err(_) => {
-                sessions.insert(project.sessions_dir.clone(), Vec::new());
-            }
-        }
+fn remove_project_catalog_members(
+    project_id: &ProjectId,
+    sessions_dir: &Path,
+    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
+    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
+    catalog_indices: &mut HashMap<RuntimeKey, usize>,
+) {
+    let Some(sessions) = project_sessions.get(sessions_dir) else {
+        return;
+    };
+    for session in sessions {
+        search_documents.remove(&session.path);
+        catalog_indices.remove(&(project_id.clone(), session.id.clone()));
     }
-    sessions
 }
 
-fn build_session_catalog_indices(
-    project_store: &ProjectStore,
-    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
-) -> HashMap<RuntimeKey, usize> {
-    let mut indices = HashMap::new();
-    for project in project_store.projects() {
-        let Some(sessions) = project_sessions.get(&project.sessions_dir) else {
-            continue;
-        };
-        indices.extend(
+fn clear_project_catalog_cache(
+    project_id: &ProjectId,
+    sessions_dir: &Path,
+    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
+    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
+    catalog_indices: &mut HashMap<RuntimeKey, usize>,
+) {
+    remove_project_catalog_members(
+        project_id,
+        sessions_dir,
+        project_sessions,
+        search_documents,
+        catalog_indices,
+    );
+    project_sessions.insert(sessions_dir.to_owned(), Vec::new());
+}
+
+fn apply_project_catalog_result(
+    project_id: &ProjectId,
+    sessions_dir: &Path,
+    result: Result<SessionCatalog, SessionError>,
+    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
+    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
+    catalog_indices: &mut HashMap<RuntimeKey, usize>,
+) -> bool {
+    match result {
+        Ok(catalog) => {
+            replace_project_catalog_cache(
+                project_id,
+                sessions_dir,
+                catalog,
+                project_sessions,
+                search_documents,
+                catalog_indices,
+            );
+            true
+        }
+        Err(error) if should_clear_catalog_after_error(&error) => {
+            clear_project_catalog_cache(
+                project_id,
+                sessions_dir,
+                project_sessions,
+                search_documents,
+                catalog_indices,
+            );
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn replace_project_catalog_cache(
+    project_id: &ProjectId,
+    sessions_dir: &Path,
+    catalog: SessionCatalog,
+    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
+    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
+    catalog_indices: &mut HashMap<RuntimeKey, usize>,
+) {
+    remove_project_catalog_members(
+        project_id,
+        sessions_dir,
+        project_sessions,
+        search_documents,
+        catalog_indices,
+    );
+    let SessionCatalog { sessions, search } = catalog;
+    search_documents.extend(search.into_iter().map(|(path, search)| {
+        (
+            path,
+            session_search_document(search.values, search.searchable),
+        )
+    }));
+    project_sessions.insert(sessions_dir.to_owned(), sessions);
+    if let Some(sessions) = project_sessions.get(sessions_dir) {
+        catalog_indices.extend(
             sessions
                 .iter()
                 .enumerate()
-                .map(|(index, session)| ((project.id.clone(), session.id.clone()), index)),
+                .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
         );
     }
-    indices
+}
+
+fn remove_session_catalog_entry(
+    project_id: &ProjectId,
+    sessions_dir: &Path,
+    path: &Path,
+    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
+    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
+    catalog_indices: &mut HashMap<RuntimeKey, usize>,
+) -> Option<SessionId> {
+    search_documents.remove(path);
+    let sessions = project_sessions.get_mut(sessions_dir)?;
+    let index = sessions
+        .iter()
+        .position(|session| same_path(&session.path, path))?;
+    let removed = sessions.remove(index);
+
+    catalog_indices.remove(&(project_id.clone(), removed.id.clone()));
+    catalog_indices.extend(
+        sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
+    );
+    Some(removed.id)
 }
 
 fn load_project_archived_sessions(
@@ -3174,6 +3418,378 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_session_open_errors_are_silent_but_operational_errors_are_reported() {
+        let invalid_locator = SessionError::Invalid("bad locator".into());
+        let corrupt_history = SessionError::Store(SessionStoreError::Corrupt("bad tail".into()));
+        let missing_database = SessionError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "missing database",
+        ));
+        assert!(session_open_error_notice(&invalid_locator).is_none());
+        assert!(session_open_error_notice(&corrupt_history).is_none());
+        assert!(session_open_error_notice(&missing_database).is_none());
+
+        let writer_busy = SessionError::Store(SessionStoreError::WriterBusy {
+            session_id: SessionId::from_raw("busy-session"),
+        });
+        assert!(
+            session_open_error_notice(&writer_busy)
+                .is_some_and(|notice| notice.contains("already has an active writer"))
+        );
+    }
+
+    #[test]
+    fn catalog_cache_policy_clears_invalid_data_but_retains_transient_failures() {
+        let invalid = SessionError::Store(SessionStoreError::UnsupportedSchemaVersion {
+            found: 5,
+            expected: 6,
+        });
+        let transient = SessionError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "database temporarily unavailable",
+        ));
+        let operational = SessionError::Store(SessionStoreError::ReadonlyStore);
+        assert!(should_clear_catalog_after_error(&invalid));
+        assert!(!should_clear_catalog_after_error(&transient));
+        assert!(!should_clear_catalog_after_error(&operational));
+    }
+
+    #[test]
+    fn transient_and_operational_catalog_failures_retain_every_cached_projection() {
+        let project_id = ProjectId::default_project();
+        let sessions_dir = PathBuf::from("sessions");
+        let path = sessions_dir.join("retained.session-v2");
+        let session_id = SessionId::from_raw("retained");
+        let session = SessionInfo {
+            id: session_id.clone(),
+            project_id: project_id.as_str().into(),
+            path: path.clone(),
+            title: "Retained".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let errors = [
+            SessionError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "database temporarily unavailable",
+            )),
+            SessionError::Store(SessionStoreError::ReadonlyStore),
+        ];
+
+        for error in errors {
+            let mut sessions = HashMap::from([(sessions_dir.clone(), vec![session.clone()])]);
+            let mut documents = HashMap::from([(
+                path.clone(),
+                session_search_document(Arc::from(["retained".into()]), Arc::from("retained")),
+            )]);
+            let mut indices = HashMap::from([((project_id.clone(), session_id.clone()), 0)]);
+
+            assert!(!apply_project_catalog_result(
+                &project_id,
+                &sessions_dir,
+                Err(error),
+                &mut sessions,
+                &mut documents,
+                &mut indices,
+            ));
+
+            assert_eq!(sessions[&sessions_dir], vec![session.clone()]);
+            assert_eq!(documents[&path].searchable.as_ref(), "retained");
+            assert_eq!(indices[&(project_id.clone(), session_id.clone())], 0);
+        }
+    }
+
+    #[test]
+    fn startup_catalog_loader_reads_once_and_builds_consistent_linear_projections() {
+        const SESSIONS_PER_PROJECT: usize = 3_334;
+
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-linear-catalog-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let (mut project_store, _) =
+            ProjectStore::load(root.join("state"), Some(workspace_a)).unwrap();
+        project_store.add(workspace_b).unwrap();
+        let project_count = project_store.projects().len();
+        let mut reads = HashMap::<String, usize>::new();
+
+        let cache = load_session_catalog_cache_with(
+            &project_store,
+            |directory: &Path, project_id: &str| {
+                *reads.entry(project_id.to_owned()).or_default() += 1;
+                let mut catalog = SessionCatalog {
+                    sessions: Vec::with_capacity(SESSIONS_PER_PROJECT),
+                    search: HashMap::with_capacity(SESSIONS_PER_PROJECT),
+                };
+                for index in 0..SESSIONS_PER_PROJECT {
+                    let raw_id = format!("{project_id}-{index}");
+                    let id = SessionId::from_raw(raw_id.clone());
+                    let title = format!("Session {raw_id}");
+                    let path = directory.join(format!("{raw_id}.session-v2"));
+                    catalog.sessions.push(SessionInfo {
+                        id,
+                        project_id: project_id.into(),
+                        path: path.clone(),
+                        title: title.clone(),
+                        created_at: index as u64,
+                        updated_at: index as u64,
+                    });
+                    catalog.search.insert(
+                        path,
+                        kcastle_agent::SessionSearchData {
+                            values: Arc::from([title.clone()]),
+                            searchable: Arc::from(title.to_lowercase()),
+                        },
+                    );
+                }
+                Ok(catalog)
+            },
+        );
+
+        let expected_sessions = project_count * SESSIONS_PER_PROJECT;
+        assert!(expected_sessions >= 10_000);
+        assert_eq!(reads.len(), project_count);
+        assert!(reads.values().all(|reads| *reads == 1));
+        assert_eq!(cache.project_sessions.len(), project_count);
+        assert_eq!(cache.session_search_documents.len(), expected_sessions);
+        assert_eq!(cache.session_catalog_indices.len(), expected_sessions);
+        for project in project_store.projects() {
+            let sessions = &cache.project_sessions[&project.sessions_dir];
+            assert_eq!(sessions.len(), SESSIONS_PER_PROJECT);
+            for (index, session) in sessions.iter().enumerate() {
+                assert_eq!(session.project_id, project.id.as_str());
+                assert_eq!(
+                    cache
+                        .session_catalog_indices
+                        .get(&(project.id.clone(), session.id.clone())),
+                    Some(&index)
+                );
+                assert!(cache.session_search_documents.contains_key(&session.path));
+            }
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_an_invalid_project_catalog_removes_all_project_projections_only() {
+        let project_id = ProjectId::default_project();
+        let other_project_id: ProjectId = serde_json::from_str("\"other-project\"").unwrap();
+        let sessions_dir = PathBuf::from("sessions");
+        let other_sessions_dir = PathBuf::from("other-sessions");
+        let invalid_path = sessions_dir.join("invalid.session-v2");
+        let other_path = other_sessions_dir.join("valid.session-v2");
+        let invalid_id = SessionId::from_raw("invalid");
+        let other_id = SessionId::from_raw("valid");
+        let session = |id: SessionId, project: &ProjectId, path: PathBuf| SessionInfo {
+            id,
+            project_id: project.as_str().into(),
+            path,
+            title: "Session".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut sessions = HashMap::from([
+            (
+                sessions_dir.clone(),
+                vec![session(
+                    invalid_id.clone(),
+                    &project_id,
+                    invalid_path.clone(),
+                )],
+            ),
+            (
+                other_sessions_dir.clone(),
+                vec![session(
+                    other_id.clone(),
+                    &other_project_id,
+                    other_path.clone(),
+                )],
+            ),
+        ]);
+        let document =
+            || session_search_document(Arc::from(["needle".into()]), Arc::from("needle"));
+        let mut documents = HashMap::from([
+            (invalid_path.clone(), document()),
+            (other_path.clone(), document()),
+        ]);
+        let mut indices = HashMap::from([
+            ((project_id.clone(), invalid_id), 0),
+            ((other_project_id.clone(), other_id), 0),
+        ]);
+
+        clear_project_catalog_cache(
+            &project_id,
+            &sessions_dir,
+            &mut sessions,
+            &mut documents,
+            &mut indices,
+        );
+
+        assert!(sessions[&sessions_dir].is_empty());
+        assert_eq!(sessions[&other_sessions_dir].len(), 1);
+        assert!(!documents.contains_key(&invalid_path));
+        assert!(documents.contains_key(&other_path));
+        assert!(!indices.keys().any(|(project, _)| project == &project_id));
+        assert!(
+            indices
+                .keys()
+                .any(|(project, _)| project == &other_project_id)
+        );
+    }
+
+    #[gpui::test]
+    fn refreshing_an_invalid_catalog_removes_stale_sidebar_search_and_index_rows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-invalid-switch-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let (mut project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace_a.clone())).unwrap();
+        let project_b_index = project_store.add(workspace_b).unwrap();
+        let project_b = project_store.project(project_b_index).unwrap().clone();
+        let invalid_id = SessionId::from_raw("stale-invalid-switch");
+        let invalid_path = project_b
+            .sessions_dir
+            .join(format!("{invalid_id}.session-v2"));
+        let invalid = SessionInfo {
+            id: invalid_id.clone(),
+            project_id: project_b.id.as_str().into(),
+            path: invalid_path.clone(),
+            title: "Stale invalid session".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace_a);
+
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
+        });
+
+        std::fs::write(
+            project_b
+                .sessions_dir
+                .join(kcastle_agent::SESSION_DATABASE_FILE),
+            b"not a sqlite database",
+        )
+        .unwrap();
+        cx.update(|_, app| {
+            view.update(app, |this, _| {
+                this.project_sessions
+                    .get_mut(&project_b.sessions_dir)
+                    .unwrap()
+                    .push(invalid.clone());
+                this.session_search_documents.insert(
+                    invalid_path.clone(),
+                    session_search_document(Arc::from(["stale".into()]), Arc::from("stale")),
+                );
+                this.session_catalog_indices
+                    .insert((project_b.id.clone(), invalid_id.clone()), 0);
+
+                assert!(!this.refresh_project_catalog(&project_b.id));
+            });
+        });
+
+        cx.read_entity(&view, |app, _| {
+            assert!(app.project_sessions[&project_b.sessions_dir].is_empty());
+            assert!(!app.session_search_documents.contains_key(&invalid_path));
+            assert!(
+                !app.session_catalog_indices
+                    .contains_key(&(project_b.id.clone(), invalid_id))
+            );
+        });
+
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removing_an_invalid_catalog_entry_reindexes_remaining_entries() {
+        let project_id = ProjectId::default_project();
+        let sessions_dir = PathBuf::from("sessions");
+        let first_path = sessions_dir.join("first.session-v2");
+        let second_path = sessions_dir.join("second.session-v2");
+        let first = SessionInfo {
+            id: SessionId::from_raw("first"),
+            project_id: project_id.as_str().into(),
+            path: first_path.clone(),
+            title: "First".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let second = SessionInfo {
+            id: SessionId::from_raw("second"),
+            project_id: project_id.as_str().into(),
+            path: second_path.clone(),
+            title: "Second".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut sessions =
+            HashMap::from([(sessions_dir.clone(), vec![first.clone(), second.clone()])]);
+        let mut documents = HashMap::from([
+            (
+                first_path.clone(),
+                session_search_document(Arc::from(["first".into()]), Arc::from("first")),
+            ),
+            (
+                second_path.clone(),
+                session_search_document(Arc::from(["second".into()]), Arc::from("second")),
+            ),
+        ]);
+        let mut indices = HashMap::from([
+            ((project_id.clone(), first.id.clone()), 0),
+            ((project_id.clone(), second.id.clone()), 1),
+        ]);
+
+        assert_eq!(
+            remove_session_catalog_entry(
+                &project_id,
+                &sessions_dir,
+                &first_path,
+                &mut sessions,
+                &mut documents,
+                &mut indices,
+            ),
+            Some(first.id)
+        );
+        assert_eq!(sessions[&sessions_dir], vec![second.clone()]);
+        assert!(!documents.contains_key(&first_path));
+        assert!(documents.contains_key(&second_path));
+        assert_eq!(indices.get(&(project_id, second.id)), Some(&0));
+    }
+
     #[gpui::test]
     fn created_session_path_refreshes_the_sidebar_list(cx: &mut gpui::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
@@ -3255,6 +3871,98 @@ mod tests {
                 app.project_sessions[&app.core.workspace.sessions_dir][0].path,
                 app.core.session.current
             );
+        });
+
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn opening_an_invalid_session_silently_removes_its_catalog_entry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-invalid-open-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let project = project_store.project(active_project).unwrap().clone();
+        let invalid = SessionInfo {
+            id: SessionId::from_raw("invalid-open"),
+            project_id: project.id.as_str().into(),
+            path: project.sessions_dir.join("invalid-open.not-a-session"),
+            title: "Invalid".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
+        });
+
+        cx.update(|window, app| {
+            view.update(app, |this, cx| {
+                this.project_sessions
+                    .get_mut(&project.sessions_dir)
+                    .unwrap()
+                    .push(invalid.clone());
+                this.session_catalog_indices
+                    .insert((project.id.clone(), invalid.id.clone()), 0);
+                this.session_search_documents.insert(
+                    invalid.path.clone(),
+                    session_search_document(Arc::from(["invalid".into()]), Arc::from("invalid")),
+                );
+                let generation = this.begin_runtime_selection_intent();
+                let key = (project.id.clone(), invalid.path.clone());
+                assert!(this.start_session_open_request(&key, generation));
+                assert_eq!(
+                    this.finish_session_open_request(&key, generation, &project.id),
+                    SessionOpenCompletion::Current
+                );
+                // Exercise the same atomic error branch as `open_session_async` without asking a
+                // GPUI test window to perform the real-platform focus operation at its end.
+                this.discard_invalid_session_catalog_entry(active_project, &invalid.path);
+                assert!(!this.resolve_failed_runtime_selection(
+                    generation,
+                    &project.id,
+                    &invalid.path,
+                    active_project,
+                    cx,
+                ));
+                let _ = window;
+            });
+        });
+        cx.run_until_parked();
+
+        cx.read_entity(&view, |app, _| {
+            assert!(!app.selection_pending());
+            assert!(app.project_sessions[&project.sessions_dir].is_empty());
+            assert!(!app.session_search_documents.contains_key(&invalid.path));
+            assert!(app.core.transient_messages.is_empty());
+            assert!(app.core.session.current.as_os_str().is_empty());
         });
 
         close_test_window(view, cx);
@@ -3523,6 +4231,128 @@ mod tests {
             assert_ne!(target_entity, previous_entity);
             assert_eq!(this.selected_runtime.entity_id(), target_entity);
             assert_eq!(this.core.session.current, target.path);
+        });
+
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui::test]
+    fn successful_session_open_captures_view_edits_made_while_loading(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-pending-open-view-state-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let project = project_store.project(active_project).unwrap().clone();
+        let target = create_v2_session(
+            &project.sessions_dir,
+            project.id.as_str(),
+            SessionId::from_raw("pending-view-state-target"),
+            Some("Pending view-state target"),
+        );
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
+        });
+
+        let loaded_target =
+            Session::open_writable_in_project(&target.path, project.id.as_str()).unwrap();
+        cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let source_key = this
+                    .runtime_location(&this.selected_runtime)
+                    .expect("the source draft is registered");
+                this.core.surface = Surface::Trajectory;
+                let generation = this.begin_runtime_selection_intent();
+                let target_key = (project.id.clone(), target.path.clone());
+                assert!(this.start_session_open_request(&target_key, generation));
+
+                // These changes happen after the eager capture performed by the click handler.
+                // The successful handoff must capture them once more before replacing the runtime.
+                this.trajectory_query_value = "edited while loading".into();
+                this.trajectory_follow_tail.set(false);
+                let offset = ListOffset {
+                    item_ix: 7,
+                    offset_in_item: px(3.0),
+                };
+                this.trajectory_scroll_restore.set(Some(offset));
+                this.core.details.tab_history = vec![DetailsTab::Raw, DetailsTab::Timing];
+                this.details_scroll.set_offset(point(px(0.0), px(-42.0)));
+                let projection = &this.core.session_view.trajectory;
+                let axis = AxisId {
+                    document_generation: projection.projection_lineage(),
+                    geometry_revision: projection.revision(),
+                    mode: this.core.trajectory.mode,
+                };
+                let selected = AxisRange {
+                    axis,
+                    range: DomainRange::new(2.0, 5.0),
+                };
+                let viewport = AxisRange {
+                    axis,
+                    range: DomainRange::new(1.0, 8.0),
+                };
+                this.core.trajectory.selected_range = Some(selected);
+                this.core.trajectory.visible_range = Some(viewport);
+
+                assert_eq!(
+                    this.finish_session_open_request(&target_key, generation, &project.id),
+                    SessionOpenCompletion::Current
+                );
+                let runtime = this
+                    .reconcile_loaded_runtime(active_project, loaded_target, cx)
+                    .unwrap();
+                this.select_runtime(runtime, cx);
+
+                let saved = &this.view_states[&source_key];
+                assert_eq!(saved.trajectory_query, "edited while loading");
+                assert!(!saved.trajectory_follow_tail);
+                let saved_offset = saved
+                    .trajectory_offset
+                    .expect("the loading-time ledger offset should be saved");
+                assert_eq!(saved_offset.item_ix, offset.item_ix);
+                assert_eq!(saved_offset.offset_in_item, offset.offset_in_item);
+                assert_eq!(
+                    saved.details_tab_history,
+                    vec![DetailsTab::Raw, DetailsTab::Timing]
+                );
+                assert_eq!(saved.details_offset, point(px(0.0), px(-42.0)));
+                assert_eq!(
+                    saved.timeline_selection,
+                    Some(SavedTimelineRange::capture(selected))
+                );
+                assert_eq!(
+                    saved.timeline_viewport,
+                    Some(SavedTimelineRange::capture(viewport))
+                );
+                assert_eq!(this.core.session.current, target.path);
+            });
         });
 
         close_test_window(view, cx);
@@ -4000,6 +4830,180 @@ mod tests {
         let first = message(Role::Assistant, "first".into());
         let second = message(Role::Assistant, "second".into());
         assert_ne!(first.key, second.key);
+    }
+
+    #[test]
+    fn trajectory_folds_are_isolated_by_session_view_state() {
+        let assistant = TrajectoryItemId::Assistant(kcastle_agent::RequestId::from("request-a"));
+        let mut first = SessionViewState {
+            trajectory_offset: Some(ListOffset {
+                item_ix: 17,
+                offset_in_item: px(6.0),
+            }),
+            trajectory_follow_tail: false,
+            trajectory_query: "alpha crane".into(),
+            ..SessionViewState::default()
+        };
+        first.collapsed_turns.insert(1);
+        first.collapsed_assistants.insert(assistant.clone());
+        let second = SessionViewState::default();
+
+        assert_eq!(first.trajectory_offset.unwrap().item_ix, 17);
+        assert_eq!(first.trajectory_offset.unwrap().offset_in_item, px(6.0));
+        assert_eq!(first.trajectory_query, "alpha crane");
+        assert!(!first.trajectory_follow_tail);
+        assert!(second.trajectory_offset.is_none());
+        assert_eq!(second.trajectory_query, "");
+        assert!(second.trajectory_follow_tail);
+        assert_eq!(first.collapsed_turns, HashSet::from([1]));
+        assert_eq!(first.collapsed_assistants, HashSet::from([assistant]));
+        assert!(second.collapsed_turns.is_empty());
+        assert!(second.collapsed_assistants.is_empty());
+    }
+
+    #[test]
+    fn saved_timeline_ranges_rebase_to_a_replayed_session_projection() {
+        let original = AxisRange {
+            axis: AxisId {
+                document_generation: 17,
+                geometry_revision: 4,
+                mode: TimelineMode::Duration,
+            },
+            range: DomainRange::new(125.0, 875.0),
+        };
+        let saved = SavedTimelineRange::capture(original);
+
+        let restored = saved
+            .restore(TimelineMode::Duration, 91, 12)
+            .expect("the same mode should restore");
+        assert_eq!(restored.range, original.range);
+        assert_eq!(restored.axis.document_generation, 91);
+        assert_eq!(restored.axis.geometry_revision, 12);
+        assert_eq!(restored.axis.mode, TimelineMode::Duration);
+        assert_ne!(restored.axis, original.axis);
+        assert!(saved.restore(TimelineMode::Sequence, 91, 12).is_none());
+    }
+
+    #[gpui::test]
+    fn evicted_runtime_restores_ranges_on_the_fresh_projection_lineage(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-desktop-evicted-timeline-state-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let project = project_store.project(active_project).unwrap().clone();
+        let session_info = create_v2_session(
+            &project.sessions_dir,
+            project.id.as_str(),
+            SessionId::from_raw("evicted-timeline-state"),
+            Some("Evicted timeline state"),
+        );
+        let settings = SettingsStore::load(root.join("settings")).unwrap();
+        let model = Model::new("test", "key", "http://localhost", "test-model", 10_000);
+        let profile = ProviderModel::new("test-model", "Test Model", 10_000, None);
+        let configured = ConfiguredModel::new("test", profile, model.clone());
+        let agent = Agent::new(model, "test", Session::memory(), workspace);
+
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![configured],
+                    selected_model: 0,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur();
+            app
+        });
+
+        let first_session =
+            Session::open_writable_in_project(&session_info.path, project.id.as_str()).unwrap();
+        let (old_lineage, evicted_runtime) = cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let draft = this.selected_runtime.clone();
+                let runtime = this
+                    .create_runtime(active_project, first_session, cx)
+                    .unwrap();
+                let key = (project.id.clone(), session_info.id.clone());
+                this.select_runtime(runtime.clone(), cx);
+                this.core.surface = Surface::Trajectory;
+
+                let projection = &this.core.session_view.trajectory;
+                let old_lineage = projection.projection_lineage();
+                let axis = AxisId {
+                    document_generation: old_lineage,
+                    geometry_revision: projection.revision(),
+                    mode: this.core.trajectory.mode,
+                };
+                this.core.trajectory.selected_range = Some(AxisRange {
+                    axis,
+                    range: DomainRange::new(2.0, 4.0),
+                });
+                this.core.trajectory.visible_range = Some(AxisRange {
+                    axis,
+                    range: DomainRange::new(1.0, 8.0),
+                });
+
+                // Switching away captures the semantic ranges. Removing the terminal runtime then
+                // drops the document and its projection identity exactly like LRU eviction.
+                this.select_runtime(draft, cx);
+                this.remove_cached_runtime(&key);
+                (old_lineage, runtime.downgrade())
+            })
+        });
+        cx.run_until_parked();
+        assert!(
+            evicted_runtime.upgrade().is_none(),
+            "the test must drop the original document projection"
+        );
+
+        let replayed_session =
+            Session::open_writable_in_project(&session_info.path, project.id.as_str()).unwrap();
+        cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                let runtime = this
+                    .create_runtime(active_project, replayed_session, cx)
+                    .unwrap();
+                let new_lineage = runtime
+                    .read(cx)
+                    .snapshot()
+                    .view
+                    .trajectory
+                    .projection_lineage();
+                assert_ne!(new_lineage, old_lineage);
+
+                this.select_runtime(runtime, cx);
+                let selection = this
+                    .core
+                    .trajectory
+                    .selected_range
+                    .expect("selection should survive replay");
+                let viewport = this
+                    .core
+                    .trajectory
+                    .visible_range
+                    .expect("viewport should survive replay");
+                assert_eq!(selection.axis.document_generation, new_lineage);
+                assert_eq!(viewport.axis.document_generation, new_lineage);
+                assert_eq!(selection.range, DomainRange::new(2.0, 4.0));
+                assert_eq!(viewport.range, DomainRange::new(1.0, 8.0));
+            });
+        });
+
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

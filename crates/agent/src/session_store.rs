@@ -9,16 +9,23 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::session::{SessionConfig, SessionId};
-use crate::session_event::{AssistantChunk, EventTime, RecordedEvent, SessionEvent, TxId};
-use crate::session_machine::PlannedBatch;
+use crate::session_event::{
+    AssistantChunk, EventTime, RecordedEvent, SESSION_FORMAT_VERSION, SessionEvent, TxId,
+};
+use crate::session_machine::{PlannedBatch, SESSION_MACHINE_SEMANTICS_VERSION};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const SESSION_DATABASE_FILE: &str = "sessions.sqlite3";
 pub const JSONL_STORE_FORMAT_VERSION: u32 = 3;
-const DATABASE_SCHEMA_VERSION: u32 = 5;
+const DATABASE_SCHEMA_VERSION: u32 = 6;
 const CATALOG_EXTRACTOR_VERSION: i64 = 1;
+// A catalog row is safe to present only when both its serialized event representation and the
+// state-machine semantics that interpret those events match this binary. Keep the two inputs
+// explicit so either compatibility boundary must deliberately advance the persisted contract.
+const CATALOG_LOADABILITY_VERSION: i64 =
+    ((SESSION_FORMAT_VERSION as i64) << 32) | SESSION_MACHINE_SEMANTICS_VERSION as i64;
 
 #[cfg(test)]
 const FAILPOINT_NONE: u8 = 0;
@@ -82,6 +89,86 @@ pub enum SessionStoreError {
     NumericOverflow(u64),
     #[error("unsupported session database schema {found}; expected {expected}")]
     UnsupportedSchemaVersion { found: i64, expected: u32 },
+}
+
+/// Whether a failed session operation invalidates persisted session data or may succeed later.
+///
+/// Desktop catalog caches use this distinction to remove deterministic bad data without making a
+/// temporary lock or storage outage look like the user deleted their sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionErrorClass {
+    DeterministicInvalid,
+    Transient,
+    Operational,
+}
+
+impl SessionStoreError {
+    pub fn classification(&self) -> SessionErrorClass {
+        match self {
+            Self::Io(error) => classify_io_error(error),
+            Self::Sqlite(error) => classify_sqlite_error(error),
+            Self::Json(_)
+            | Self::SessionNotFound(_)
+            | Self::TransactionNotFound { .. }
+            | Self::EventSequenceConflict { .. }
+            | Self::EmptyTransaction
+            | Self::Invalid(_)
+            | Self::Corrupt(_)
+            | Self::NumericOverflow(_)
+            | Self::UnsupportedSchemaVersion { .. } => SessionErrorClass::DeterministicInvalid,
+            Self::RevisionConflict { .. }
+            | Self::OutcomeUnknown { .. }
+            | Self::WriterBusy { .. } => SessionErrorClass::Transient,
+            Self::LockPoisoned
+            | Self::TransactionConflict { .. }
+            | Self::InjectedBeforeCommit
+            | Self::InvalidWriterPermit { .. }
+            | Self::ReadonlyStore => SessionErrorClass::Operational,
+        }
+    }
+
+    pub fn is_deterministic_invalid(&self) -> bool {
+        self.classification() == SessionErrorClass::DeterministicInvalid
+    }
+}
+
+pub(crate) fn classify_io_error(error: &io::Error) -> SessionErrorClass {
+    match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
+            SessionErrorClass::DeterministicInvalid
+        }
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted => {
+            SessionErrorClass::Transient
+        }
+        _ => SessionErrorClass::Operational,
+    }
+}
+
+fn classify_sqlite_error(error: &rusqlite::Error) -> SessionErrorClass {
+    if let Some(code) = error.sqlite_error_code() {
+        return match code {
+            rusqlite::ffi::ErrorCode::DatabaseCorrupt | rusqlite::ffi::ErrorCode::NotADatabase => {
+                SessionErrorClass::DeterministicInvalid
+            }
+            rusqlite::ffi::ErrorCode::DatabaseBusy
+            | rusqlite::ffi::ErrorCode::DatabaseLocked
+            | rusqlite::ffi::ErrorCode::OperationInterrupted
+            | rusqlite::ffi::ErrorCode::SystemIoFailure
+            | rusqlite::ffi::ErrorCode::CannotOpen
+            | rusqlite::ffi::ErrorCode::FileLockingProtocolFailed
+            | rusqlite::ffi::ErrorCode::SchemaChanged => SessionErrorClass::Transient,
+            _ => SessionErrorClass::Operational,
+        };
+    }
+
+    match error {
+        rusqlite::Error::FromSqlConversionFailure(..)
+        | rusqlite::Error::IntegralValueOutOfRange(..)
+        | rusqlite::Error::Utf8Error(..)
+        | rusqlite::Error::InvalidColumnType(..)
+        | rusqlite::Error::QueryReturnedNoRows => SessionErrorClass::DeterministicInvalid,
+        _ => SessionErrorClass::Operational,
+    }
 }
 
 pub type TransactionId = TxId;
@@ -447,9 +534,13 @@ impl SessionStore {
         let session_key = positive_sql_i64(transaction.last_insert_rowid(), "session key")?;
         transaction.execute(
             "INSERT INTO session_catalog_projection (
-                session_key, indexed_revision, extractor_version, valid
-             ) VALUES (?1, 0, ?2, 1)",
-            params![session_key, CATALOG_EXTRACTOR_VERSION],
+                session_key, indexed_revision, extractor_version, loadability_version, valid
+             ) VALUES (?1, 0, ?2, ?3, 1)",
+            params![
+                session_key,
+                CATALOG_EXTRACTOR_VERSION,
+                CATALOG_LOADABILITY_VERSION
+            ],
         )?;
         transaction.commit()?;
         self.metadata_with_connection(&connection, &request.id)
@@ -661,6 +752,7 @@ impl SessionStore {
                ON p.session_key = s.session_key
               AND p.indexed_revision = s.revision
               AND p.extractor_version = ?2
+              AND p.loadability_version = ?3
               AND p.valid = 1
              LEFT JOIN session_search_fragments AS f
                ON f.session_key = s.session_key AND typeof(f.value) = 'text'
@@ -676,12 +768,19 @@ impl SessionStore {
              ORDER BY s.created_at_ms DESC, s.id ASC, f.event_seq ASC, f.ordinal ASC"
         );
         let mut statement = snapshot.prepare(&sql)?;
-        let rows = statement.query_map(params![project_id, CATALOG_EXTRACTOR_VERSION], |row| {
-            Ok((
-                raw_metadata_from_row(row)?,
-                row.get::<_, Option<String>>(8)?,
-            ))
-        })?;
+        let rows = statement.query_map(
+            params![
+                project_id,
+                CATALOG_EXTRACTOR_VERSION,
+                CATALOG_LOADABILITY_VERSION
+            ],
+            |row| {
+                Ok((
+                    raw_metadata_from_row(row)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )?;
         let mut sessions = Vec::new();
         let mut current: Option<(RawSessionMetadata, Vec<String>)> = None;
         for row in rows {
@@ -980,6 +1079,7 @@ impl SessionStore {
             .ok_or_else(|| SessionStoreError::SessionNotFound(session_id.clone()))?;
         let session_key = positive_sql_i64(session_key, "session key")?;
         let stored_next_event_seq = from_sql_u64(stored_next_event_seq, "next event sequence")?;
+        ensure_catalog_projection_loadable(&snapshot, session_key)?;
         let mut statement = snapshot.prepare(
             "SELECT tx_id, base_revision, revision, clock_id, request_digest,
                     committed_at_ms, first_event_seq, event_count
@@ -1178,7 +1278,7 @@ fn ensure_catalog_projection_current(
 ) -> Result<(), SessionStoreError> {
     let projection = connection
         .query_row(
-            "SELECT indexed_revision, extractor_version, valid
+            "SELECT indexed_revision, extractor_version, loadability_version, valid
              FROM session_catalog_projection
              WHERE session_key = ?1",
             params![session_key],
@@ -1187,20 +1287,50 @@ fn ensure_catalog_projection_current(
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
                 ))
             },
         )
         .optional()?;
-    let Some((indexed_revision, extractor_version, valid)) = projection else {
+    let Some((indexed_revision, extractor_version, loadability_version, valid)) = projection else {
         return Err(SessionStoreError::Corrupt(format!(
             "session {session_key} is missing its catalog projection"
         )));
     };
     let indexed_revision = from_sql_u64(indexed_revision, "catalog indexed revision")?;
-    if indexed_revision != revision || extractor_version != CATALOG_EXTRACTOR_VERSION || valid != 1
+    if indexed_revision != revision
+        || extractor_version != CATALOG_EXTRACTOR_VERSION
+        || loadability_version != CATALOG_LOADABILITY_VERSION
+        || valid != 1
     {
         return Err(SessionStoreError::Corrupt(format!(
-            "session {session_key} catalog projection is not current and valid (journal revision {revision}, indexed revision {indexed_revision}, extractor {extractor_version}, valid {valid})"
+            "session {session_key} catalog projection is not current and loadable (journal revision {revision}, indexed revision {indexed_revision}, extractor {extractor_version}, loadability {loadability_version}, valid {valid})"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_catalog_projection_loadable(
+    connection: &Connection,
+    session_key: i64,
+) -> Result<(), SessionStoreError> {
+    let loadability_version = connection
+        .query_row(
+            "SELECT loadability_version
+             FROM session_catalog_projection
+             WHERE session_key = ?1",
+            params![session_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    let Some(loadability_version) = loadability_version else {
+        return Err(SessionStoreError::Corrupt(format!(
+            "session {session_key} is missing its catalog projection"
+        )));
+    };
+    if loadability_version != CATALOG_LOADABILITY_VERSION {
+        return Err(SessionStoreError::Corrupt(format!(
+            "session {session_key} has incompatible loadability version {loadability_version}; expected {CATALOG_LOADABILITY_VERSION}"
         )));
     }
     Ok(())
@@ -1310,12 +1440,14 @@ fn update_catalog_projection(
          WHERE session_key = ?1
            AND indexed_revision = ?3
            AND extractor_version = ?4
+           AND loadability_version = ?5
            AND valid = 1",
         params![
             session_key,
             to_sql_i64(revision)?,
             to_sql_i64(current_revision)?,
-            CATALOG_EXTRACTOR_VERSION
+            CATALOG_EXTRACTOR_VERSION,
+            CATALOG_LOADABILITY_VERSION
         ],
     )?;
     if changed != 1 {
@@ -1882,10 +2014,11 @@ CREATE INDEX IF NOT EXISTS sessions_project_catalog
 ON sessions(project_id, archived_at_ms, created_at_ms DESC, id);
 
 CREATE TABLE IF NOT EXISTS session_catalog_projection (
-    session_key       INTEGER PRIMARY KEY,
-    indexed_revision  INTEGER NOT NULL DEFAULT 0 CHECK (indexed_revision >= 0),
-    extractor_version INTEGER NOT NULL CHECK (extractor_version > 0),
-    valid              INTEGER NOT NULL DEFAULT 1 CHECK (valid IN (0, 1)),
+    session_key        INTEGER PRIMARY KEY,
+    indexed_revision   INTEGER NOT NULL DEFAULT 0 CHECK (indexed_revision >= 0),
+    extractor_version  INTEGER NOT NULL CHECK (extractor_version > 0),
+    loadability_version INTEGER NOT NULL CHECK (loadability_version > 0),
+    valid               INTEGER NOT NULL DEFAULT 1 CHECK (valid IN (0, 1)),
     FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
 ) STRICT;
 
@@ -2011,8 +2144,9 @@ END;
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendFailpoint, AppendTx, ArchiveFilter, CreateStoredSession, MetadataUpdate,
-        SESSION_DATABASE_FILE, SessionStore, SessionStoreError, TransactionId,
+        AppendFailpoint, AppendTx, ArchiveFilter, CATALOG_EXTRACTOR_VERSION,
+        CATALOG_LOADABILITY_VERSION, CreateStoredSession, DATABASE_SCHEMA_VERSION, MetadataUpdate,
+        SESSION_DATABASE_FILE, SessionErrorClass, SessionStore, SessionStoreError, TransactionId,
         validate_retry_matches, writer_lock_file_name,
     };
     use crate::session::{SessionConfig, SessionId};
@@ -2067,7 +2201,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, i64::from(DATABASE_SCHEMA_VERSION));
         drop(writable);
 
         let readonly = SessionStore::open_database_readonly(&database_path).unwrap();
@@ -2094,8 +2228,9 @@ mod tests {
 
         let unsupported_path = directory.join("unsupported.sqlite3");
         let unsupported = Connection::open(&unsupported_path).unwrap();
+        let previous_schema = i64::from(DATABASE_SCHEMA_VERSION) - 1;
         unsupported
-            .pragma_update(None, "user_version", 1_i64)
+            .pragma_update(None, "user_version", previous_schema)
             .unwrap();
         drop(unsupported);
         for error in [
@@ -2109,9 +2244,9 @@ mod tests {
             assert!(matches!(
                 error,
                 SessionStoreError::UnsupportedSchemaVersion {
-                    found: 1,
-                    expected: 5
-                }
+                    found,
+                    expected: DATABASE_SCHEMA_VERSION
+                } if found == previous_schema
             ));
         }
 
@@ -2125,11 +2260,57 @@ mod tests {
             SessionStore::open_database(&unversioned_path),
             Err(SessionStoreError::UnsupportedSchemaVersion {
                 found: 0,
-                expected: 5
+                expected: DATABASE_SCHEMA_VERSION
             })
         ));
 
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn store_errors_distinguish_corrupt_data_from_temporary_storage_failures() {
+        use rusqlite::ffi::{Error, ErrorCode};
+
+        let sqlite = |code| {
+            SessionStoreError::Sqlite(rusqlite::Error::SqliteFailure(
+                Error {
+                    code,
+                    extended_code: 0,
+                },
+                None,
+            ))
+        };
+        assert_eq!(
+            sqlite(ErrorCode::DatabaseCorrupt).classification(),
+            SessionErrorClass::DeterministicInvalid
+        );
+        assert_eq!(
+            sqlite(ErrorCode::NotADatabase).classification(),
+            SessionErrorClass::DeterministicInvalid
+        );
+        for error in [
+            sqlite(ErrorCode::DatabaseBusy),
+            sqlite(ErrorCode::DatabaseLocked),
+            sqlite(ErrorCode::SystemIoFailure),
+        ] {
+            assert_eq!(error.classification(), SessionErrorClass::Transient);
+        }
+        assert_eq!(
+            SessionStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "retry",
+            ))
+            .classification(),
+            SessionErrorClass::Transient
+        );
+        assert_eq!(
+            SessionStoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bad bytes",
+            ))
+            .classification(),
+            SessionErrorClass::DeterministicInvalid
+        );
     }
 
     #[test]
@@ -2165,6 +2346,21 @@ mod tests {
         assert!(columns.iter().any(|column| column == "clock_id"));
         assert!(!columns.iter().any(|column| column == "session_id"));
         assert!(!columns.iter().any(|column| column == "request_blob"));
+
+        let projection_columns = connection
+            .prepare(
+                "SELECT name FROM pragma_table_info('session_catalog_projection') ORDER BY cid",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(
+            projection_columns
+                .iter()
+                .any(|column| column == "loadability_version")
+        );
 
         let mut statement = connection
             .prepare("SELECT name FROM pragma_table_info('journal_events') ORDER BY cid")
@@ -3104,6 +3300,37 @@ mod tests {
     }
 
     #[test]
+    fn catalog_and_load_reject_an_incompatible_loadability_projection_without_replay() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let incompatible = create_session(&store, "incompatible-loadability");
+        let visible = create_session(&store, "current-loadability");
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE session_catalog_projection
+                    SET loadability_version = ?1
+                  WHERE session_key = (SELECT session_key FROM sessions WHERE id = ?2)",
+                params![CATALOG_LOADABILITY_VERSION + 1, incompatible.id.as_str()],
+            )
+            .unwrap();
+
+        let catalog = store.catalog("project", ArchiveFilter::Active).unwrap();
+        assert_eq!(
+            catalog
+                .into_iter()
+                .map(|entry| entry.metadata.id)
+                .collect::<Vec<_>>(),
+            vec![visible.id]
+        );
+        assert!(matches!(
+            store.load(&incompatible.id),
+            Err(SessionStoreError::Corrupt(message))
+                if message.contains("loadability")
+        ));
+    }
+
+    #[test]
     fn invalid_session_ids_never_commit_and_catalog_skips_corrupt_rows_individually() {
         let store = SessionStore::open_in_memory().unwrap();
         let visible = create_session(&store, "visible");
@@ -3216,27 +3443,44 @@ mod tests {
     }
 
     #[test]
-    fn catalog_scales_by_projection_rows_for_many_small_sessions() {
-        const SESSION_COUNT: usize = 100;
-
+    fn catalog_scales_by_projection_rows_for_ten_thousand_sessions_without_replay() {
+        const SESSION_COUNT: usize = 10_000;
         let store = SessionStore::open_in_memory().unwrap();
-        for index in 0..SESSION_COUNT {
-            let session = create_session(&store, &format!("catalog-{index}"));
-            let permit = store.acquire_writer(&session.id).unwrap();
-            let request = append_request(
-                &session.id,
-                &format!("tx-catalog-scale-{index}"),
-                0,
-                vec![recorded(
-                    0,
-                    SessionEvent::InputSubmitted {
-                        input_id: InputId::from_raw(format!("input-{index}")),
-                        input: format!("needle-{index}"),
-                        origin: InputOrigin::Queue,
-                    },
-                )],
-            );
-            store.append(&request, &permit).unwrap();
+        let config = serde_json::to_vec(&SessionConfig::default()).unwrap();
+        {
+            let mut connection = store.connection().unwrap();
+            let transaction = connection.transaction().unwrap();
+            let mut insert_session = transaction
+                .prepare_cached(
+                    "INSERT INTO sessions (
+                        id, project_id, title, config_json, created_at_ms, updated_at_ms,
+                        archived_at_ms, revision, next_event_seq
+                     ) VALUES (?1, 'project', ?1, ?2, ?3, ?3, NULL, 0, 0)",
+                )
+                .unwrap();
+            let mut insert_projection = transaction
+                .prepare_cached(
+                    "INSERT INTO session_catalog_projection (
+                        session_key, indexed_revision, extractor_version,
+                        loadability_version, valid
+                     ) VALUES (?1, 0, ?2, ?3, 1)",
+                )
+                .unwrap();
+            for index in 0..SESSION_COUNT {
+                insert_session
+                    .execute(params![format!("catalog-{index}"), &config, index as i64])
+                    .unwrap();
+                insert_projection
+                    .execute(params![
+                        transaction.last_insert_rowid(),
+                        CATALOG_EXTRACTOR_VERSION,
+                        CATALOG_LOADABILITY_VERSION
+                    ])
+                    .unwrap();
+            }
+            drop(insert_projection);
+            drop(insert_session);
+            transaction.commit().unwrap();
         }
 
         let catalog_started = std::time::Instant::now();
@@ -3246,13 +3490,13 @@ mod tests {
         assert!(
             catalog
                 .iter()
-                .all(|entry| { entry.metadata.revision == 1 && entry.search_values.len() == 1 })
+                .all(|entry| entry.metadata.revision == 0 && entry.search_values.is_empty())
         );
         assert!(
-            catalog_elapsed < std::time::Duration::from_secs(1),
-            "100-session projection query took {catalog_elapsed:?}"
+            catalog_elapsed < std::time::Duration::from_secs(3),
+            "10k-session projection query took {catalog_elapsed:?}"
         );
-        eprintln!("100-session projection catalog query: {catalog_elapsed:?}");
+        eprintln!("10k-session projection catalog query: {catalog_elapsed:?}");
         let query_plan = store
             .connection()
             .unwrap()
@@ -3261,15 +3505,19 @@ mod tests {
                  SELECT s.id, f.value
                  FROM sessions AS s
                  JOIN session_catalog_projection AS p
-                   ON p.session_key = s.session_key
+                  ON p.session_key = s.session_key
                   AND p.indexed_revision = s.revision
-                  AND p.extractor_version = 1
+                  AND p.extractor_version = ?1
+                  AND p.loadability_version = ?2
                   AND p.valid = 1
                  LEFT JOIN session_search_fragments AS f ON f.session_key = s.session_key
                  WHERE s.project_id = 'project' AND s.archived_at_ms IS NULL",
             )
             .unwrap()
-            .query_map([], |row| row.get::<_, String>(3))
+            .query_map(
+                params![CATALOG_EXTRACTOR_VERSION, CATALOG_LOADABILITY_VERSION],
+                |row| row.get::<_, String>(3),
+            )
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()

@@ -23,11 +23,14 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             recompute_layout(state, &mut effects);
         }
         Action::SelectDetails(selected) => {
+            if state.details.selected != selected {
+                state.details.unix_time = false;
+            }
             state.details.selected = selected.clone();
             state.layout_input.details_visible = selected.is_some();
             recompute_layout(state, &mut effects);
         }
-        Action::SetDetailsTab(tab) => state.details.tab = tab,
+        Action::SetDetailsTab(tab) => state.details.activate_tab(tab),
         Action::SetComposerMenu(menu) => {
             state.composer.menu = menu;
             state.composer.highlighted_item = 0;
@@ -98,26 +101,54 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         }
         Action::SetTimelineSelection(range) => state.trajectory.selected_range = range,
         Action::SetTimelineViewport(range) => state.trajectory.visible_range = range,
-        Action::ToggleTimelineUnixTime => {
-            state.trajectory.unix_time = !state.trajectory.unix_time;
+        Action::ToggleDetailsUnixTime => {
+            state.details.unix_time = !state.details.unix_time;
         }
-        Action::ToggleTrajectoryTurns => {
-            state.trajectory.collapsed_turns = !state.trajectory.collapsed_turns;
+        Action::ToggleTrajectoryTurn(turn) => {
+            if !state.trajectory.collapsed_turns.remove(&turn) {
+                state.trajectory.collapsed_turns.insert(turn);
+            }
+            state.trajectory.fold_revision = state.trajectory.fold_revision.saturating_add(1);
         }
-        Action::ToggleTrajectoryCalls => {
-            state.trajectory.collapsed_calls = !state.trajectory.collapsed_calls;
+        Action::ToggleTrajectoryAssistant(assistant) => {
+            if !state.trajectory.collapsed_assistants.remove(&assistant) {
+                state.trajectory.collapsed_assistants.insert(assistant);
+            }
+            state.trajectory.fold_revision = state.trajectory.fold_revision.saturating_add(1);
+        }
+        Action::SetTrajectoryTurnsCollapsed(turns) => {
+            if state.trajectory.collapsed_turns != turns {
+                state.trajectory.collapsed_turns = turns;
+                state.trajectory.fold_revision = state.trajectory.fold_revision.saturating_add(1);
+            }
+        }
+        Action::SetTrajectoryAssistantsCollapsed(assistants) => {
+            if state.trajectory.collapsed_assistants != assistants {
+                state.trajectory.collapsed_assistants = assistants;
+                state.trajectory.fold_revision = state.trajectory.fold_revision.saturating_add(1);
+            }
         }
         Action::ExpandTrajectoryGroups => {
-            state.trajectory.collapsed_turns = false;
-            state.trajectory.collapsed_calls = false;
+            if !state.trajectory.collapsed_turns.is_empty()
+                || !state.trajectory.collapsed_assistants.is_empty()
+            {
+                state.trajectory.collapsed_turns.clear();
+                state.trajectory.collapsed_assistants.clear();
+                state.trajectory.fold_revision = state.trajectory.fold_revision.saturating_add(1);
+            }
         }
         Action::RestoreSessionView {
             selected,
-            details_tab,
+            details_tab_history,
             follow_chat_tail,
         } => {
             state.details.selected = selected.clone();
-            state.details.tab = details_tab;
+            state.details.tab_history = if details_tab_history.is_empty() {
+                vec![crate::domain::DetailsTab::Summary]
+            } else {
+                details_tab_history
+            };
+            state.details.unix_time = false;
             state.follow_chat_tail = follow_chat_tail;
             if follow_chat_tail {
                 state.unread_stream_updates = 0;
@@ -211,9 +242,11 @@ fn recompute_layout(state: &mut AppState, effects: &mut Vec<Effect>) {
 mod tests {
     use std::path::PathBuf;
 
+    use kcastle_agent::RequestId;
+
     use super::*;
     use crate::domain::timeline::{AxisId, AxisRange, DomainRange, TimelineMode};
-    use crate::domain::{Message, MessageId, Role};
+    use crate::domain::{DetailsSelection, DetailsTab, Message, MessageId, Role, TrajectoryItemId};
     use crate::layout::LayoutInput;
 
     #[test]
@@ -252,6 +285,52 @@ mod tests {
 
         assert_eq!(state.trajectory.selected_range, None);
         assert_eq!(state.trajectory.visible_range, Some(range));
+    }
+
+    #[test]
+    fn details_selection_uses_mru_valid_tabs_and_resets_local_clock_format() {
+        let mut state = AppState::new(LayoutInput::default());
+        let record =
+            DetailsSelection::Record(TrajectoryItemId::Assistant(RequestId::from("request-1")));
+        reduce(&mut state, Action::SelectDetails(Some(record)));
+        reduce(&mut state, Action::SetDetailsTab(DetailsTab::Timing));
+        reduce(&mut state, Action::SetDetailsTab(DetailsTab::Preview));
+        assert_eq!(
+            state
+                .details
+                .active_tab(&[DetailsTab::Summary, DetailsTab::Preview]),
+            DetailsTab::Preview
+        );
+        assert_eq!(
+            state.details.active_tab(&[
+                DetailsTab::Summary,
+                DetailsTab::Options,
+                DetailsTab::Usage,
+                DetailsTab::Timing,
+            ]),
+            DetailsTab::Timing
+        );
+
+        reduce(&mut state, Action::ToggleDetailsUnixTime);
+        assert!(state.details.unix_time);
+        reduce(&mut state, Action::SetDetailsTab(DetailsTab::Timing));
+        assert!(state.details.unix_time);
+        reduce(&mut state, Action::SetDetailsTab(DetailsTab::Summary));
+        assert!(!state.details.unix_time);
+    }
+
+    #[test]
+    fn restoring_an_empty_details_history_falls_back_to_summary() {
+        let mut state = AppState::new(LayoutInput::default());
+        reduce(
+            &mut state,
+            Action::RestoreSessionView {
+                selected: None,
+                details_tab_history: Vec::new(),
+                follow_chat_tail: true,
+            },
+        );
+        assert_eq!(state.details.tab_history, vec![DetailsTab::Summary]);
     }
 
     #[test]

@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::domain::timeline::{AxisRange, TimelineMode};
-use crate::domain::{LayoutGeneration, Message, RunId, SessionView, TrajectoryItemId};
+use crate::domain::{
+    LayoutGeneration, Message, RunId, SessionView, TrajectoryItemId, TrajectoryRequestKey,
+};
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
 use im::Vector;
 
@@ -54,10 +56,70 @@ impl Default for SidebarState {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DetailsState {
-    pub(crate) selected: Option<TrajectoryItemId>,
-    pub(crate) tab: DetailsTab,
+    pub(crate) selected: Option<DetailsSelection>,
+    /// Most-recently-used tab order. The inspector resolves the first tab that is valid for the
+    /// selected entity, so changing between heterogeneous records cannot leave an impossible tab
+    /// selected and returning to an entity restores the user's last meaningful tab.
+    pub(crate) tab_history: Vec<DetailsTab>,
+    /// A details-local display preference, reset whenever the selected entity or tab changes.
+    pub(crate) unix_time: bool,
+}
+
+impl Default for DetailsState {
+    fn default() -> Self {
+        Self {
+            selected: None,
+            tab_history: vec![DetailsTab::Summary],
+            unix_time: false,
+        }
+    }
+}
+
+impl DetailsState {
+    pub(crate) fn active_tab(&self, available: &[DetailsTab]) -> DetailsTab {
+        self.tab_history
+            .iter()
+            .rev()
+            .copied()
+            .find(|tab| available.contains(tab))
+            .or_else(|| available.first().copied())
+            .unwrap_or(DetailsTab::Summary)
+    }
+
+    pub(crate) fn activate_tab(&mut self, tab: DetailsTab) {
+        self.tab_history.retain(|candidate| *candidate != tab);
+        self.tab_history.push(tab);
+        // The displayed clock preference belongs to Timing. Re-activating the effective Timing
+        // tab after an entity change can move it to the MRU tail even though it was already the
+        // resolved tab; that must not silently change the clock. Leaving Timing still resets it.
+        if tab != DetailsTab::Timing {
+            self.unix_time = false;
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DetailsSelection {
+    Record(TrajectoryItemId),
+    Request(TrajectoryRequestKey),
+}
+
+impl DetailsSelection {
+    pub(crate) fn record(&self) -> Option<&TrajectoryItemId> {
+        match self {
+            Self::Record(id) => Some(id),
+            Self::Request(_) => None,
+        }
+    }
+
+    pub(crate) fn request(&self) -> Option<&TrajectoryRequestKey> {
+        match self {
+            Self::Record(_) => None,
+            Self::Request(key) => Some(key),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,10 +133,16 @@ pub(crate) struct ApprovalState {
 pub(crate) enum DetailsTab {
     #[default]
     Summary,
+    SystemPrompt,
+    Diff,
+    Tools,
     Preview,
     Raw,
     Payload,
     Result,
+    Schema,
+    Options,
+    Usage,
     Timing,
 }
 
@@ -91,17 +159,19 @@ pub(crate) enum RunState {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct TrajectoryState {
-    pub(crate) collapsed_turns: bool,
-    pub(crate) collapsed_calls: bool,
+    pub(crate) collapsed_turns: HashSet<u32>,
+    pub(crate) collapsed_assistants: HashSet<TrajectoryItemId>,
+    /// Monotonic presentation revision used by render caches to avoid comparing large fold sets
+    /// on every GPUI notification.
+    pub(crate) fold_revision: u64,
     pub(crate) mode: TimelineMode,
     /// Ranges are meaningful only in the projection that created them. Keeping
     /// the axis alongside the coordinates makes stale view state unrepresentable
     /// as a range on a newer document revision or another timeline mode.
     pub(crate) selected_range: Option<AxisRange>,
     pub(crate) visible_range: Option<AxisRange>,
-    pub(crate) unix_time: bool,
 }
 
 #[derive(Debug, Default)]

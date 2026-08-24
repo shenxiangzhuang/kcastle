@@ -12,6 +12,7 @@ use crate::ui_theme::palette;
 
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_pending_trajectory_query_restore(window, cx);
         let empty = conversation_view_model(&self.core).empty;
         let sidebar_mode = self.core.layout.sidebar;
         let colors = palette(cx);

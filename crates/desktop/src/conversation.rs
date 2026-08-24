@@ -110,7 +110,7 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if self.core.surface == Surface::Trajectory {
-            self.trajectory_panel(cx).into_any_element()
+            self.trajectory_panel(window, cx).into_any_element()
         } else {
             self.chat_timeline(window, cx).into_any_element()
         }

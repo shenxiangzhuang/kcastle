@@ -2,9 +2,8 @@ use crate::layout::{ContainerInput, resolve_container};
 
 const SIDEBAR_EXPANDED_WIDTH: f32 = 280.0;
 const MAIN_MIN_WIDTH: f32 = 720.0;
-const LEDGER_MIN_WIDTH: f32 = 500.0;
-const DETAILS_MIN_WIDTH: f32 = 380.0;
-const PANE_GUTTER: f32 = 1.0;
+const DETAILS_OVERLAY_MAX_WIDTH: f32 = 760.0;
+const DETAILS_SPLIT_MIN_WIDTH: f32 = 761.0;
 const CONTENT_MAX_WIDTH_REM: f32 = 46.75;
 const COMPOSER_MAX_WIDTH_REM: f32 = 48.75;
 const CHAT_SIDE_PADDING_REM: f32 = 1.0;
@@ -94,7 +93,7 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
         16.0
     };
     let required_main_width = if input.trajectory_visible && input.details_visible {
-        (LEDGER_MIN_WIDTH + DETAILS_MIN_WIDTH + PANE_GUTTER).max(MAIN_MIN_WIDTH)
+        DETAILS_SPLIT_MIN_WIDTH.max(MAIN_MIN_WIDTH)
     } else {
         MAIN_MIN_WIDTH
     };
@@ -119,7 +118,7 @@ pub(crate) fn resolve_layout(input: LayoutInput) -> LayoutPlan {
     };
     let trajectory = if !input.trajectory_visible || !input.details_visible {
         TrajectoryMode::Ledger
-    } else if main_width >= LEDGER_MIN_WIDTH + DETAILS_MIN_WIDTH + PANE_GUTTER {
+    } else if main_width > DETAILS_OVERLAY_MAX_WIDTH {
         TrajectoryMode::Split
     } else {
         TrajectoryMode::Overlay
@@ -182,7 +181,7 @@ mod tests {
             ..LayoutInput::default()
         });
         assert_eq!(narrow.sidebar, SidebarMode::Rail);
-        assert_eq!(narrow.trajectory, TrajectoryMode::Overlay);
+        assert_eq!(narrow.trajectory, TrajectoryMode::Split);
 
         let wide = resolve_layout(LayoutInput {
             viewport_width: 1180.0,
@@ -192,6 +191,50 @@ mod tests {
         });
         assert_eq!(wide.sidebar, SidebarMode::Expanded);
         assert_eq!(wide.trajectory, TrajectoryMode::Split);
+    }
+
+    #[test]
+    fn trajectory_details_overlay_breakpoint_matches_dsh() {
+        let at_breakpoint = resolve_layout(LayoutInput {
+            viewport_width: 760.0,
+            sidebar_requested: false,
+            trajectory_visible: true,
+            details_visible: true,
+            ..LayoutInput::default()
+        });
+        assert_eq!(at_breakpoint.main_width, 760.0);
+        assert_eq!(at_breakpoint.trajectory, TrajectoryMode::Overlay);
+
+        let above_breakpoint = resolve_layout(LayoutInput {
+            viewport_width: 761.0,
+            sidebar_requested: false,
+            trajectory_visible: true,
+            details_visible: true,
+            ..LayoutInput::default()
+        });
+        assert_eq!(above_breakpoint.main_width, 761.0);
+        assert_eq!(above_breakpoint.trajectory, TrajectoryMode::Split);
+
+        let before_sidebar_expansion = resolve_layout(LayoutInput {
+            viewport_width: 1_040.0,
+            sidebar_requested: true,
+            trajectory_visible: true,
+            details_visible: true,
+            ..LayoutInput::default()
+        });
+        assert_eq!(before_sidebar_expansion.sidebar, SidebarMode::Rail);
+        assert_eq!(before_sidebar_expansion.trajectory, TrajectoryMode::Split);
+
+        let at_sidebar_expansion = resolve_layout(LayoutInput {
+            viewport_width: 1_041.0,
+            sidebar_requested: true,
+            trajectory_visible: true,
+            details_visible: true,
+            ..LayoutInput::default()
+        });
+        assert_eq!(at_sidebar_expansion.sidebar, SidebarMode::Expanded);
+        assert_eq!(at_sidebar_expansion.main_width, 761.0);
+        assert_eq!(at_sidebar_expansion.trajectory, TrajectoryMode::Split);
     }
 
     #[test]

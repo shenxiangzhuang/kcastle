@@ -102,6 +102,8 @@ struct StoredSettings {
     #[serde(default)]
     reduce_motion: bool,
     #[serde(default)]
+    trajectory_actual_duration: bool,
+    #[serde(default)]
     #[serde(alias = "model_profiles")]
     providers: Vec<ProviderProfile>,
 }
@@ -281,6 +283,18 @@ impl SettingsStore {
         self.save()
     }
 
+    pub(crate) fn trajectory_actual_duration(&self) -> bool {
+        self.stored.trajectory_actual_duration
+    }
+
+    pub(crate) fn set_trajectory_actual_duration(
+        &mut self,
+        enabled: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.stored.trajectory_actual_duration = enabled;
+        self.save()
+    }
+
     fn save(&self) -> Result<(), Box<dyn Error>> {
         let temporary = self.path.with_extension("json.tmp");
         fs::write(&temporary, serde_json::to_vec_pretty(&self.stored)?)?;
@@ -341,6 +355,7 @@ mod tests {
         store.set_appearance(Appearance::Dark).unwrap();
         store.set_enter_behavior(EnterBehavior::Queue).unwrap();
         store.set_reduce_motion(true).unwrap();
+        store.set_trajectory_actual_duration(true).unwrap();
         store
             .save_provider_profile(
                 ProviderProfile::new(
@@ -378,6 +393,7 @@ mod tests {
         assert_eq!(store.appearance(), Appearance::Dark);
         assert_eq!(store.enter_behavior(), EnterBehavior::Queue);
         assert!(store.reduce_motion());
+        assert!(store.trajectory_actual_duration());
         assert_eq!(store.provider_profiles()[0].api_key(), Some("secret"));
         assert_eq!(store.provider_profiles()[0].models.len(), 2);
         assert_eq!(
