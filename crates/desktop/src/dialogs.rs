@@ -289,12 +289,11 @@ fn archived_sessions_view(
                         .ghost()
                         .small()
                         .tooltip("Restore session")
-                        .on_click(move |_, window, cx| {
+                        .on_click(move |_, _window, cx| {
                             restore_view.update(cx, |app, cx| {
                                 app.restore_archived_session(
                                     project_index,
                                     restore_session.clone(),
-                                    window,
                                     cx,
                                 )
                             });

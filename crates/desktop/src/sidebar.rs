@@ -374,9 +374,7 @@ impl DesktopApp {
                     .expanded_projects
                     .contains(&project.path)
                     || !query.is_empty();
-                let mut sessions = if active {
-                    self.core.session.sessions.clone()
-                } else if expanded {
+                let mut sessions = if active || expanded {
                     self.project_sessions
                         .get(&project.sessions_dir)
                         .cloned()

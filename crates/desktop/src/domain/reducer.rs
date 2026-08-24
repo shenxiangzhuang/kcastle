@@ -129,16 +129,13 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             index,
             cwd,
             sessions_dir,
-            sessions,
         } => {
             state.workspace.active_project = index;
             state.workspace.expanded_projects.insert(cwd.clone());
             state.workspace.cwd = cwd;
             state.workspace.sessions_dir = sessions_dir;
-            state.session.sessions = sessions;
         }
         Action::SetActiveProject(index) => state.workspace.active_project = index,
-        Action::RefreshSessions(sessions) => state.session.sessions = sessions,
         Action::AppendTransientNotice(message) => {
             let mut message = *message;
             if let Some(previous) = state
@@ -287,7 +284,6 @@ mod tests {
         }
 
         assert!(Arc::ptr_eq(&state.session_view, &canonical));
-        assert_eq!(state.session_view.revision, canonical.revision);
         assert_eq!(state.transient_messages.len(), 8);
         assert_eq!(state.transient_messages.front().unwrap().text, "notice 2");
         assert_eq!(state.transient_messages.back().unwrap().text, "notice 9");

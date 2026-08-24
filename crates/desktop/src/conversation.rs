@@ -208,222 +208,238 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = palette(cx);
-        let presentation = self.message_presentations.get(message.key);
-        let content = match message.role {
-            Role::User => div()
-                .id(("user-message-row", index))
-                .group(SharedString::from(format!("user-message-{index}")))
-                .flex()
-                .flex_col()
-                .items_end()
-                .w_full()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .max_w(px(525.0))
-                        .px_4()
-                        .py(px(10.0))
-                        .rounded(px(22.0))
-                        .bg(colors.user_bubble)
-                        .line_height(px(metrics::BODY_LINE_HEIGHT))
-                        .child(presentation.render_text.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(28.0))
-                        .gap(px(10.0))
-                        .child(
-                            div()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("user-message-{index}")),
-                                    |time| time.visible(),
-                                )
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(message_time_label(message)),
-                        )
-                        .child(
-                            Clipboard::new(("copy-user", index))
-                                .value(presentation.render_text.clone()),
-                        ),
-                )
-                .into_any_element(),
-            Role::Assistant => div()
-                .id(("assistant-message-row", index))
-                .group(SharedString::from(format!("assistant-message-{index}")))
-                .flex()
-                .flex_col()
-                .w_full()
-                .gap_4()
-                .text_color(colors.text)
-                .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
-                .child(assistant_body(
-                    message,
-                    presentation,
-                    self.core.layout.content_max_width,
-                    window,
-                    cx,
-                ))
-                .children((!message.pending).then(|| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .h(px(28.0))
-                        .gap(px(10.0))
-                        .child(
-                            Clipboard::new(("copy-assistant", index))
-                                .value(presentation.render_text.clone()),
-                        )
-                        .child(
-                            Button::new(("good-response", index))
-                                .icon(IconName::ThumbsUp)
-                                .ghost()
-                                .compact()
-                                .when(presentation.rating() == Some(true), |button| {
-                                    button.primary()
-                                })
-                                .tooltip("Good response")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.rate_message(index, true, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new(("bad-response", index))
-                                .icon(IconName::ThumbsDown)
-                                .ghost()
-                                .compact()
-                                .when(presentation.rating() == Some(false), |button| {
-                                    button.danger()
-                                })
-                                .tooltip("Bad response")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.rate_message(index, false, cx)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("assistant-message-{index}")),
-                                    |time| time.visible(),
-                                )
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(message_time_label(message)),
-                        )
-                }))
-                .into_any_element(),
-            Role::Reasoning => {
-                let preview = reasoning_preview(&message.text, message.pending);
-                let follow_summary_end = message.pending && !presentation.expanded();
-                presentation.align_reasoning_summary(follow_summary_end, message.revision, window);
-                let reasoning_summary_scroll = presentation.reasoning_summary_scroll();
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .id(("reasoning-row", index))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .h(px(24.0))
-                            .line_height(px(24.0))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .tab_index(0)
-                            .hover(move |row| row.bg(colors.hover))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.toggle_reasoning(index, cx)),
-                            )
-                            .on_key_down(cx.listener(
-                                move |this, event: &gpui::KeyDownEvent, _, cx| {
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        this.toggle_reasoning(index, cx);
-                                    }
-                                },
-                            ))
-                            .child(
-                                Icon::new(if presentation.expanded() {
-                                    IconName::ChevronDown
-                                } else {
-                                    IconName::ChevronRight
-                                })
-                                .size_4()
-                                .text_color(colors.assistant),
-                            )
-                            .child(div().text_sm().text_color(colors.text).child("Think"))
-                            .child(if message.pending && !self.settings.reduce_motion() {
-                                Spinner::new()
-                                    .small()
-                                    .color(colors.primary)
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .size(px(if message.pending { 6.0 } else { 3.0 }))
-                                    .rounded_full()
-                                    .bg(if message.pending {
-                                        colors.primary
-                                    } else {
-                                        colors.muted_text
-                                    })
-                                    .into_any_element()
-                            })
-                            .child(if presentation.expanded() {
-                                div().flex_1().into_any_element()
-                            } else if message.pending {
-                                div()
-                                    .id(("reasoning-summary", index))
-                                    .flex()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .overflow_x_scroll()
-                                    .track_scroll(&reasoning_summary_scroll)
-                                    .text_sm()
-                                    .text_color(colors.muted_text)
-                                    .child(div().flex_none().whitespace_nowrap().child(preview))
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .truncate()
-                                    .text_sm()
-                                    .text_color(colors.muted_text)
-                                    .child(preview)
-                                    .into_any_element()
-                            }),
-                    )
-                    .when(presentation.expanded(), |row| {
-                        row.child(
-                            div()
-                                .ml(px(22.0))
-                                .pl_3()
-                                .border_l_1()
-                                .border_color(colors.border)
-                                .text_sm()
-                                .line_height(px(24.0))
-                                .text_color(colors.muted_text)
-                                .child(presentation.render_text.clone()),
-                        )
-                    })
-                    .into_any_element()
-            }
-            Role::Tool => self.tool_row(index, message, presentation, cx),
-            Role::Notice => div()
+        let content = if message.role == Role::Notice {
+            div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .text_sm()
                 .text_color(colors.muted_text)
                 .child(Icon::new(IconName::Info).size_4())
-                .child(presentation.render_text.clone())
-                .into_any_element(),
+                .child(message.text.clone())
+                .into_any_element()
+        } else {
+            let mut presentations = self.message_presentations.borrow_mut();
+            let presentation = presentations.sync_message(
+                message.key,
+                self.core.session_view.trajectory.projection_lineage(),
+                message.revision,
+                &message.text,
+                message.role == Role::Assistant,
+            );
+            match message.role {
+                Role::User => div()
+                    .id(("user-message-row", index))
+                    .group(SharedString::from(format!("user-message-{index}")))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .w_full()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .max_w(px(525.0))
+                            .px_4()
+                            .py(px(10.0))
+                            .rounded(px(22.0))
+                            .bg(colors.user_bubble)
+                            .line_height(px(metrics::BODY_LINE_HEIGHT))
+                            .child(presentation.render_text.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("user-message-{index}")),
+                                        |time| time.visible(),
+                                    )
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(message_time_label(message)),
+                            )
+                            .child(
+                                Clipboard::new(("copy-user", index))
+                                    .value(presentation.render_text.clone()),
+                            ),
+                    )
+                    .into_any_element(),
+                Role::Assistant => div()
+                    .id(("assistant-message-row", index))
+                    .group(SharedString::from(format!("assistant-message-{index}")))
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap_4()
+                    .text_color(colors.text)
+                    .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
+                    .child(assistant_body(
+                        message,
+                        presentation,
+                        self.core.layout.content_max_width,
+                        window,
+                        cx,
+                    ))
+                    .children((!message.pending).then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .gap(px(10.0))
+                            .child(
+                                Clipboard::new(("copy-assistant", index))
+                                    .value(presentation.render_text.clone()),
+                            )
+                            .child(
+                                Button::new(("good-response", index))
+                                    .icon(IconName::ThumbsUp)
+                                    .ghost()
+                                    .compact()
+                                    .when(presentation.rating() == Some(true), |button| {
+                                        button.primary()
+                                    })
+                                    .tooltip("Good response")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rate_message(index, true, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("bad-response", index))
+                                    .icon(IconName::ThumbsDown)
+                                    .ghost()
+                                    .compact()
+                                    .when(presentation.rating() == Some(false), |button| {
+                                        button.danger()
+                                    })
+                                    .tooltip("Bad response")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rate_message(index, false, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("assistant-message-{index}")),
+                                        |time| time.visible(),
+                                    )
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(message_time_label(message)),
+                            )
+                    }))
+                    .into_any_element(),
+                Role::Reasoning => {
+                    let preview = reasoning_preview(&message.text, message.pending);
+                    let follow_summary_end = message.pending && !presentation.expanded();
+                    presentation.align_reasoning_summary(
+                        follow_summary_end,
+                        message.revision,
+                        window,
+                    );
+                    let reasoning_summary_scroll = presentation.reasoning_summary_scroll();
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .id(("reasoning-row", index))
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .h(px(24.0))
+                                .line_height(px(24.0))
+                                .rounded_md()
+                                .cursor_pointer()
+                                .tab_index(0)
+                                .hover(move |row| row.bg(colors.hover))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_reasoning(index, cx)
+                                }))
+                                .on_key_down(cx.listener(
+                                    move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            this.toggle_reasoning(index, cx);
+                                        }
+                                    },
+                                ))
+                                .child(
+                                    Icon::new(if presentation.expanded() {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .size_4()
+                                    .text_color(colors.assistant),
+                                )
+                                .child(div().text_sm().text_color(colors.text).child("Think"))
+                                .child(if message.pending && !self.settings.reduce_motion() {
+                                    Spinner::new()
+                                        .small()
+                                        .color(colors.primary)
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .size(px(if message.pending { 6.0 } else { 3.0 }))
+                                        .rounded_full()
+                                        .bg(if message.pending {
+                                            colors.primary
+                                        } else {
+                                            colors.muted_text
+                                        })
+                                        .into_any_element()
+                                })
+                                .child(if presentation.expanded() {
+                                    div().flex_1().into_any_element()
+                                } else if message.pending {
+                                    div()
+                                        .id(("reasoning-summary", index))
+                                        .flex()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .overflow_x_scroll()
+                                        .track_scroll(&reasoning_summary_scroll)
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child(div().flex_none().whitespace_nowrap().child(preview))
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.0))
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(colors.muted_text)
+                                        .child(preview)
+                                        .into_any_element()
+                                }),
+                        )
+                        .when(presentation.expanded(), |row| {
+                            row.child(
+                                div()
+                                    .ml(px(22.0))
+                                    .pl_3()
+                                    .border_l_1()
+                                    .border_color(colors.border)
+                                    .text_sm()
+                                    .line_height(px(24.0))
+                                    .text_color(colors.muted_text)
+                                    .child(presentation.render_text.clone()),
+                            )
+                        })
+                        .into_any_element()
+                }
+                Role::Tool => self.tool_row(index, message, presentation, cx),
+                Role::Notice => unreachable!("notice rendering is handled without presentation"),
+            }
         };
         let owner = cx.entity().downgrade();
         let message_id = message.key;

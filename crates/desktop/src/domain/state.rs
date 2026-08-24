@@ -2,12 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use im::Vector;
-use kcastle_agent::SessionInfo;
-
 use crate::domain::timeline::{AxisRange, TimelineMode};
 use crate::domain::{LayoutGeneration, Message, RunId, SessionView, TrajectoryItemId};
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
+use im::Vector;
 
 pub(crate) const INITIAL_SESSION_LIMIT: usize = 5;
 pub(crate) const SESSION_PAGE_SIZE: usize = 10;
@@ -117,7 +115,6 @@ pub(crate) struct WorkspaceState {
 #[derive(Debug, Default)]
 pub(crate) struct SessionState {
     pub(crate) current: PathBuf,
-    pub(crate) sessions: Vec<SessionInfo>,
 }
 
 #[derive(Debug)]

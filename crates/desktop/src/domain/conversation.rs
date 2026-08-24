@@ -13,7 +13,7 @@ pub(crate) enum Role {
     Notice,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Message {
     pub(crate) key: MessageId,
     pub(crate) revision: u64,

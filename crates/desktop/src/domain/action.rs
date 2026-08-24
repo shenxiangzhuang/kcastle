@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use kcastle_agent::SessionInfo;
-
 use crate::domain::timeline::AxisRange;
 use crate::domain::{ComposerMenu, DetailsTab, Message, TimelineMode, TrajectoryItemId};
 use crate::layout::LayoutInput;
@@ -50,10 +48,8 @@ pub(crate) enum Action {
         index: usize,
         cwd: PathBuf,
         sessions_dir: PathBuf,
-        sessions: Vec<SessionInfo>,
     },
     SetActiveProject(usize),
-    RefreshSessions(Vec<SessionInfo>),
     AppendTransientNotice(Box<Message>),
     Scroll(ScrollIntent),
     #[cfg_attr(not(test), allow(dead_code))]

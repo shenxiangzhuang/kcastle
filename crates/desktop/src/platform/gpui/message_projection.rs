@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::{ScrollHandle, SharedString, Window};
 
@@ -12,8 +12,9 @@ pub(crate) struct MessagePresentation {
     pub(crate) render_text: SharedString,
     pub(crate) markdown: StreamingMarkdownState,
     reasoning_summary_scroll: FrameThrottledScroll,
-    source: String,
+    source_generation: u64,
     source_revision: u64,
+    markdown_enabled: bool,
     expanded: bool,
     rating: Option<bool>,
 }
@@ -21,6 +22,7 @@ pub(crate) struct MessagePresentation {
 impl MessagePresentation {
     fn new(
         source: &str,
+        source_generation: u64,
         source_revision: u64,
         markdown: bool,
         overlay: PresentationOverlay,
@@ -29,8 +31,9 @@ impl MessagePresentation {
             render_text: source.to_owned().into(),
             markdown: StreamingMarkdownState::default(),
             reasoning_summary_scroll: FrameThrottledScroll::default(),
-            source: source.to_owned(),
+            source_generation,
             source_revision,
+            markdown_enabled: markdown,
             expanded: overlay.expanded,
             rating: overlay.rating,
         };
@@ -40,13 +43,22 @@ impl MessagePresentation {
         presentation
     }
 
-    fn update(&mut self, source: &str, source_revision: u64, markdown: bool) {
-        if self.source_revision == source_revision && self.source == source {
+    fn update(
+        &mut self,
+        source: &str,
+        source_generation: u64,
+        source_revision: u64,
+        markdown: bool,
+    ) {
+        if self.source_generation == source_generation
+            && self.source_revision == source_revision
+            && self.markdown_enabled == markdown
+        {
             return;
         }
+        self.source_generation = source_generation;
         self.source_revision = source_revision;
-        self.source.clear();
-        self.source.push_str(source);
+        self.markdown_enabled = markdown;
         self.render_text = source.to_owned().into();
         if markdown {
             self.markdown.update(source);
@@ -93,83 +105,40 @@ pub(crate) struct MessagePresentationStore {
 }
 
 impl MessagePresentationStore {
-    /// Fully synchronizes a selected session. Existing render state is reused only when the
-    /// namespace matches; presentation overlays are retained independently per session.
-    pub(crate) fn replace_all<'a>(
-        &mut self,
-        session: impl Into<String>,
-        messages: impl IntoIterator<Item = (MessageId, u64, &'a str, bool)>,
-    ) {
+    /// Switches the presentation namespace without touching canonical messages. Visible rows
+    /// synchronize themselves lazily by stable ID and message revision during rendering.
+    pub(crate) fn activate(&mut self, session: impl Into<String>) {
         let session = session.into();
         if self.active_session.as_deref() != Some(session.as_str()) {
             self.entries.clear();
-            self.active_session = Some(session.clone());
-        }
-        let mut live = HashSet::new();
-        for (id, revision, source, markdown) in messages {
-            live.insert(id);
-            let overlay = self
-                .overlays
-                .get(&session)
-                .and_then(|overlays| overlays.get(&id))
-                .copied()
-                .unwrap_or_default();
-            self.entries
-                .entry(id)
-                .and_modify(|presentation| presentation.update(source, revision, markdown))
-                .or_insert_with(|| MessagePresentation::new(source, revision, markdown, overlay));
-        }
-        self.entries.retain(|id, _| live.contains(id));
-        if let Some(overlays) = self.overlays.get_mut(&session) {
-            overlays.retain(|id, _| live.contains(id));
+            self.active_session = Some(session);
         }
     }
 
-    /// Applies only messages named by the runtime's committed projection delta.
-    ///
-    /// Returns false when the caller supplied a delta for a session that is not active, in which
-    /// case the caller must fall back to `replace_all`.
-    pub(crate) fn sync_changed<'a>(
+    pub(crate) fn sync_message(
         &mut self,
-        session: &str,
-        messages: impl IntoIterator<Item = (MessageId, u64, &'a str, bool)>,
-    ) -> bool {
-        if self.active_session.as_deref() != Some(session) {
-            return false;
-        }
-        for (id, revision, source, markdown) in messages {
-            let overlay = self
-                .overlays
-                .get(session)
-                .and_then(|overlays| overlays.get(&id))
-                .copied()
-                .unwrap_or_default();
-            self.entries
-                .entry(id)
-                .and_modify(|presentation| presentation.update(source, revision, markdown))
-                .or_insert_with(|| MessagePresentation::new(source, revision, markdown, overlay));
-        }
-        true
-    }
-
-    /// Compatibility helper for focused tests and one-off transient rows.
-    #[cfg(test)]
-    pub(crate) fn sync<'a>(
-        &mut self,
-        messages: impl IntoIterator<Item = (MessageId, &'a str, bool)>,
-    ) {
-        self.replace_all(
-            "__compatibility__",
-            messages
-                .into_iter()
-                .map(|(id, source, markdown)| (id, 0, source, markdown)),
-        );
-    }
-
-    pub(crate) fn get(&self, id: MessageId) -> &MessagePresentation {
+        id: MessageId,
+        generation: u64,
+        revision: u64,
+        source: &str,
+        markdown: bool,
+    ) -> &MessagePresentation {
+        let session = self
+            .active_session
+            .as_ref()
+            .expect("message presentation namespace must be activated before rendering");
+        let overlay = self
+            .overlays
+            .get(session)
+            .and_then(|overlays| overlays.get(&id))
+            .copied()
+            .unwrap_or_default();
         self.entries
-            .get(&id)
-            .expect("message presentation must be synchronized before rendering")
+            .entry(id)
+            .and_modify(|presentation| presentation.update(source, generation, revision, markdown))
+            .or_insert_with(|| {
+                MessagePresentation::new(source, generation, revision, markdown, overlay)
+            })
     }
 
     pub(crate) fn toggle_expanded(&mut self, id: MessageId) -> Option<bool> {
@@ -214,43 +183,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn projection_updates_only_changed_sources_and_removes_stale_messages() {
+    fn message_revision_controls_lazy_markdown_updates() {
         let mut store = MessagePresentationStore::default();
-        store.sync([(MessageId(1), "one", true), (MessageId(2), "two", false)]);
-        let revision = store.get(MessageId(1)).markdown.revision();
-        store.sync([(MessageId(1), "one", true)]);
-        assert_eq!(store.get(MessageId(1)).markdown.revision(), revision);
-        assert!(!store.entries.contains_key(&MessageId(2)));
+        store.activate("session");
+        let revision = store
+            .sync_message(MessageId(1), 1, 0, "one", true)
+            .markdown
+            .revision();
+        assert_eq!(
+            store
+                .sync_message(MessageId(1), 1, 0, "one", true)
+                .markdown
+                .revision(),
+            revision
+        );
+        let updated = store.sync_message(MessageId(1), 1, 1, "two", true);
+        assert_eq!(updated.render_text.as_ref(), "two");
+        assert!(updated.markdown.revision() > revision);
     }
 
     #[test]
     fn overlays_are_scoped_per_session_and_survive_switches() {
         let mut store = MessagePresentationStore::default();
-        store.replace_all("one", [(MessageId(1), 0, "first", true)]);
+        store.activate("one");
+        store.sync_message(MessageId(1), 1, 0, "first", true);
         assert_eq!(store.toggle_expanded(MessageId(1)), Some(true));
         assert_eq!(store.rate(MessageId(1), true), Some(Some(true)));
 
-        store.replace_all("two", [(MessageId(1), 0, "second", true)]);
-        assert!(!store.get(MessageId(1)).expanded());
-        assert_eq!(store.get(MessageId(1)).rating(), None);
+        store.activate("two");
+        assert!(
+            !store
+                .sync_message(MessageId(1), 1, 0, "second", true)
+                .expanded()
+        );
+        assert_eq!(
+            store
+                .sync_message(MessageId(1), 1, 0, "second", true)
+                .rating(),
+            None
+        );
 
-        store.replace_all("one", [(MessageId(1), 0, "first", true)]);
-        assert!(store.get(MessageId(1)).expanded());
-        assert_eq!(store.get(MessageId(1)).rating(), Some(true));
+        store.activate("one");
+        let presentation = store.sync_message(MessageId(1), 1, 0, "first", true);
+        assert!(presentation.expanded());
+        assert_eq!(presentation.rating(), Some(true));
     }
 
     #[test]
-    fn changed_sync_does_not_remove_untouched_presentations() {
+    fn same_text_switching_to_assistant_initializes_markdown() {
         let mut store = MessagePresentationStore::default();
-        store.replace_all(
-            "session",
-            [
-                (MessageId(1), 0, "one", true),
-                (MessageId(2), 0, "two", false),
-            ],
-        );
-        assert!(store.sync_changed("session", [(MessageId(2), 1, "updated", false)]));
-        assert_eq!(store.get(MessageId(1)).render_text.as_ref(), "one");
-        assert_eq!(store.get(MessageId(2)).render_text.as_ref(), "updated");
+        store.activate("session");
+        let revision = store
+            .sync_message(MessageId(1), 1, 0, "same", false)
+            .markdown
+            .revision();
+
+        let presentation = store.sync_message(MessageId(1), 1, 0, "same", true);
+
+        assert!(presentation.markdown.revision() > revision);
+    }
+
+    #[test]
+    fn new_projection_generation_refreshes_reset_message_revisions() {
+        let mut store = MessagePresentationStore::default();
+        store.activate("session");
+        store.sync_message(MessageId(1), 1, 0, "old", true);
+
+        let presentation = store.sync_message(MessageId(1), 2, 0, "new", true);
+
+        assert_eq!(presentation.render_text.as_ref(), "new");
     }
 }

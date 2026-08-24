@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+
+pub(crate) use super::session_document::TrajectoryLane as TimelineLane;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum TimelineMode {
@@ -13,22 +14,17 @@ pub(crate) enum TimelineMode {
     Actual,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum TimelineLane {
-    Input,
-    Model,
-    Tools,
-}
+const TIMELINE_LANES: [TimelineLane; 3] = [
+    TimelineLane::Input,
+    TimelineLane::Model,
+    TimelineLane::Tools,
+];
 
-impl TimelineLane {
-    const ALL: [Self; 3] = [Self::Input, Self::Model, Self::Tools];
-
-    const fn index(self) -> usize {
-        match self {
-            Self::Input => 0,
-            Self::Model => 1,
-            Self::Tools => 2,
-        }
+const fn lane_index(lane: TimelineLane) -> usize {
+    match lane {
+        TimelineLane::Input => 0,
+        TimelineLane::Model => 1,
+        TimelineLane::Tools => 2,
     }
 }
 
@@ -95,6 +91,70 @@ impl DomainRange {
             Self::new(target.end - width, target.end).clamp_to(domain)
         }
     }
+
+    pub(crate) fn value_at_fraction(self, fraction: f64) -> f64 {
+        self.start + self.width() * finite(fraction).clamp(0.0, 1.0)
+    }
+
+    pub(crate) fn pan_from(self, domain: Self, anchor: f64, current: f64) -> Self {
+        let delta = finite(anchor) - finite(current);
+        Self::new(self.start + delta, self.end + delta).clamp_to(domain)
+    }
+
+    pub(crate) fn zoom(self, domain: Self, anchor: f64, factor: f64, minimum_width: f64) -> Self {
+        let factor = finite(factor).clamp(0.05, 20.0);
+        let minimum_width = finite(minimum_width).max(f64::EPSILON).min(domain.width());
+        let width = (self.width() * factor).clamp(minimum_width, domain.width());
+        let ratio = if self.width() <= 0.0 {
+            0.5
+        } else {
+            ((anchor - self.start) / self.width()).clamp(0.0, 1.0)
+        };
+        Self::new(anchor - width * ratio, anchor + width * (1.0 - ratio)).clamp_to(domain)
+    }
+
+    pub(crate) fn auto_pan(
+        self,
+        domain: Self,
+        pointer_fraction: f64,
+        edge_fraction: f64,
+        pan_step_fraction: f64,
+    ) -> Self {
+        if self.width() >= domain.width() {
+            return self;
+        }
+        let pointer_fraction = finite(pointer_fraction).clamp(0.0, 1.0);
+        let edge_fraction = finite(edge_fraction).clamp(0.0, 0.5);
+        if edge_fraction == 0.0 {
+            return self;
+        }
+        let edge_strength = if pointer_fraction < edge_fraction {
+            -((edge_fraction - pointer_fraction) / edge_fraction)
+        } else if pointer_fraction > 1.0 - edge_fraction {
+            (pointer_fraction - (1.0 - edge_fraction)) / edge_fraction
+        } else {
+            0.0
+        };
+        if edge_strength == 0.0 {
+            return self;
+        }
+        let delta = edge_strength.signum()
+            * self.width()
+            * finite(pan_step_fraction).clamp(0.0, 1.0)
+            * edge_strength.abs().clamp(0.2, 1.0);
+        Self::new(self.start + delta, self.end + delta).clamp_to(domain)
+    }
+
+    pub(crate) fn with_minimum_width(self, domain: Self, minimum_width: f64) -> Self {
+        let mut range = self.clamp_to(domain);
+        let minimum_width = finite(minimum_width).max(0.0).min(domain.width());
+        if range.width() < minimum_width {
+            let center = (range.start + range.end) / 2.0;
+            range = Self::new(center - minimum_width / 2.0, center + minimum_width / 2.0)
+                .clamp_to(domain);
+        }
+        range
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,8 +171,8 @@ pub(crate) struct TimelinePoint {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TimelineSpan<I> {
-    pub(crate) id: I,
+pub(crate) struct TimelineSpan {
+    pub(crate) id: usize,
     pub(crate) lane: TimelineLane,
     pub(crate) sequence: u64,
     pub(crate) started: Option<TimelinePoint>,
@@ -122,29 +182,29 @@ pub(crate) struct TimelineSpan<I> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GeometryCell<I> {
-    pub(crate) id: I,
+pub(crate) struct GeometryCell {
+    pub(crate) id: usize,
     pub(crate) lane: TimelineLane,
     pub(crate) range: DomainRange,
     pub(crate) nested: Option<DomainRange>,
 }
 
 #[derive(Clone, Debug)]
-struct IndexedInterval<I> {
-    id: I,
+struct IndexedInterval {
+    id: usize,
     start: f64,
     end: f64,
     _order: usize,
 }
 
 #[derive(Clone, Debug, Default)]
-struct LaneIndex<I> {
-    entries: Vec<IndexedInterval<I>>,
+struct LaneIndex {
+    entries: Vec<IndexedInterval>,
     prefix_max_end: Vec<f64>,
 }
 
-impl<I: Clone> LaneIndex<I> {
-    fn new(mut entries: Vec<IndexedInterval<I>>) -> Self {
+impl LaneIndex {
+    fn new(mut entries: Vec<IndexedInterval>) -> Self {
         entries.sort_by(|left, right| total_cmp(left.start, right.start));
         let mut maximum = f64::NEG_INFINITY;
         let prefix_max_end = entries
@@ -160,7 +220,7 @@ impl<I: Clone> LaneIndex<I> {
         }
     }
 
-    fn query(&self, range: DomainRange) -> impl Iterator<Item = &I> {
+    fn query(&self, range: DomainRange) -> impl Iterator<Item = &usize> {
         let right = self
             .entries
             .partition_point(|entry| entry.start <= range.end);
@@ -171,7 +231,7 @@ impl<I: Clone> LaneIndex<I> {
             .map(|entry| &entry.id)
     }
 
-    fn push_sequence(&mut self, id: I, range: DomainRange) {
+    fn push_sequence(&mut self, id: usize, range: DomainRange) {
         debug_assert!(
             self.entries
                 .last()
@@ -194,7 +254,7 @@ impl<I: Clone> LaneIndex<I> {
     }
 
     #[cfg(test)]
-    fn hit(&self, value: f64) -> Option<&I> {
+    fn hit(&self, value: f64) -> Option<&usize> {
         let right = self.entries.partition_point(|entry| entry.start <= value);
         let left = self.prefix_max_end[..right].partition_point(|end| *end < value);
         self.entries[left..right]
@@ -206,19 +266,16 @@ impl<I: Clone> LaneIndex<I> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct TimelineGeometry<I> {
+pub(crate) struct TimelineGeometry {
     pub(crate) axis: AxisId,
     pub(crate) domain: DomainRange,
-    pub(crate) cells: Vec<GeometryCell<I>>,
-    lanes: [LaneIndex<I>; 3],
-    cell_indices: HashMap<I, usize>,
+    pub(crate) cells: Vec<GeometryCell>,
+    lanes: [LaneIndex; 3],
+    cell_indices: Vec<Option<usize>>,
 }
 
-impl<I> TimelineGeometry<I>
-where
-    I: Clone + Eq + Hash,
-{
-    pub(crate) fn build(axis: AxisId, spans: impl IntoIterator<Item = TimelineSpan<I>>) -> Self {
+impl TimelineGeometry {
+    pub(crate) fn build(axis: AxisId, spans: impl IntoIterator<Item = TimelineSpan>) -> Self {
         let mut spans = spans.into_iter().collect::<Vec<_>>();
         spans.sort_by_key(|span| span.sequence);
         let raw = spans
@@ -372,14 +429,14 @@ where
             }
         };
 
-        let lanes = TimelineLane::ALL.map(|lane| {
+        let lanes = TIMELINE_LANES.map(|lane| {
             LaneIndex::new(
                 cells
                     .iter()
                     .filter(|cell| cell.lane == lane)
                     .enumerate()
                     .map(|(order, cell)| IndexedInterval {
-                        id: cell.id.clone(),
+                        id: cell.id,
                         start: cell.range.start,
                         end: cell.range.end,
                         _order: order,
@@ -387,11 +444,10 @@ where
                     .collect(),
             )
         });
-        let cell_indices = cells
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| (cell.id.clone(), index))
-            .collect();
+        let mut cell_indices = vec![None; cells.iter().map(|cell| cell.id + 1).max().unwrap_or(0)];
+        for (index, cell) in cells.iter().enumerate() {
+            cell_indices[cell.id] = Some(index);
+        }
         Self {
             axis,
             domain,
@@ -401,8 +457,12 @@ where
         }
     }
 
-    pub(crate) fn query(&self, lane: TimelineLane, range: DomainRange) -> impl Iterator<Item = &I> {
-        self.lanes[lane.index()].query(range)
+    pub(crate) fn query(
+        &self,
+        lane: TimelineLane,
+        range: DomainRange,
+    ) -> impl Iterator<Item = &usize> {
+        self.lanes[lane_index(lane)].query(range)
     }
 
     /// Returns the last-painted item at a point in a lane.
@@ -410,11 +470,11 @@ where
     /// Hit testing and painting intentionally share this geometry index, so a
     /// dense or overlapping lane cannot drift from what the user sees.
     #[cfg(test)]
-    pub(crate) fn hit_test(&self, lane: TimelineLane, value: f64) -> Option<&I> {
-        self.lanes[lane.index()].hit(value)
+    pub(crate) fn hit_test(&self, lane: TimelineLane, value: f64) -> Option<&usize> {
+        self.lanes[lane_index(lane)].hit(value)
     }
 
-    pub(crate) fn selection(&self, range: AxisRange) -> SelectionResult<I> {
+    pub(crate) fn selection(&self, range: AxisRange) -> SelectionResult {
         if range.axis != self.axis {
             return SelectionResult {
                 range: AxisRange {
@@ -428,16 +488,20 @@ where
             axis: self.axis,
             range: range.range.clamp_to(self.domain),
         };
-        let items = TimelineLane::ALL
+        let items = TIMELINE_LANES
             .into_iter()
             .flat_map(|lane| self.query(lane, range.range))
-            .cloned()
+            .copied()
             .collect();
         SelectionResult { range, items }
     }
 
-    pub(crate) fn range_for(&self, id: &I) -> Option<AxisRange> {
-        let cell = self.cells.get(*self.cell_indices.get(id)?)?;
+    pub(crate) fn range_for(&self, id: &usize) -> Option<AxisRange> {
+        let cell = self
+            .cell_indices
+            .get(*id)
+            .and_then(|index| *index)
+            .and_then(|index| self.cells.get(index))?;
         Some(AxisRange {
             axis: self.axis,
             range: cell.range,
@@ -451,7 +515,7 @@ where
         &mut self,
         axis: AxisId,
         total_len: usize,
-        changes: impl IntoIterator<Item = (usize, TimelineSpan<I>)>,
+        changes: impl IntoIterator<Item = (usize, TimelineSpan)>,
     ) -> bool {
         if self.axis.mode != TimelineMode::Sequence
             || axis.mode != TimelineMode::Sequence
@@ -474,11 +538,14 @@ where
                 }
                 self.cells[index] = cell;
             } else if index == self.cells.len() {
-                if self.cell_indices.contains_key(&cell.id) {
+                if self.cell_indices.get(cell.id).is_some_and(Option::is_some) {
                     return false;
                 }
-                self.lanes[cell.lane.index()].push_sequence(cell.id.clone(), cell.range);
-                self.cell_indices.insert(cell.id.clone(), index);
+                self.lanes[lane_index(cell.lane)].push_sequence(cell.id, cell.range);
+                if cell.id >= self.cell_indices.len() {
+                    self.cell_indices.resize(cell.id + 1, None);
+                }
+                self.cell_indices[cell.id] = Some(index);
                 self.cells.push(cell);
             } else {
                 return false;
@@ -492,33 +559,27 @@ where
         true
     }
 
-    pub(crate) fn domain_at_pixel(&self, viewport: DomainRange, width_px: f64, x_px: f64) -> f64 {
-        if width_px <= 0.0 || viewport.width() <= 0.0 {
-            return viewport.start;
-        }
-        viewport.start + x_px.clamp(0.0, width_px) / width_px * viewport.width()
-    }
-
     pub(crate) fn render_model(
         &self,
         viewport: DomainRange,
         width_px: f64,
         primitive_limit: usize,
-    ) -> Vec<RenderCell<I>> {
+    ) -> Vec<RenderCell> {
         if width_px <= 0.0 || primitive_limit == 0 {
             return Vec::new();
         }
         let viewport = viewport.clamp_to(self.domain);
-        let mut visible = TimelineLane::ALL
+        let mut visible = TIMELINE_LANES
             .into_iter()
             .flat_map(|lane| self.query(lane, viewport))
             .filter_map(|id| {
                 self.cell_indices
-                    .get(id)
-                    .and_then(|index| self.cells.get(*index))
+                    .get(*id)
+                    .and_then(|index| *index)
+                    .and_then(|index| self.cells.get(index))
             })
             .collect::<Vec<_>>();
-        visible.sort_by_key(|cell| self.cell_indices.get(&cell.id).copied());
+        visible.sort_by_key(|cell| self.cell_indices.get(cell.id).and_then(|index| *index));
         if visible.len() <= primitive_limit {
             return visible
                 .into_iter()
@@ -526,13 +587,13 @@ where
                 .collect();
         }
 
-        let bins_per_lane = (primitive_limit / TimelineLane::ALL.len()).max(1);
+        let bins_per_lane = (primitive_limit / TIMELINE_LANES.len()).max(1);
         let bin_width = (width_px / bins_per_lane as f64).max(1.0);
-        let mut bins = vec![None::<RenderCell<I>>; bins_per_lane * TimelineLane::ALL.len()];
+        let mut bins = vec![None::<RenderCell>; bins_per_lane * TIMELINE_LANES.len()];
         for cell in visible {
             let projected = RenderCell::from_cell(cell, viewport, width_px);
             let bin = ((projected.start_px / bin_width).floor() as usize).min(bins_per_lane - 1);
-            let index = cell.lane.index() * bins_per_lane + bin;
+            let index = lane_index(cell.lane) * bins_per_lane + bin;
             if let Some(existing) = &mut bins[index] {
                 existing.start_px = existing.start_px.min(projected.start_px);
                 existing.end_px = existing.end_px.max(projected.end_px);
@@ -547,7 +608,7 @@ where
     }
 }
 
-fn sequence_cell<I>(position: usize, span: TimelineSpan<I>) -> GeometryCell<I> {
+fn sequence_cell(position: usize, span: TimelineSpan) -> GeometryCell {
     let raw_start = span.started.filter(|point| point.wall_ms.is_finite());
     let raw_end = span.completed.filter(|point| point.wall_ms.is_finite());
     let range = DomainRange::new(position as f64, position as f64 + 1.0);
@@ -577,8 +638,8 @@ fn sequence_cell<I>(position: usize, span: TimelineSpan<I>) -> GeometryCell<I> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RenderCell<I> {
-    pub(crate) ids: Vec<I>,
+pub(crate) struct RenderCell {
+    pub(crate) ids: Vec<usize>,
     pub(crate) lane: TimelineLane,
     pub(crate) start_px: f64,
     pub(crate) end_px: f64,
@@ -586,14 +647,14 @@ pub(crate) struct RenderCell<I> {
     pub(crate) clustered: bool,
 }
 
-impl<I: Clone> RenderCell<I> {
-    fn from_cell(cell: &GeometryCell<I>, viewport: DomainRange, width_px: f64) -> Self {
+impl RenderCell {
+    fn from_cell(cell: &GeometryCell, viewport: DomainRange, width_px: f64) -> Self {
         let project = |value: f64| {
             ((value - viewport.start) / viewport.width().max(f64::EPSILON) * width_px)
                 .clamp(0.0, width_px)
         };
         Self {
-            ids: vec![cell.id.clone()],
+            ids: vec![cell.id],
             lane: cell.lane,
             start_px: project(cell.range.start),
             end_px: project(cell.range.end),
@@ -606,252 +667,9 @@ impl<I: Clone> RenderCell<I> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SelectionResult<I: Eq + Hash> {
+pub(crate) struct SelectionResult {
     pub(crate) range: AxisRange,
-    pub(crate) items: HashSet<I>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Gesture {
-    Idle,
-    Selecting { anchor: f64, current: f64 },
-    Panning { anchor: f64, viewport: DomainRange },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TimelineInteraction {
-    pub(crate) axis: AxisId,
-    pub(crate) domain: DomainRange,
-    pub(crate) viewport: DomainRange,
-    pub(crate) selection: Option<AxisRange>,
-    pub(crate) hover: Option<f64>,
-    pub(crate) gesture: Gesture,
-}
-
-impl TimelineInteraction {
-    pub(crate) fn new(axis: AxisId, domain: DomainRange) -> Self {
-        Self {
-            axis,
-            domain,
-            viewport: domain,
-            selection: None,
-            hover: None,
-            gesture: Gesture::Idle,
-        }
-    }
-
-    /// Synchronizes persisted UI ranges without disturbing an in-flight
-    /// gesture. The canonical geometry still clamps and owns both ranges.
-    pub(crate) fn sync_external_ranges(
-        &mut self,
-        viewport: Option<AxisRange>,
-        selection: Option<AxisRange>,
-    ) {
-        self.viewport = viewport
-            .filter(|range| range.axis == self.axis)
-            .map_or(self.domain, |range| range.range.clamp_to(self.domain));
-        self.selection = selection
-            .filter(|range| range.axis == self.axis)
-            .map(|range| AxisRange {
-                axis: self.axis,
-                range: range.range.clamp_to(self.domain),
-            });
-    }
-
-    pub(crate) fn display_selection(&self) -> Option<AxisRange> {
-        match self.gesture {
-            Gesture::Selecting { anchor, current } => Some(AxisRange {
-                axis: self.axis,
-                range: DomainRange::new(anchor, current).clamp_to(self.domain),
-            }),
-            Gesture::Idle | Gesture::Panning { .. } => self.selection,
-        }
-    }
-
-    pub(crate) fn reduce(&mut self, action: TimelineAction) -> Option<TimelineEffect> {
-        match action {
-            TimelineAction::ProjectionChanged { axis, domain } => {
-                if axis != self.axis {
-                    *self = Self::new(axis, domain);
-                } else {
-                    self.domain = domain;
-                    self.viewport = self.viewport.clamp_to(domain);
-                    self.selection = self.selection.map(|selection| AxisRange {
-                        axis,
-                        range: selection.range.clamp_to(domain),
-                    });
-                }
-            }
-            TimelineAction::PointerDown { value, pan } => {
-                let value = value.clamp(self.viewport.start, self.viewport.end);
-                self.gesture = if pan {
-                    Gesture::Panning {
-                        anchor: value,
-                        viewport: self.viewport,
-                    }
-                } else {
-                    Gesture::Selecting {
-                        anchor: value,
-                        current: value,
-                    }
-                };
-            }
-            TimelineAction::PointerMove { value } => match &mut self.gesture {
-                Gesture::Selecting { current, .. } => {
-                    *current = value.clamp(self.domain.start, self.domain.end)
-                }
-                Gesture::Panning { anchor, viewport } => {
-                    let delta = *anchor - value;
-                    self.viewport = DomainRange::new(viewport.start + delta, viewport.end + delta)
-                        .clamp_to(self.domain);
-                }
-                Gesture::Idle => self.hover = Some(value),
-            },
-            TimelineAction::SelectionDrag {
-                pointer_fraction,
-                edge_fraction,
-                pan_step_fraction,
-            } => {
-                let Gesture::Selecting { anchor, .. } = self.gesture else {
-                    return None;
-                };
-                let pointer_fraction = finite(pointer_fraction).clamp(0.0, 1.0);
-                let edge_fraction = finite(edge_fraction).clamp(0.0, 0.5);
-                let pan_step_fraction = finite(pan_step_fraction).clamp(0.0, 1.0);
-                if self.viewport.width() < self.domain.width() && edge_fraction > 0.0 {
-                    let edge_strength = if pointer_fraction < edge_fraction {
-                        -((edge_fraction - pointer_fraction) / edge_fraction)
-                    } else if pointer_fraction > 1.0 - edge_fraction {
-                        (pointer_fraction - (1.0 - edge_fraction)) / edge_fraction
-                    } else {
-                        0.0
-                    };
-                    if edge_strength != 0.0 {
-                        let delta = edge_strength.signum()
-                            * self.viewport.width()
-                            * pan_step_fraction
-                            * edge_strength.abs().clamp(0.2, 1.0);
-                        self.viewport = DomainRange::new(
-                            self.viewport.start + delta,
-                            self.viewport.end + delta,
-                        )
-                        .clamp_to(self.domain);
-                    }
-                }
-                let current = self.viewport.start + self.viewport.width() * pointer_fraction;
-                self.gesture = Gesture::Selecting { anchor, current };
-            }
-            TimelineAction::PointerUp {
-                value,
-                minimum_width,
-            } => {
-                let effect = match self.gesture {
-                    Gesture::Selecting { anchor, .. } => {
-                        let mut range = DomainRange::new(anchor, value).clamp_to(self.domain);
-                        let minimum_width = finite(minimum_width).max(0.0).min(self.domain.width());
-                        if range.width() < minimum_width {
-                            let center = (range.start + range.end) / 2.0;
-                            range = DomainRange::new(
-                                center - minimum_width / 2.0,
-                                center + minimum_width / 2.0,
-                            )
-                            .clamp_to(self.domain);
-                        }
-                        let selection = AxisRange {
-                            axis: self.axis,
-                            range,
-                        };
-                        self.selection = Some(selection);
-                        Some(TimelineEffect::SelectionCommitted(selection))
-                    }
-                    Gesture::Panning { .. } | Gesture::Idle => None,
-                };
-                self.gesture = Gesture::Idle;
-                return effect;
-            }
-            TimelineAction::PointerCancel => self.gesture = Gesture::Idle,
-            TimelineAction::WheelZoom {
-                anchor,
-                factor,
-                minimum_width,
-            } => {
-                let factor = factor.clamp(0.05, 20.0);
-                let minimum_width = finite(minimum_width)
-                    .max(f64::EPSILON)
-                    .min(self.domain.width());
-                let width =
-                    (self.viewport.width() * factor).clamp(minimum_width, self.domain.width());
-                let ratio = if self.viewport.width() <= 0.0 {
-                    0.5
-                } else {
-                    ((anchor - self.viewport.start) / self.viewport.width()).clamp(0.0, 1.0)
-                };
-                self.viewport =
-                    DomainRange::new(anchor - width * ratio, anchor + width * (1.0 - ratio))
-                        .clamp_to(self.domain);
-            }
-            TimelineAction::ZoomToSelection => {
-                if let Some(selection) = self.selection {
-                    self.viewport = selection.range.clamp_to(self.domain);
-                }
-            }
-            TimelineAction::Reveal { target } => {
-                if target.axis == self.axis {
-                    self.viewport = self.viewport.pan_to_reveal(target.range, self.domain);
-                }
-            }
-            TimelineAction::Reset => {
-                self.viewport = self.domain;
-                self.selection = None;
-                self.hover = None;
-                self.gesture = Gesture::Idle;
-            }
-        }
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum TimelineAction {
-    ProjectionChanged {
-        axis: AxisId,
-        domain: DomainRange,
-    },
-    PointerDown {
-        value: f64,
-        pan: bool,
-    },
-    PointerMove {
-        value: f64,
-    },
-    /// Advances an active range selection using a normalized pointer position. When zoomed in,
-    /// entering either edge zone pans the viewport and derives the new selection endpoint from the
-    /// updated viewport, allowing one uninterrupted drag across the full domain.
-    SelectionDrag {
-        pointer_fraction: f64,
-        edge_fraction: f64,
-        pan_step_fraction: f64,
-    },
-    PointerUp {
-        value: f64,
-        minimum_width: f64,
-    },
-    PointerCancel,
-    WheelZoom {
-        anchor: f64,
-        factor: f64,
-        minimum_width: f64,
-    },
-    ZoomToSelection,
-    Reveal {
-        target: AxisRange,
-    },
-    Reset,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum TimelineEffect {
-    SelectionCommitted(AxisRange),
+    pub(crate) items: HashSet<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1018,7 +836,7 @@ mod tests {
         }
     }
 
-    fn span(id: u64, lane: TimelineLane, start: f64, end: f64) -> TimelineSpan<u64> {
+    fn span(id: usize, lane: TimelineLane, start: f64, end: f64) -> TimelineSpan {
         let point = |milliseconds: f64| TimelinePoint {
             wall_ms: milliseconds,
             clock_id: "test-clock".into(),
@@ -1027,7 +845,7 @@ mod tests {
         TimelineSpan {
             id,
             lane,
-            sequence: id,
+            sequence: id as u64,
             started: Some(point(start)),
             completed: Some(point(end)),
             duration_ms: Some((end - start).max(0.0)),
@@ -1162,216 +980,26 @@ mod tests {
     }
 
     #[test]
-    fn selection_and_viewport_are_independent() {
-        let axis = axis(TimelineMode::Actual, 1);
-        let mut state = TimelineInteraction::new(axis, DomainRange::new(0.0, 100.0));
-        state.reduce(TimelineAction::PointerDown {
-            value: 25.0,
-            pan: false,
-        });
-        let effect = state.reduce(TimelineAction::PointerUp {
-            value: 50.0,
-            minimum_width: 0.0,
-        });
-        assert_eq!(state.viewport, DomainRange::new(0.0, 100.0));
-        assert_eq!(
-            effect,
-            Some(TimelineEffect::SelectionCommitted(AxisRange {
-                axis,
-                range: DomainRange::new(25.0, 50.0),
-            }))
-        );
-        state.reduce(TimelineAction::ZoomToSelection);
-        assert_eq!(state.viewport, DomainRange::new(25.0, 50.0));
-    }
-
-    #[test]
-    fn selection_drag_auto_pans_a_zoomed_viewport_until_the_domain_edge() {
-        let axis = axis(TimelineMode::Sequence, 1);
-        let mut state = TimelineInteraction::new(axis, DomainRange::new(0.0, 100.0));
-        state.sync_external_ranges(
-            Some(AxisRange {
-                axis,
-                range: DomainRange::new(20.0, 40.0),
-            }),
-            None,
-        );
-        state.reduce(TimelineAction::PointerDown {
-            value: 30.0,
-            pan: false,
-        });
-
+    fn pure_range_operations_preserve_timeline_interaction_semantics() {
+        let domain = DomainRange::new(0.0, 100.0);
+        let mut viewport = DomainRange::new(20.0, 40.0);
         for _ in 0..40 {
-            state.reduce(TimelineAction::SelectionDrag {
-                pointer_fraction: 1.0,
-                edge_fraction: 0.1,
-                pan_step_fraction: 0.1,
-            });
+            viewport = viewport.auto_pan(domain, 1.0, 0.1, 0.1);
         }
-
-        assert_eq!(state.viewport, DomainRange::new(80.0, 100.0));
+        assert_eq!(viewport, DomainRange::new(80.0, 100.0));
+        assert_eq!(viewport.value_at_fraction(1.0), 100.0);
         assert_eq!(
-            state.display_selection(),
-            Some(AxisRange {
-                axis,
-                range: DomainRange::new(30.0, 100.0),
-            })
+            DomainRange::new(99.0, 99.0).with_minimum_width(domain, 10.0),
+            DomainRange::new(90.0, 100.0)
         );
-    }
-
-    #[test]
-    fn selection_drag_does_not_pan_in_the_center_or_change_a_pan_gesture() {
-        let axis = axis(TimelineMode::Sequence, 1);
-        let mut state = TimelineInteraction::new(axis, DomainRange::new(0.0, 100.0));
-        state.sync_external_ranges(
-            Some(AxisRange {
-                axis,
-                range: DomainRange::new(20.0, 40.0),
-            }),
-            None,
-        );
-        state.reduce(TimelineAction::PointerDown {
-            value: 25.0,
-            pan: false,
-        });
-        state.reduce(TimelineAction::SelectionDrag {
-            pointer_fraction: 0.5,
-            edge_fraction: 0.1,
-            pan_step_fraction: 0.1,
-        });
-        assert_eq!(state.viewport, DomainRange::new(20.0, 40.0));
         assert_eq!(
-            state.gesture,
-            Gesture::Selecting {
-                anchor: 25.0,
-                current: 30.0,
-            }
+            DomainRange::new(0.0, 100.0).zoom(domain, 50.0, 0.05, 20.0),
+            DomainRange::new(40.0, 60.0)
         );
-
-        state.reduce(TimelineAction::PointerCancel);
-        state.reduce(TimelineAction::PointerDown {
-            value: 30.0,
-            pan: true,
-        });
-        let gesture = state.gesture;
-        state.reduce(TimelineAction::SelectionDrag {
-            pointer_fraction: 1.0,
-            edge_fraction: 0.1,
-            pan_step_fraction: 0.1,
-        });
-        assert_eq!(state.viewport, DomainRange::new(20.0, 40.0));
-        assert_eq!(state.gesture, gesture);
-    }
-
-    #[test]
-    fn capture_loss_always_ends_the_gesture() {
-        let mut state =
-            TimelineInteraction::new(axis(TimelineMode::Sequence, 1), DomainRange::new(0.0, 10.0));
-        state.reduce(TimelineAction::PointerDown {
-            value: 1.0,
-            pan: false,
-        });
-        state.reduce(TimelineAction::PointerCancel);
-        assert_eq!(state.gesture, Gesture::Idle);
-    }
-
-    #[test]
-    fn committed_selection_enforces_a_visible_minimum_width() {
-        let axis = axis(TimelineMode::Actual, 1);
-        let mut state = TimelineInteraction::new(axis, DomainRange::new(0.0, 100.0));
-        state.reduce(TimelineAction::PointerDown {
-            value: 99.0,
-            pan: false,
-        });
-        let effect = state.reduce(TimelineAction::PointerUp {
-            value: 99.0,
-            minimum_width: 10.0,
-        });
         assert_eq!(
-            effect,
-            Some(TimelineEffect::SelectionCommitted(AxisRange {
-                axis,
-                range: DomainRange::new(90.0, 100.0),
-            }))
+            DomainRange::new(10.0, 30.0).pan_to_reveal(DomainRange::new(70.0, 75.0), domain),
+            DomainRange::new(55.0, 75.0)
         );
-    }
-
-    #[test]
-    fn wheel_zoom_respects_the_mode_specific_minimum() {
-        let mut state = TimelineInteraction::new(
-            axis(TimelineMode::Sequence, 1),
-            DomainRange::new(0.0, 100.0),
-        );
-        state.reduce(TimelineAction::WheelZoom {
-            anchor: 50.0,
-            factor: 0.05,
-            minimum_width: 20.0,
-        });
-        assert_eq!(state.viewport.width(), 20.0);
-    }
-
-    #[test]
-    fn new_axis_drops_stale_selection_and_gesture() {
-        let mut state =
-            TimelineInteraction::new(axis(TimelineMode::Actual, 1), DomainRange::new(0.0, 100.0));
-        state.reduce(TimelineAction::PointerDown {
-            value: 10.0,
-            pan: false,
-        });
-        state.reduce(TimelineAction::PointerUp {
-            value: 20.0,
-            minimum_width: 0.0,
-        });
-        state.reduce(TimelineAction::ProjectionChanged {
-            axis: axis(TimelineMode::Duration, 2),
-            domain: DomainRange::new(0.0, 50.0),
-        });
-        assert_eq!(state.selection, None);
-        assert_eq!(state.gesture, Gesture::Idle);
-    }
-
-    #[test]
-    fn external_ranges_from_another_axis_are_never_rebound() {
-        let current = axis(TimelineMode::Duration, 2);
-        let stale = axis(TimelineMode::Sequence, 1);
-        let mut state = TimelineInteraction::new(current, DomainRange::new(0.0, 100.0));
-
-        state.sync_external_ranges(
-            Some(AxisRange {
-                axis: stale,
-                range: DomainRange::new(10.0, 20.0),
-            }),
-            Some(AxisRange {
-                axis: stale,
-                range: DomainRange::new(30.0, 40.0),
-            }),
-        );
-
-        assert_eq!(state.viewport, state.domain);
-        assert_eq!(state.selection, None);
-    }
-
-    #[test]
-    fn reveal_pans_without_changing_zoom_and_rejects_another_axis() {
-        let current = axis(TimelineMode::Sequence, 1);
-        let mut state = TimelineInteraction::new(current, DomainRange::new(0.0, 100.0));
-        state.viewport = DomainRange::new(10.0, 30.0);
-
-        state.reduce(TimelineAction::Reveal {
-            target: AxisRange {
-                axis: current,
-                range: DomainRange::new(70.0, 75.0),
-            },
-        });
-        assert_eq!(state.viewport, DomainRange::new(55.0, 75.0));
-
-        state.reduce(TimelineAction::Reveal {
-            target: AxisRange {
-                axis: axis(TimelineMode::Duration, 1),
-                range: DomainRange::new(0.0, 5.0),
-            },
-        });
-        assert_eq!(state.viewport, DomainRange::new(55.0, 75.0));
     }
 
     #[test]
@@ -1379,7 +1007,7 @@ mod tests {
         let spans = (0..10_000).map(|id| {
             span(
                 id,
-                TimelineLane::ALL[id as usize % TimelineLane::ALL.len()],
+                TIMELINE_LANES[id % TIMELINE_LANES.len()],
                 id as f64,
                 id as f64 + 0.5,
             )
@@ -1398,7 +1026,7 @@ mod tests {
         let spans = (0..100_000).map(|id| {
             span(
                 id,
-                TimelineLane::ALL[id as usize % TimelineLane::ALL.len()],
+                TIMELINE_LANES[id % TIMELINE_LANES.len()],
                 id as f64,
                 id as f64 + 0.5,
             )
@@ -1408,7 +1036,7 @@ mod tests {
 
         let mut changed = span(
             77_777,
-            TimelineLane::ALL[77_777 % TimelineLane::ALL.len()],
+            TIMELINE_LANES[77_777 % TIMELINE_LANES.len()],
             77_777.0,
             77_777.5,
         );
