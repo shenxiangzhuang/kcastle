@@ -38,6 +38,9 @@ const TIMELINE_MODEL_TOP: f32 = 20.0;
 const TIMELINE_TOOLS_TOP: f32 = 34.0;
 const TIMELINE_BAR_OFFSET: f32 = 1.0;
 const TIMELINE_BAR_HEIGHT: f32 = 8.0;
+const TIMELINE_BAR_GAP_FRACTION: f64 = 0.08;
+const TIMELINE_BAR_GAP_MAX_PX: f64 = 1.0;
+const TIMELINE_BAR_MIN_WIDTH_PX: f64 = 2.0;
 const TIMELINE_CLICK_SLOP: f32 = 3.0;
 const TIMELINE_PRIMITIVE_LIMIT: usize = 3_000;
 const TIMELINE_EDGE_PAN_MAX_PX: f64 = 48.0;
@@ -64,6 +67,10 @@ fn sanitized_width(width: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn timeline_bar_gap_px(width_px: f64) -> f64 {
+    (width_px.max(0.0) * TIMELINE_BAR_GAP_FRACTION).min(TIMELINE_BAR_GAP_MAX_PX)
 }
 
 fn clamp_trajectory_details_width(width: f32, split_width: f32) -> f32 {
@@ -2497,7 +2504,7 @@ impl DesktopApp {
         div()
             .flex()
             .items_center()
-            .justify_between()
+            .gap(px(8.0))
             .h(px(metrics::LEDGER_TOOLBAR_HEIGHT))
             .px(px(6.0))
             .min_w(px(0.0))
@@ -2507,10 +2514,9 @@ impl DesktopApp {
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(px(2.0))
-                    .min_w(px(0.0))
-                    .overflow_hidden()
                     .child(
                         Button::new("toggle-trajectory-duration")
                             .icon(DesktopIconName::Clock)
@@ -2592,19 +2598,16 @@ impl DesktopApp {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(6.0))
-                    .min_w(px(0.0))
-                    .overflow_hidden()
+                    .ml_auto()
+                    .w(px(164.0))
+                    .min_w(px(84.0))
+                    .flex_shrink(1.0)
                     .child(
-                        div().w(px(164.0)).min_w(px(84.0)).child(
-                            Input::new(&self.trajectory_search)
-                                .with_size(px(22.0))
-                                .prefix(IconName::Search)
-                                .cleanable(true),
-                        ),
+                        Input::new(&self.trajectory_search)
+                            .with_size(px(22.0))
+                            .text_size(px(12.0))
+                            .prefix(IconName::Search)
+                            .cleanable(true),
                     ),
             )
     }
@@ -3111,8 +3114,10 @@ impl DesktopApp {
             tooltip.push_str(&format!("\n{} items in this range", cell.ids.len()));
         }
         let width_px = paint.render_width_px.max(1.0);
-        let left = cell.start_px / width_px;
-        let width = ((cell.end_px - cell.start_px) / width_px).max(1.0 / width_px);
+        let cell_width_px = (cell.end_px - cell.start_px).max(0.0);
+        let gap_px = timeline_bar_gap_px(cell_width_px);
+        let left = (cell.start_px + gap_px) / width_px;
+        let width = (cell_width_px - gap_px * 2.0).max(TIMELINE_BAR_MIN_WIDTH_PX) / width_px;
         let execution = nested_segment_geometry(cell);
         let emphasized = hovered || selected;
         let opacity = timeline_block_opacity(record.kind, focused, matched, emphasized);
@@ -6309,8 +6314,8 @@ mod tests {
         clamp_trajectory_details_width, focus_scroll_target, minimum_timeline_selection_width,
         nested_segment_geometry, normalized_range, record_tooltip,
         resolved_trajectory_details_width, should_clear_selection_for_record,
-        sync_trajectory_list_state, timeline_block_opacity, timeline_geometry, timeline_lane_at,
-        timeline_lane_top, timeline_model, timeline_turn_boundary_fractions,
+        sync_trajectory_list_state, timeline_bar_gap_px, timeline_block_opacity, timeline_geometry,
+        timeline_lane_at, timeline_lane_top, timeline_model, timeline_turn_boundary_fractions,
         trajectory_ledger_row_height, turn_summary_text,
     };
 
@@ -8013,7 +8018,7 @@ mod tests {
 
     #[test]
     fn variable_ledger_list_follows_the_tail_only_when_enabled() {
-        let state = gpui::ListState::new(0, gpui::ListAlignment::Bottom, gpui::px(100.0));
+        let state = gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(100.0));
         sync_trajectory_list_state(&state, 4, true, None, true);
         assert_eq!(state.logical_scroll_top().item_ix, 4);
 
@@ -8027,6 +8032,14 @@ mod tests {
         sync_trajectory_list_state(&state, 8, false, None, false);
         assert_eq!(state.logical_scroll_top().item_ix, 2);
         assert_eq!(state.logical_scroll_top().offset_in_item, gpui::px(3.0));
+    }
+
+    #[test]
+    fn timeline_bar_gap_matches_dsh_and_leaves_track_edges_visible() {
+        assert_eq!(timeline_bar_gap_px(0.0), 0.0);
+        assert_eq!(timeline_bar_gap_px(10.0), 0.8);
+        assert_eq!(timeline_bar_gap_px(12.5), 1.0);
+        assert_eq!(timeline_bar_gap_px(1_500.0), 1.0);
     }
 
     #[test]
