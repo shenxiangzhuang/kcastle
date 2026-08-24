@@ -444,7 +444,9 @@ impl DesktopApp {
             this.native_titlebar.sync(window);
             this.sync_window_layout(window, cx);
         });
-        let trajectory_scroll = ListState::new(0, ListAlignment::Bottom, px(1_000.0));
+        // Keep short trajectories anchored below the overview like DSH. Tail following is an
+        // independent scroll policy and still moves overflowing ledgers to their newest item.
+        let trajectory_scroll = ListState::new(0, ListAlignment::Top, px(1_000.0));
         let trajectory_follow_tail = Cell::new(true);
         let trajectory_scroll_owner = cx.entity().downgrade();
         trajectory_scroll.set_scroll_handler({
