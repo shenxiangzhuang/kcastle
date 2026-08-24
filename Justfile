@@ -44,13 +44,11 @@ tui *args:
 
 # Build and package the release desktop binary as a signed macOS app.
 macos-app:
-    cargo build -p kcastle-desktop --release --locked
-    just _package-macos "target/release/kcastle-desktop"
+    scripts/package-macos-app release
 
 # Build and package the debug desktop binary as a signed macOS app.
 macos-app-debug:
-    cargo build -p kcastle-desktop --locked
-    just _package-macos "target/debug/kcastle-desktop"
+    scripts/package-macos-app debug
 
 # Package and launch a fresh release app instance.
 macos-run: macos-app
@@ -59,6 +57,3 @@ macos-run: macos-app
 # Package and launch a fresh debug app instance.
 macos-run-debug: macos-app-debug
     open -n '{{app_bundle}}'
-
-_package-macos binary:
-    scripts/package-macos-app '{{binary}}'
