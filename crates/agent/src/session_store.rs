@@ -19,7 +19,9 @@ use thiserror::Error;
 
 pub const SESSION_DATABASE_FILE: &str = "sessions.sqlite3";
 pub const JSONL_STORE_FORMAT_VERSION: u32 = 3;
-const DATABASE_SCHEMA_VERSION: u32 = 6;
+// This SQLite store is new in session v2. Earlier development-only revisions never shipped, so
+// the first public on-disk schema starts at version 1.
+const DATABASE_SCHEMA_VERSION: u32 = 1;
 const CATALOG_EXTRACTOR_VERSION: i64 = 1;
 // A catalog row is safe to present only when both its serialized event representation and the
 // state-machine semantics that interpret those events match this binary. Keep the two inputs
@@ -2228,9 +2230,9 @@ mod tests {
 
         let unsupported_path = directory.join("unsupported.sqlite3");
         let unsupported = Connection::open(&unsupported_path).unwrap();
-        let previous_schema = i64::from(DATABASE_SCHEMA_VERSION) - 1;
+        let unsupported_schema = i64::from(DATABASE_SCHEMA_VERSION) + 1;
         unsupported
-            .pragma_update(None, "user_version", previous_schema)
+            .pragma_update(None, "user_version", unsupported_schema)
             .unwrap();
         drop(unsupported);
         for error in [
@@ -2246,7 +2248,7 @@ mod tests {
                 SessionStoreError::UnsupportedSchemaVersion {
                     found,
                     expected: DATABASE_SCHEMA_VERSION
-                } if found == previous_schema
+                } if found == unsupported_schema
             ));
         }
 

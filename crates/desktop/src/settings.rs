@@ -424,6 +424,53 @@ mod tests {
     }
 
     #[test]
+    fn master_provider_catalog_api_key_loads_without_rewrite() {
+        let root = test_root();
+        let original = serde_json::json!({
+            "reasoning_effort": null,
+            "reasoning_efforts": {},
+            "selected_model": "deepseek-official/deepseek-v4-flash",
+            "allow_all_tools": false,
+            "appearance": "system",
+            "enter_behavior": "steer",
+            "reduce_motion": false,
+            "providers": [
+                {
+                    "provider_id": "deepseek-official",
+                    "display_name": "DeepSeek",
+                    "api_base": "https://api.deepseek.com",
+                    "models": [
+                        {
+                            "model_id": "deepseek-v4-flash",
+                            "display_name": "DeepSeek-V4-Flash",
+                            "context_window": 1_000_000
+                        }
+                    ],
+                    "api_key": "master-secret"
+                }
+            ]
+        });
+        let path = root.join("settings.json");
+        fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+
+        let store = SettingsStore::load(root.clone()).unwrap();
+
+        assert_eq!(
+            store.selected_model(),
+            Some("deepseek-official/deepseek-v4-flash")
+        );
+        assert_eq!(
+            store.provider_profiles()[0].api_key(),
+            Some("master-secret")
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            original
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_single_model_profiles_are_migrated_to_provider_catalogs() {
         let root = test_root();
         fs::write(
