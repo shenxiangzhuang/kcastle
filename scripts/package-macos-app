@@ -2,7 +2,20 @@
 set -euo pipefail
 
 repo=${0:A:h:h}
-binary=${1:A}
+profile=${1:-release}
+case "$profile" in
+    release)
+        build_args=(-p kcastle-desktop --release --locked)
+        ;;
+    debug)
+        build_args=(-p kcastle-desktop --locked)
+        ;;
+    *)
+        print -u2 "usage: $0 [release|debug]"
+        exit 2
+        ;;
+esac
+binary="$repo/target/$profile/kcastle-desktop"
 app="$repo/target/Kcastle.app"
 plist="$repo/crates/desktop/resources/Info.plist"
 icon="$repo/crates/desktop/assets/app-icon.svg"
@@ -10,6 +23,8 @@ icon_work=$(mktemp -d /tmp/kcastle-app-icon.XXXXXX)
 trap 'rm -rf "$icon_work"' EXIT
 iconset="$icon_work/AppIcon.iconset"
 
+cd "$repo"
+cargo build "${build_args[@]}"
 [[ -x "$binary" ]]
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
@@ -35,7 +50,6 @@ done
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 
 cp "$plist" "$app/Contents/Info.plist"
-cd "$repo"
 version=${$(cargo pkgid -p kcastle-desktop)##*@}
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 install -m 755 "$binary" "$app/Contents/MacOS/kcastle"
