@@ -11,38 +11,6 @@ pub(crate) use crate::domain::session_document::{
     TimingMetrics as RecordTiming, TrajectoryItemId, TrajectoryKind, TrajectoryLane,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TrajectoryStatus {
-    Running,
-    Completed,
-    Failed,
-    Denied,
-    NotExecuted,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TrajectoryUsage {
-    pub(crate) input_tokens: u32,
-    pub(crate) output_tokens: u32,
-    pub(crate) cached_tokens: u32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TrajectoryStats {
-    pub(crate) turns: usize,
-    pub(crate) steps: usize,
-    pub(crate) llm_ns: u64,
-    pub(crate) tool_ns: u64,
-    pub(crate) ttft_ns: u64,
-    pub(crate) ttft_steps: usize,
-    pub(crate) decode_ns: u64,
-    pub(crate) decode_tokens: u64,
-    pub(crate) input_tokens: u64,
-    pub(crate) output_tokens: u64,
-    pub(crate) cached_tokens: u64,
-}
-
 /// Immutable UI record materialized from one canonical document revision.
 ///
 /// The stable domain identity is deliberately retained. Presentation code must
@@ -52,7 +20,6 @@ pub(crate) struct TrajectoryRecord {
     pub(crate) id: TrajectoryItemId,
     pub(crate) source_seq: u64,
     pub(crate) kind: TrajectoryKind,
-    pub(crate) lane: TrajectoryLane,
     pub(crate) title: String,
     pub(crate) text: String,
     pub(crate) payload: Option<String>,
@@ -61,15 +28,27 @@ pub(crate) struct TrajectoryRecord {
     pub(crate) search_text: String,
     pub(crate) turn: Option<u32>,
     pub(crate) step: Option<u32>,
-    pub(crate) call_id: Option<String>,
-    pub(crate) status: TrajectoryStatus,
+    pub(crate) status: ItemStatus,
     pub(crate) timing: RecordTiming,
-    pub(crate) usage: Option<TrajectoryUsage>,
+    pub(crate) usage: Option<TokenUsage>,
 }
 
 impl TrajectoryRecord {
     pub(crate) fn matches(&self, query: &str) -> bool {
         query.is_empty() || self.search_text.contains(query)
+    }
+
+    pub(crate) fn lane(&self) -> TrajectoryLane {
+        match self.kind {
+            TrajectoryKind::System
+            | TrajectoryKind::User
+            | TrajectoryKind::Steering
+            | TrajectoryKind::Context => TrajectoryLane::Input,
+            TrajectoryKind::Assistant
+            | TrajectoryKind::Compaction
+            | TrajectoryKind::RequestFailure => TrajectoryLane::Model,
+            TrajectoryKind::Tool => TrajectoryLane::Tools,
+        }
     }
 }
 
@@ -77,46 +56,60 @@ impl TrajectoryRecord {
 pub(crate) struct TrajectoryProjection {
     pub(crate) records: Vector<Arc<TrajectoryRecord>>,
     index_by_id: HashMap<TrajectoryItemId, usize>,
-    stats: TrajectoryStats,
-    document_revision: u64,
+    stats: SessionStats,
     trajectory_revision: u64,
     geometry_revision: u64,
-    stats_revision: u64,
     projection_lineage: u64,
-    /// Monotonic revision for the small subset of record fields used by trajectory search and
-    /// ledger filtering. Timing- and usage-only receipts intentionally leave this unchanged.
-    search_revision: u64,
-    search_history: Vector<TrajectorySearchDelta>,
-    geometry_history: Vector<TrajectoryGeometryDelta>,
+    /// One cursor for every incremental trajectory consumer. Search and geometry use field flags
+    /// from the same bounded journal instead of maintaining independent revision histories.
+    change_revision: u64,
+    change_history: Vector<TrajectoryChangeDelta>,
     #[cfg(test)]
     materialized_records: usize,
 }
 
-const SEARCH_HISTORY_LIMIT: usize = 256;
-const GEOMETRY_HISTORY_LIMIT: usize = 256;
+const CHANGE_HISTORY_LIMIT: usize = 256;
 static NEXT_PROJECTION_LINEAGE: AtomicU64 = AtomicU64::new(1);
 
-/// One incremental search/filter transition. Indices name their final value in `records`; replaying
-/// every delta since a cached revision is therefore idempotent even when one streaming record is
-/// mentioned repeatedly. A reset is reserved for the rare case where row identity changes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TrajectorySearchDelta {
-    revision: u64,
-    changed_indices: Vector<usize>,
-    reset: bool,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TrajectoryChangeFlags {
+    search: bool,
+    geometry: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct TrajectoryGeometryDelta {
-    from_revision: u64,
-    to_revision: u64,
-    changed_indices: Vector<usize>,
+struct TrajectoryChangeDelta {
+    start_revision: u64,
+    end_revision: u64,
+    changed: HashMap<usize, TrajectoryChangeFlags>,
+    search_compatible: bool,
     sequence_compatible: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TrajectoryGeometryChanges {
-    pub(crate) changed_indices: Vector<usize>,
+pub(crate) struct TrajectoryChanges {
+    pub(crate) revision: u64,
+    changed: Vector<(usize, TrajectoryChangeFlags)>,
+    search_compatible: bool,
+    sequence_compatible: bool,
+}
+
+impl TrajectoryChanges {
+    pub(crate) fn search_indices(&self) -> Option<impl Iterator<Item = usize> + '_> {
+        self.search_compatible.then(|| {
+            self.changed
+                .iter()
+                .filter_map(|(index, flags)| flags.search.then_some(*index))
+        })
+    }
+
+    pub(crate) fn geometry_indices(&self) -> Option<impl Iterator<Item = usize> + '_> {
+        self.sequence_compatible.then(|| {
+            self.changed
+                .iter()
+                .filter_map(|(index, flags)| flags.geometry.then_some(*index))
+        })
+    }
 }
 
 impl TrajectoryProjection {
@@ -153,13 +146,7 @@ impl TrajectoryProjection {
                 })
                 .collect()
         };
-        let stats = if let Some(previous) = previous
-            && previous.stats_revision == revisions.stats
-        {
-            previous.stats
-        } else {
-            stats_snapshot(document.stats())
-        };
+        let stats = document.stats();
 
         let index_by_id = if let Some(previous) = previous
             && previous.trajectory_revision == revisions.trajectory
@@ -181,29 +168,25 @@ impl TrajectoryProjection {
             records.len()
         };
 
-        let (search_revision, search_history) =
-            search_state_after_full_rebuild(previous, revisions.trajectory);
-        let geometry_history = geometry_state_after_full_rebuild(previous, revisions.geometry);
+        let (change_revision, change_history) =
+            change_state_after_full_rebuild(previous, revisions.trajectory);
         Self {
             records,
             index_by_id,
             stats,
-            document_revision: revisions.document,
             trajectory_revision: revisions.trajectory,
             geometry_revision: revisions.geometry,
-            stats_revision: revisions.stats,
             projection_lineage: previous
                 .filter(|value| value.projection_lineage != 0)
                 .map_or_else(next_projection_lineage, |value| value.projection_lineage),
-            search_revision,
-            search_history,
-            geometry_history,
+            change_revision,
+            change_history,
             #[cfg(test)]
             materialized_records,
         }
     }
 
-    pub(crate) fn stats(&self) -> TrajectoryStats {
+    pub(crate) fn stats(&self) -> SessionStats {
         self.stats
     }
 
@@ -213,90 +196,70 @@ impl TrajectoryProjection {
         self.geometry_revision
     }
 
-    pub(crate) fn source_revision(&self) -> u64 {
-        self.document_revision
-    }
-
-    pub(crate) fn search_revision(&self) -> u64 {
-        self.search_revision
+    pub(crate) fn change_revision(&self) -> u64 {
+        self.change_revision
     }
 
     pub(crate) fn projection_lineage(&self) -> u64 {
         self.projection_lineage
     }
 
-    pub(crate) fn geometry_changes_since(
-        &self,
-        revision: u64,
-    ) -> Option<TrajectoryGeometryChanges> {
-        if revision == self.geometry_revision {
-            return Some(TrajectoryGeometryChanges::default());
-        }
-        if revision > self.geometry_revision {
+    /// Returns every trajectory field change after `revision`. Consumers share this cursor and
+    /// select only the fields they need. `None` means the bounded journal cannot prove continuity,
+    /// so the caller must rebuild once.
+    pub(crate) fn changes_since(&self, revision: u64) -> Option<TrajectoryChanges> {
+        if revision > self.change_revision {
             return None;
         }
+        if revision == self.change_revision {
+            return Some(TrajectoryChanges {
+                revision,
+                search_compatible: true,
+                sequence_compatible: true,
+                ..TrajectoryChanges::default()
+            });
+        }
+        let next_revision = revision.saturating_add(1);
         let start = self
-            .geometry_history
+            .change_history
             .iter()
-            .position(|delta| delta.from_revision == revision)?;
-        let mut expected = revision;
-        let mut changed = std::collections::HashSet::new();
-        for delta in self.geometry_history.iter().skip(start) {
-            if delta.from_revision != expected || !delta.sequence_compatible {
-                return None;
-            }
-            changed.extend(delta.changed_indices.iter().copied());
-            expected = delta.to_revision;
-            if expected == self.geometry_revision {
-                let mut changed_indices = changed.into_iter().collect::<Vector<_>>();
-                changed_indices.sort();
-                return Some(TrajectoryGeometryChanges { changed_indices });
-            }
-        }
-        None
-    }
-
-    /// Returns only indices whose searchable text changed since `revision`. `None` means the
-    /// bounded history cannot prove continuity and the caller must rebuild once. Empty iteration
-    /// is the common timing/usage receipt path and never touches historical records.
-    pub(crate) fn search_changed_indices_since(
-        &self,
-        revision: u64,
-    ) -> Option<impl Iterator<Item = usize> + '_> {
-        if revision > self.search_revision {
+            .position(|delta| delta.end_revision >= next_revision)?;
+        let first = self.change_history.get(start)?;
+        if first.start_revision > next_revision
+            || self
+                .change_history
+                .back()
+                .is_none_or(|last| last.end_revision != self.change_revision)
+        {
             return None;
         }
-        let start = if revision == self.search_revision {
-            self.search_history.len()
-        } else {
-            let first_revision = self.search_history.front()?.revision;
-            let next_revision = revision.saturating_add(1);
-            if next_revision < first_revision {
-                return None;
+        let mut merged = std::collections::HashMap::<usize, TrajectoryChangeFlags>::new();
+        let mut search_compatible = true;
+        let mut sequence_compatible = true;
+        let mut expected_revision = first.end_revision.saturating_add(1);
+        for (offset, delta) in self.change_history.iter().skip(start).enumerate() {
+            if offset > 0 {
+                if delta.start_revision != expected_revision {
+                    return None;
+                }
+                expected_revision = delta.end_revision.saturating_add(1);
             }
-            let start = usize::try_from(next_revision.saturating_sub(first_revision)).ok()?;
-            let first = self.search_history.get(start)?;
-            if first.revision != revision.saturating_add(1)
-                || self
-                    .search_history
-                    .back()
-                    .is_none_or(|last| last.revision != self.search_revision)
-                || self
-                    .search_history
-                    .iter()
-                    .skip(start)
-                    .any(|delta| delta.reset)
-            {
-                return None;
+            search_compatible &= delta.search_compatible;
+            sequence_compatible &= delta.sequence_compatible;
+            for (index, flags) in &delta.changed {
+                let merged_flags = merged.entry(*index).or_default();
+                merged_flags.search |= flags.search;
+                merged_flags.geometry |= flags.geometry;
             }
-            start
-        };
-        Some(
-            self.search_history
-                .iter()
-                .skip(start)
-                .flat_map(search_delta_indices),
-        )
+        }
+        let mut changed = merged.into_iter().collect::<Vector<_>>();
+        changed.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Some(TrajectoryChanges {
+            revision: self.change_revision,
+            changed,
+            search_compatible,
+            sequence_compatible,
+        })
     }
 
     pub(crate) fn record_by_id(&self, id: &TrajectoryItemId) -> Option<&TrajectoryRecord> {
@@ -315,11 +278,18 @@ impl TrajectoryProjection {
         delta: &ProjectionDelta,
         previous: &Self,
     ) -> Self {
-        if delta.trajectory_order_changed {
-            if let Some(projection) = Self::after_appended_order(document, delta, previous) {
+        if delta.trajectory_order.changed() {
+            if delta.trajectory_order.is_append()
+                && let Some(projection) = Self::after_appended_order(document, delta, previous)
+            {
                 return projection;
             }
-            return Self::from_document_reusing(document, Some(previous));
+            let mut rebuilt = Self::from_document_reusing(document, Some(previous));
+            // Sequence coordinates are record positions. A non-append order change (for example,
+            // inserting the initial system item before an already visible input) invalidates every
+            // previously stored range even though this is still the same session document.
+            rebuilt.projection_lineage = next_projection_lineage();
+            return rebuilt;
         }
 
         let revisions = document.revisions();
@@ -354,26 +324,26 @@ impl TrajectoryProjection {
             }
         }
         let stats = if delta.stats_changed {
-            stats_snapshot(document.stats())
+            document.stats()
         } else {
             previous.stats
         };
-        let (search_revision, search_history) =
-            advance_search_state(previous, search_indices, search_reset);
-        let geometry_history =
-            advance_geometry_state(previous, revisions.geometry, geometry_indices, true);
+        let (change_revision, change_history) = advance_change_state(
+            previous,
+            search_indices,
+            geometry_indices,
+            !search_reset,
+            true,
+        );
         Self {
             records,
             index_by_id: previous.index_by_id.clone(),
             stats,
-            document_revision: revisions.document,
             trajectory_revision: revisions.trajectory,
             geometry_revision: revisions.geometry,
-            stats_revision: revisions.stats,
             projection_lineage: previous.projection_lineage,
-            search_revision,
-            search_history,
-            geometry_history,
+            change_revision,
+            change_history,
             #[cfg(test)]
             materialized_records: previous.materialized_records.saturating_add(materialized),
         }
@@ -387,21 +357,10 @@ impl TrajectoryProjection {
         let canonical_ids = document.trajectory_ids();
         let previous_len = previous.records.len();
         let suffix = canonical_ids.get(previous_len..)?;
-        if canonical_ids.len() < previous_len
-            || suffix.is_empty()
+        if suffix.is_empty()
             || suffix
                 .iter()
                 .any(|id| previous.index_by_id.contains_key(id))
-            || canonical_ids.len() != previous_len.saturating_add(suffix.len())
-        {
-            return None;
-        }
-        // Every appended canonical ID must be named by this transaction. This
-        // rejects completion-time reorder/replacement and delegates that rare
-        // case to the full equivalence path.
-        if suffix
-            .iter()
-            .any(|id| !delta.changed_trajectory.contains(id))
         {
             return None;
         }
@@ -425,10 +384,10 @@ impl TrajectoryProjection {
         // A transaction may both append and update an existing row (for
         // example, revealing an assistant and requesting its first tool).
         for id in &delta.changed_trajectory {
-            if suffix.contains(id) {
+            let index = *index_by_id.get(id)?;
+            if index >= previous_len {
                 continue;
             }
-            let index = *index_by_id.get(id)?;
             let item = document.trajectory_by_id(id)?;
             let record = Arc::new(materialize_record(ordinals, item));
             materialized = materialized.saturating_add(1);
@@ -446,30 +405,26 @@ impl TrajectoryProjection {
             }
         }
         let revisions = document.revisions();
-        let (search_revision, search_history) =
-            advance_search_state(previous, search_indices, search_reset);
-        let geometry_history = advance_geometry_state(
+        let (change_revision, change_history) = advance_change_state(
             previous,
-            revisions.geometry,
+            search_indices,
             geometry_indices,
+            !search_reset,
             delta.geometry_changed,
         );
         Some(Self {
             records,
             index_by_id,
             stats: if delta.stats_changed {
-                stats_snapshot(document.stats())
+                document.stats()
             } else {
                 previous.stats
             },
-            document_revision: revisions.document,
             trajectory_revision: revisions.trajectory,
             geometry_revision: revisions.geometry,
-            stats_revision: revisions.stats,
             projection_lineage: previous.projection_lineage,
-            search_revision,
-            search_history,
-            geometry_history,
+            change_revision,
+            change_history,
             #[cfg(test)]
             materialized_records: previous.materialized_records.saturating_add(materialized),
         })
@@ -481,83 +436,78 @@ impl TrajectoryProjection {
     }
 }
 
-fn search_delta_indices(delta: &TrajectorySearchDelta) -> impl Iterator<Item = usize> + '_ {
-    delta.changed_indices.iter().copied()
-}
-
-fn search_state_after_full_rebuild(
+fn change_state_after_full_rebuild(
     previous: Option<&TrajectoryProjection>,
     trajectory_revision: u64,
-) -> (u64, Vector<TrajectorySearchDelta>) {
+) -> (u64, Vector<TrajectoryChangeDelta>) {
     let Some(previous) = previous else {
         return (1, Vector::new());
     };
     if previous.trajectory_revision == trajectory_revision {
-        return (previous.search_revision, previous.search_history.clone());
+        return (previous.change_revision, previous.change_history.clone());
     }
-    advance_search_state(previous, Vector::new(), true)
+    advance_change_state(previous, Vector::new(), Vector::new(), false, false)
 }
 
-fn advance_search_state(
+fn advance_change_state(
     previous: &TrajectoryProjection,
-    changed_indices: Vector<usize>,
-    reset: bool,
-) -> (u64, Vector<TrajectorySearchDelta>) {
-    if changed_indices.is_empty() && !reset {
-        return (previous.search_revision, previous.search_history.clone());
+    search_indices: Vector<usize>,
+    geometry_indices: Vector<usize>,
+    search_compatible: bool,
+    sequence_compatible: bool,
+) -> (u64, Vector<TrajectoryChangeDelta>) {
+    if search_indices.is_empty()
+        && geometry_indices.is_empty()
+        && search_compatible
+        && sequence_compatible
+    {
+        return (previous.change_revision, previous.change_history.clone());
     }
-    let revision = previous.search_revision.saturating_add(1);
-    let mut history = previous.search_history.clone();
-    history.push_back(TrajectorySearchDelta {
-        revision,
-        changed_indices,
-        reset,
-    });
-    while history.len() > SEARCH_HISTORY_LIMIT {
+    let revision = previous.change_revision.saturating_add(1);
+    let mut changed = HashMap::<usize, TrajectoryChangeFlags>::new();
+    for index in search_indices {
+        changed.entry(index).or_default().search = true;
+    }
+    for index in geometry_indices {
+        changed.entry(index).or_default().geometry = true;
+    }
+    let mut history = previous.change_history.clone();
+    let delta = TrajectoryChangeDelta {
+        start_revision: revision,
+        end_revision: revision,
+        changed,
+        search_compatible,
+        sequence_compatible,
+    };
+    if is_search_only_change(&delta) && history.back().is_some_and(is_search_only_change) {
+        let mut coalesced = history
+            .pop_back()
+            .expect("the previous search-only change was just observed");
+        coalesced.end_revision = revision;
+        for (index, flags) in delta.changed {
+            let mut merged = coalesced.changed.get(&index).copied().unwrap_or_default();
+            merged.search |= flags.search;
+            merged.geometry |= flags.geometry;
+            coalesced.changed.insert(index, merged);
+        }
+        history.push_back(coalesced);
+    } else {
+        history.push_back(delta);
+    }
+    while history.len() > CHANGE_HISTORY_LIMIT {
         history.pop_front();
     }
     (revision, history)
 }
 
-fn geometry_state_after_full_rebuild(
-    previous: Option<&TrajectoryProjection>,
-    geometry_revision: u64,
-) -> Vector<TrajectoryGeometryDelta> {
-    let Some(previous) = previous else {
-        return Vector::new();
-    };
-    if previous.geometry_revision == geometry_revision {
-        return previous.geometry_history.clone();
-    }
-    advance_geometry_state(previous, geometry_revision, Vector::new(), false)
-}
-
-fn advance_geometry_state(
-    previous: &TrajectoryProjection,
-    geometry_revision: u64,
-    changed_indices: Vector<usize>,
-    sequence_compatible: bool,
-) -> Vector<TrajectoryGeometryDelta> {
-    if previous.geometry_revision == geometry_revision {
-        return previous.geometry_history.clone();
-    }
-    let mut history = previous.geometry_history.clone();
-    history.push_back(TrajectoryGeometryDelta {
-        from_revision: previous.geometry_revision,
-        to_revision: geometry_revision,
-        changed_indices,
-        sequence_compatible,
-    });
-    while history.len() > GEOMETRY_HISTORY_LIMIT {
-        history.pop_front();
-    }
-    history
+fn is_search_only_change(delta: &TrajectoryChangeDelta) -> bool {
+    delta.search_compatible
+        && delta.sequence_compatible
+        && delta.changed.values().all(|flags| !flags.geometry)
 }
 
 fn same_geometry(previous: &TrajectoryRecord, current: &TrajectoryRecord) -> bool {
-    previous.kind == current.kind
-        && previous.lane == current.lane
-        && previous.timing == current.timing
+    previous.kind == current.kind && previous.timing == current.timing
 }
 
 fn next_projection_lineage() -> u64 {
@@ -573,10 +523,6 @@ fn materialize_record(
         .turn_id
         .zip(item.step_id)
         .and_then(|(turn_id, step_id)| ordinals.step(turn_id, step_id));
-    let call_id = match item.id {
-        TrajectoryItemId::Tool(call_id) => Some(call_id.to_string()),
-        _ => None,
-    };
     let title = item.title.to_owned();
     let text = item.text.to_owned();
     let payload = item.payload.map(ToOwned::to_owned);
@@ -585,17 +531,15 @@ fn materialize_record(
         id: item.id.clone(),
         source_seq: item.source_seqs.first().copied().unwrap_or_default(),
         kind: item.kind,
-        lane: item.lane,
         title,
         text,
         payload,
         search_text,
         turn,
         step,
-        call_id,
-        status: status_snapshot(item.status),
+        status: item.status,
         timing: item.timing.clone(),
-        usage: item.usage.map(usage_snapshot),
+        usage: item.usage,
     }
 }
 
@@ -622,45 +566,6 @@ pub(crate) fn normalized_search_text(title: &str, text: &str, payload: Option<&s
     } else {
         normalized.to_lowercase()
     }
-}
-
-fn status_snapshot(status: ItemStatus) -> TrajectoryStatus {
-    match status {
-        ItemStatus::Pending | ItemStatus::Running => TrajectoryStatus::Running,
-        ItemStatus::Completed => TrajectoryStatus::Completed,
-        ItemStatus::Failed | ItemStatus::Aborted => TrajectoryStatus::Failed,
-        ItemStatus::Denied => TrajectoryStatus::Denied,
-        ItemStatus::NotExecuted => TrajectoryStatus::NotExecuted,
-        ItemStatus::Unknown => TrajectoryStatus::Unknown,
-    }
-}
-
-fn usage_snapshot(usage: TokenUsage) -> TrajectoryUsage {
-    TrajectoryUsage {
-        input_tokens: saturating_u32(usage.input_tokens()),
-        output_tokens: saturating_u32(usage.total_output_tokens()),
-        cached_tokens: saturating_u32(usage.cache_read_input_tokens),
-    }
-}
-
-fn stats_snapshot(stats: SessionStats) -> TrajectoryStats {
-    TrajectoryStats {
-        turns: stats.turns,
-        steps: stats.steps,
-        llm_ns: stats.llm_ns,
-        tool_ns: stats.tool_ns,
-        ttft_ns: stats.ttft_ns,
-        ttft_steps: stats.ttft_samples,
-        decode_ns: stats.decode_ns,
-        decode_tokens: stats.decode_tokens,
-        input_tokens: stats.input_tokens(),
-        output_tokens: stats.total_output_tokens(),
-        cached_tokens: stats.cache_read_input_tokens,
-    }
-}
-
-fn saturating_u32(value: u64) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 // Preserve the current UI-facing timing vocabulary while retaining the exact
@@ -691,31 +596,62 @@ mod tests {
     }
 
     #[test]
-    fn geometry_history_reports_only_changed_indices_and_rejects_resets() {
+    fn non_append_order_change_starts_a_new_coordinate_generation() {
+        let mut events = crate::domain::session_document::tests::fixture();
+        let request = events.remove(5);
+        events.truncate(5);
+        let mut document = SessionDocument::from_events(events).unwrap();
+        let previous = TrajectoryProjection::from_document(&document);
+
+        let delta = document.apply_batch(vec![request]).unwrap();
+        assert!(delta.trajectory_order.changed());
+        assert!(!delta.trajectory_order.is_append());
+        let current = TrajectoryProjection::after_delta(&document, &delta, &previous);
+
+        assert_ne!(current.records[0].id, previous.records[0].id);
+        assert_ne!(current.projection_lineage(), previous.projection_lineage());
+    }
+
+    #[test]
+    fn one_change_history_serves_search_and_geometry_and_rejects_resets() {
         let previous = TrajectoryProjection {
-            geometry_revision: 10,
+            change_revision: 10,
             projection_lineage: next_projection_lineage(),
             ..TrajectoryProjection::default()
         };
-        let history = advance_geometry_state(&previous, 11, [77_777].into_iter().collect(), true);
+        let (revision, history) = advance_change_state(
+            &previous,
+            [77_777].into_iter().collect(),
+            [88_888].into_iter().collect(),
+            true,
+            true,
+        );
         let current = TrajectoryProjection {
-            geometry_revision: 11,
+            change_revision: revision,
             projection_lineage: previous.projection_lineage,
-            geometry_history: history,
+            change_history: history,
             ..TrajectoryProjection::default()
         };
+        let changes = current.changes_since(10).unwrap();
         assert_eq!(
-            current.geometry_changes_since(10).unwrap().changed_indices,
-            [77_777].into_iter().collect::<Vector<_>>()
+            changes.search_indices().unwrap().collect::<Vec<_>>(),
+            [77_777]
+        );
+        assert_eq!(
+            changes.geometry_indices().unwrap().collect::<Vec<_>>(),
+            [88_888]
         );
 
-        let reset_history = advance_geometry_state(&current, 12, Vector::new(), false);
+        let (revision, reset_history) =
+            advance_change_state(&current, Vector::new(), Vector::new(), false, false);
         let reset = TrajectoryProjection {
-            geometry_revision: 12,
+            change_revision: revision,
             projection_lineage: current.projection_lineage,
-            geometry_history: reset_history,
+            change_history: reset_history,
             ..TrajectoryProjection::default()
         };
-        assert!(reset.geometry_changes_since(10).is_none());
+        let changes = reset.changes_since(10).unwrap();
+        assert!(changes.search_indices().is_none());
+        assert!(changes.geometry_indices().is_none());
     }
 }

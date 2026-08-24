@@ -9,8 +9,8 @@ use kcastle_agent::{
     SessionInfo,
 };
 
-use crate::domain::session_document::{ConversationItemId, ProjectionDelta, SessionDocument};
-use crate::domain::{ApprovalState, Message, MessageId, RunId, SessionView, TrajectoryItemId};
+use crate::domain::session_document::SessionDocument;
+use crate::domain::{ApprovalState, RunId, SessionView, TrajectoryItemId};
 use crate::settings::EnterBehavior;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,18 +259,8 @@ pub(crate) struct SessionRuntimeObservation {
     pub(crate) approval_needed: bool,
     pub(crate) completed_runs: u64,
     pub(crate) transcript_updates: u64,
-    pub(crate) presentation_sequence: u64,
     pub(crate) durable_revision: u64,
     pub(crate) metadata_generation: u64,
-}
-
-const PRESENTATION_CHANGE_HISTORY: usize = 128;
-
-#[derive(Clone, Debug)]
-struct PresentationChange {
-    sequence: u64,
-    full_reset: bool,
-    message_ids: Vec<MessageId>,
 }
 
 /// Per-session execution boundary owned by GPUI.
@@ -291,11 +281,6 @@ pub(crate) struct SessionRuntime {
     metadata_generation: u64,
     document: SessionDocument,
     view: Arc<SessionView>,
-    conversation_ids: Vec<ConversationItemId>,
-    message_keys: HashMap<ConversationItemId, MessageId>,
-    message_indices: HashMap<MessageId, usize>,
-    presentation_sequence: u64,
-    presentation_changes: VecDeque<PresentationChange>,
     approvals: ApprovalQueue,
     lifecycle: RuntimeLifecycle,
     started_at: Option<Instant>,
@@ -331,8 +316,6 @@ impl SessionRuntime {
             &tool_schemas,
             None,
         ));
-        let conversation_ids = document.conversation_ids().to_vec();
-        let (message_keys, message_indices) = presentation_indices(&conversation_ids, &view);
         Self {
             session,
             project_id,
@@ -347,11 +330,6 @@ impl SessionRuntime {
             metadata_generation: 0,
             document,
             view,
-            conversation_ids,
-            message_keys,
-            message_indices,
-            presentation_sequence: 0,
-            presentation_changes: VecDeque::new(),
             approvals: ApprovalQueue::default(),
             lifecycle: RuntimeLifecycle::default(),
             started_at: None,
@@ -381,7 +359,6 @@ impl SessionRuntime {
             approval_needed: !self.approvals.is_empty(),
             completed_runs: self.completed_runs,
             transcript_updates: self.transcript_updates,
-            presentation_sequence: self.presentation_sequence,
             durable_revision: self.durable_revision,
             metadata_generation: self.metadata_generation,
         }
@@ -417,66 +394,6 @@ impl SessionRuntime {
     pub(crate) fn details_raw_revision(&self, id: &TrajectoryItemId) -> Option<(usize, u64)> {
         let source_seqs = self.document.details(id)?.source_seqs;
         Some((source_seqs.len(), *source_seqs.last()?))
-    }
-
-    pub(crate) fn presentation_snapshot(&self) -> Vec<Arc<Message>> {
-        self.view.conversation.messages.iter().cloned().collect()
-    }
-
-    /// Returns all committed message changes after `sequence` without scanning the whole view.
-    /// A bounded-history miss is reported as a full reset.
-    pub(crate) fn presentation_update_since(
-        &self,
-        sequence: u64,
-    ) -> (u64, bool, Vec<Arc<Message>>) {
-        if sequence == self.presentation_sequence {
-            return (self.presentation_sequence, false, Vec::new());
-        }
-        let history_missed = sequence > self.presentation_sequence
-            || self
-                .presentation_changes
-                .front()
-                .is_none_or(|change| sequence.saturating_add(1) < change.sequence);
-        if history_missed {
-            return (
-                self.presentation_sequence,
-                true,
-                self.presentation_snapshot(),
-            );
-        }
-
-        let mut full_reset = false;
-        let mut seen = std::collections::HashSet::new();
-        let mut ids = Vec::new();
-        for change in self
-            .presentation_changes
-            .iter()
-            .filter(|change| change.sequence > sequence)
-        {
-            full_reset |= change.full_reset;
-            for id in &change.message_ids {
-                if seen.insert(*id) {
-                    ids.push(*id);
-                }
-            }
-        }
-        if full_reset {
-            return (
-                self.presentation_sequence,
-                true,
-                self.presentation_snapshot(),
-            );
-        }
-        let messages = ids
-            .into_iter()
-            .filter_map(|id| {
-                self.message_indices
-                    .get(&id)
-                    .and_then(|index| self.view.conversation.messages.get(*index))
-                    .cloned()
-            })
-            .collect();
-        (self.presentation_sequence, false, messages)
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
@@ -948,7 +865,6 @@ impl SessionRuntime {
                     &self.tool_schemas,
                     &self.view,
                 ));
-                self.publish_presentation_change(&delta, &next_view);
                 self.view = next_view;
                 self.durable_revision = committed_revision;
                 if committed_at_ms >= 0 {
@@ -989,63 +905,6 @@ impl SessionRuntime {
             self.refresh_view();
         }
     }
-
-    fn publish_presentation_change(
-        &mut self,
-        delta: &ProjectionDelta,
-        next_view: &Arc<SessionView>,
-    ) {
-        if delta.changed_conversation.is_empty() && !delta.conversation_order_changed {
-            return;
-        }
-
-        let next_ids = self.document.conversation_ids();
-        let previous_len = self.conversation_ids.len();
-        let append_only = next_ids.starts_with(&self.conversation_ids)
-            && next_ids.len() == next_view.conversation.messages.len();
-        let full_reset = !append_only;
-        if full_reset {
-            self.conversation_ids = next_ids.to_vec();
-            (self.message_keys, self.message_indices) =
-                presentation_indices(&self.conversation_ids, next_view);
-        } else {
-            for (index, id) in next_ids.iter().enumerate().skip(previous_len) {
-                let Some(message) = next_view.conversation.messages.get(index) else {
-                    continue;
-                };
-                self.message_keys.insert(id.clone(), message.key);
-                self.message_indices.insert(message.key, index);
-            }
-            self.conversation_ids
-                .extend_from_slice(next_ids.get(previous_len..).unwrap_or_default());
-        }
-
-        let mut seen = std::collections::HashSet::new();
-        let message_ids = if full_reset {
-            next_view
-                .conversation
-                .messages
-                .iter()
-                .map(|message| message.key)
-                .collect()
-        } else {
-            delta
-                .changed_conversation
-                .iter()
-                .filter_map(|id| self.message_keys.get(id).copied())
-                .filter(|id| seen.insert(*id))
-                .collect()
-        };
-        self.presentation_sequence = self.presentation_sequence.saturating_add(1);
-        self.presentation_changes.push_back(PresentationChange {
-            sequence: self.presentation_sequence,
-            full_reset,
-            message_ids,
-        });
-        while self.presentation_changes.len() > PRESENTATION_CHANGE_HISTORY {
-            self.presentation_changes.pop_front();
-        }
-    }
 }
 
 impl Drop for SessionRuntime {
@@ -1054,27 +913,6 @@ impl Drop for SessionRuntime {
             control.abort();
         }
     }
-}
-
-fn presentation_indices(
-    conversation_ids: &[ConversationItemId],
-    view: &SessionView,
-) -> (
-    HashMap<ConversationItemId, MessageId>,
-    HashMap<MessageId, usize>,
-) {
-    debug_assert_eq!(conversation_ids.len(), view.conversation.messages.len());
-    let mut keys = HashMap::with_capacity(conversation_ids.len());
-    let mut indices = HashMap::with_capacity(conversation_ids.len());
-    for (index, (id, message)) in conversation_ids
-        .iter()
-        .zip(view.conversation.messages.iter())
-        .enumerate()
-    {
-        keys.insert(id.clone(), message.key);
-        indices.insert(message.key, index);
-    }
-    (keys, indices)
 }
 
 fn deferred_allow_all_config(

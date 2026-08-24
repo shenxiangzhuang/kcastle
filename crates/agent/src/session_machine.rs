@@ -25,27 +25,28 @@ pub struct PendingInput {
     pub origin: InputOrigin,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PlannedBatch {
-    pub tx_id: TxId,
-    pub expected_seq: u64,
-    pub events: Vec<RecordedEvent>,
+    tx_id: TxId,
+    expected_seq: u64,
+    events: Vec<RecordedEvent>,
     base_identity: Arc<()>,
-    prepared_tx_id: TxId,
-    prepared_expected_seq: u64,
-    prepared_events: Arc<Vec<RecordedEvent>>,
-    candidate: Arc<SessionMachine>,
-}
-
-impl PartialEq for PlannedBatch {
-    fn eq(&self, other: &Self) -> bool {
-        self.tx_id == other.tx_id
-            && self.expected_seq == other.expected_seq
-            && self.events == other.events
-    }
+    candidate: Box<SessionMachine>,
 }
 
 impl PlannedBatch {
+    pub fn tx_id(&self) -> &TxId {
+        &self.tx_id
+    }
+
+    pub fn expected_seq(&self) -> u64 {
+        self.expected_seq
+    }
+
+    pub fn events(&self) -> &[RecordedEvent] {
+        &self.events
+    }
+
     pub fn into_events(self) -> Vec<RecordedEvent> {
         self.events
     }
@@ -170,7 +171,7 @@ pub struct SessionMachine {
     next_tool_ordinal: u64,
     open_tool_ordinals: HashMap<CallId, u64>,
     open_tools: OrdMap<u64, CallId>,
-    unregistered_tool_calls: HashMap<RequestId, Vec<CallId>>,
+    pending_tool_registration: Option<(RequestId, usize)>,
     compactions: HashMap<CompactionId, CompactionRecord>,
     active_run: Option<RunId>,
     active_turn: Option<TurnId>,
@@ -201,7 +202,7 @@ impl Default for SessionMachine {
             next_tool_ordinal: 0,
             open_tool_ordinals: HashMap::new(),
             open_tools: OrdMap::new(),
-            unregistered_tool_calls: HashMap::new(),
+            pending_tool_registration: None,
             compactions: HashMap::new(),
             active_run: None,
             active_turn: None,
@@ -368,21 +369,16 @@ impl SessionMachine {
         }
         candidate.validate_transaction_boundary()?;
         candidate.identity = Arc::new(());
-        let prepared_events = Arc::new(events.clone());
-        let prepared_tx_id = first_tx_id(&events)?;
         Ok(PlannedBatch {
-            tx_id: prepared_tx_id.clone(),
+            tx_id,
             expected_seq,
             events,
             base_identity,
-            prepared_tx_id,
-            prepared_expected_seq: expected_seq,
-            prepared_events,
-            candidate: Arc::new(candidate),
+            candidate: Box::new(candidate),
         })
     }
 
-    pub fn apply_batch(&mut self, batch: &PlannedBatch) -> Result<(), SessionMachineError> {
+    pub fn apply_batch(&mut self, batch: PlannedBatch) -> Result<(), SessionMachineError> {
         if batch.events.is_empty() {
             return Err(SessionMachineError::EmptyBatch);
         }
@@ -395,13 +391,7 @@ impl SessionMachine {
         if !Arc::ptr_eq(&self.identity, &batch.base_identity) {
             return invalid("planned transaction no longer matches the session machine");
         }
-        if batch.tx_id != batch.prepared_tx_id
-            || batch.expected_seq != batch.prepared_expected_seq
-            || batch.events != *batch.prepared_events
-        {
-            return invalid("planned transaction events were changed after validation");
-        }
-        *self = (*batch.candidate).clone();
+        *self = *batch.candidate;
         Ok(())
     }
 
@@ -707,7 +697,7 @@ impl SessionMachine {
                 if !self.open_tools.is_empty() {
                     return invalid(format!("step {step_id} has unresolved tools"));
                 }
-                if !self.unregistered_tool_calls.is_empty() {
+                if self.pending_tool_registration.is_some() {
                     return invalid(format!("step {step_id} has unregistered tool calls"));
                 }
                 let step = self
@@ -761,6 +751,7 @@ impl SessionMachine {
                 if input.trim().is_empty() || self.inputs.contains_key(input_id) {
                     return invalid(format!("input {input_id} cannot be submitted"));
                 }
+                let ordinal = self.next_input_ordinal;
                 self.inputs.insert(
                     input_id.clone(),
                     InputRecord {
@@ -769,7 +760,6 @@ impl SessionMachine {
                         attached_step: None,
                     },
                 );
-                let ordinal = self.next_input_ordinal;
                 self.next_input_ordinal = self.next_input_ordinal.saturating_add(1);
                 self.pending_input_ordinals
                     .insert(input_id.clone(), ordinal);
@@ -942,8 +932,7 @@ impl SessionMachine {
                     request.step_id.clone()
                 };
                 if has_tool_calls {
-                    self.unregistered_tool_calls
-                        .insert(request_id.clone(), declared_tool_calls);
+                    self.pending_tool_registration = Some((request_id.clone(), 0));
                 }
                 self.state
                     .append_items(items.clone(), Some(response.to_provider()))
@@ -973,20 +962,21 @@ impl SessionMachine {
                     .ok_or_else(|| invalid_error(format!("unknown request {request_id}")))?;
                 if request.terminal != Some(RequestTerminal::Completed)
                     || self.active_step.as_ref() != Some(&request.step_id)
-                    || !request.declared_tool_calls.contains(call_id)
                 {
                     return invalid(format!(
                         "tool call {call_id} was not declared by the completed response"
                     ));
                 }
-                if self
-                    .unregistered_tool_calls
-                    .get(request_id)
-                    .and_then(|remaining| remaining.first())
-                    != Some(call_id)
-                {
+                let Some((pending_request, next_index)) = &self.pending_tool_registration else {
                     return invalid(format!(
                         "tool call {call_id} was not registered in response declaration order"
+                    ));
+                };
+                if pending_request != request_id
+                    || request.declared_tool_calls.get(*next_index) != Some(call_id)
+                {
+                    return invalid(format!(
+                        "tool call {call_id} was not declared next in response declaration order"
                     ));
                 }
                 if let Some(parent_call_id) = parent_call_id {
@@ -1003,6 +993,8 @@ impl SessionMachine {
                     }
                 }
                 let request_step_id = request.step_id.clone();
+                let declared_call_count = request.declared_tool_calls.len();
+                let ordinal = self.next_tool_ordinal;
                 self.tools.insert(
                     call_id.clone(),
                     ToolRecord {
@@ -1015,20 +1007,16 @@ impl SessionMachine {
                         result_attached: false,
                     },
                 );
-                let ordinal = self.next_tool_ordinal;
                 self.next_tool_ordinal = self.next_tool_ordinal.saturating_add(1);
                 self.open_tool_ordinals.insert(call_id.clone(), ordinal);
                 self.open_tools.insert(ordinal, call_id.clone());
-                let registered_every_call = {
-                    let remaining = self
-                        .unregistered_tool_calls
-                        .get_mut(request_id)
-                        .expect("tool call registration is tracked until complete");
-                    remaining.remove(0);
-                    remaining.is_empty()
-                };
-                if registered_every_call {
-                    self.unregistered_tool_calls.remove(request_id);
+                let pending = self
+                    .pending_tool_registration
+                    .as_mut()
+                    .expect("tool call registration is tracked until complete");
+                pending.1 += 1;
+                if pending.1 == declared_call_count {
+                    self.pending_tool_registration = None;
                 }
             }
             SessionEvent::ToolAuthorizationResolved { call_id, decision } => {
@@ -1259,7 +1247,7 @@ impl SessionMachine {
     }
 
     fn validate_transaction_boundary(&self) -> Result<(), SessionMachineError> {
-        if let Some(request_id) = self.unregistered_tool_calls.keys().next() {
+        if let Some((request_id, _)) = &self.pending_tool_registration {
             return invalid(format!(
                 "request {request_id} did not register every tool call in its response transaction"
             ));
@@ -1384,13 +1372,6 @@ struct ToolSnapshot {
     execution_started: bool,
     execution_finished: Option<ToolExecutionOutcome>,
     result_attached: bool,
-}
-
-fn first_tx_id(events: &[RecordedEvent]) -> Result<TxId, SessionMachineError> {
-    events
-        .first()
-        .map(|event| event.tx_id.clone())
-        .ok_or(SessionMachineError::EmptyBatch)
 }
 
 fn ensure_non_empty_id(
@@ -1581,7 +1562,7 @@ mod tests {
     ) {
         let batch = machine.plan_batch(drafts).unwrap();
         all_events.extend(batch.events.iter().cloned());
-        machine.apply_batch(&batch).unwrap();
+        machine.apply_batch(batch).unwrap();
     }
 
     fn input_pair(tx: &str, index: usize, offset: u64) -> Vec<EventDraft> {
@@ -1842,17 +1823,14 @@ mod tests {
     }
 
     #[test]
-    fn planned_batch_is_bound_to_the_exact_machine_and_events() {
+    fn planned_batch_is_bound_to_the_exact_machine() {
         let machine = SessionMachine::default();
         let first = machine.plan_batch(lifecycle("tx-first")).unwrap();
         let stale = machine.plan_batch(lifecycle("tx-stale")).unwrap();
-        let mut changed = first.clone();
-        changed.events[0].time.wall_time_ms += 1;
 
         let mut live = machine;
-        assert!(live.apply_batch(&changed).is_err());
-        live.apply_batch(&first).unwrap();
-        assert!(live.apply_batch(&stale).is_err());
+        live.apply_batch(first).unwrap();
+        assert!(live.apply_batch(stale).is_err());
     }
 
     #[test]
@@ -1862,7 +1840,7 @@ mod tests {
 
         let mut machine = SessionMachine::default();
         let lifecycle = machine.plan_batch(lifecycle("tx-lifecycle")).unwrap();
-        machine.apply_batch(&lifecycle).unwrap();
+        machine.apply_batch(lifecycle).unwrap();
         let mut middle = Duration::ZERO;
         let mut late = Duration::ZERO;
 
@@ -1873,7 +1851,7 @@ mod tests {
             drafts.extend(input_pair(&tx, first_input + 1, transaction as u64 + 10));
             let started = Instant::now();
             let batch = machine.plan_batch(drafts).unwrap();
-            machine.apply_batch(&batch).unwrap();
+            machine.apply_batch(batch).unwrap();
             let elapsed = started.elapsed();
             if (QUARTER..QUARTER * 2).contains(&transaction) {
                 middle += elapsed;
@@ -2054,7 +2032,7 @@ mod tests {
                 SessionEvent::ToolCallRequested { .. }
             )
         ));
-        machine.apply_batch(&batch).unwrap();
+        machine.apply_batch(batch).unwrap();
 
         let close_step = draft(
             "tx-close-too-early",
@@ -2394,7 +2372,7 @@ mod tests {
             ],
         );
         let terminal = machine.plan_batch(terminal).unwrap();
-        machine.apply_batch(&terminal).unwrap();
+        machine.apply_batch(terminal).unwrap();
         assert!(machine.unresolved_tool_calls().is_empty());
     }
 
@@ -2746,7 +2724,7 @@ mod tests {
                 .iter()
                 .all(|event| event.tx_id == TxId::from("tx-recovery"))
         );
-        machine.apply_batch(&recovery).unwrap();
+        machine.apply_batch(recovery).unwrap();
         assert!(
             machine
                 .plan_recovery("tx-recovery-2".into(), time(31))
@@ -2828,7 +2806,7 @@ mod tests {
                 } if call_id == &CallId::from("call") && status == &expected_status
             )));
 
-            machine.apply_batch(&recovery).unwrap();
+            machine.apply_batch(recovery).unwrap();
             assert!(machine.unresolved_tool_calls().is_empty());
         }
     }
@@ -2951,7 +2929,7 @@ mod tests {
             ]
         );
 
-        machine.apply_batch(&recovery).unwrap();
+        machine.apply_batch(recovery).unwrap();
         assert!(machine.unresolved_tool_calls().is_empty());
     }
 
@@ -3035,7 +3013,7 @@ mod tests {
             ) if request_id == &RequestId::from("request") && error.contains("interrupted")
         ));
 
-        machine.apply_batch(&recovery).unwrap();
+        machine.apply_batch(recovery).unwrap();
         assert!(
             machine
                 .plan_recovery("tx-recovery-2".into(), time(31))

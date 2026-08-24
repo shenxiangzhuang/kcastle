@@ -28,6 +28,10 @@ const FAILPOINT_BEFORE_COMMIT: u8 = 1;
 const FAILPOINT_AFTER_COMMIT: u8 = 2;
 #[cfg(test)]
 const FAILPOINT_PAUSE_BEFORE_COMMIT: u8 = 3;
+#[cfg(test)]
+const FAILPOINT_PAUSE_RESOLVE_AFTER_REVISION: u8 = 4;
+#[cfg(test)]
+const FAILPOINT_RESOLVE_PAUSED: u8 = 5;
 
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
@@ -150,9 +154,9 @@ impl AppendTx {
     ) -> Self {
         Self {
             session_id,
-            tx_id: batch.tx_id.clone(),
+            tx_id: batch.tx_id().clone(),
             expected_revision,
-            events: batch.events.clone(),
+            events: batch.events().to_vec(),
         }
     }
 }
@@ -393,6 +397,28 @@ impl SessionStore {
             AppendFailpoint::PauseBeforeCommit => FAILPOINT_PAUSE_BEFORE_COMMIT,
         };
         self.inner.failpoint.store(value, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn pause_resolve_after_revision(&self) {
+        self.inner
+            .failpoint
+            .store(FAILPOINT_PAUSE_RESOLVE_AFTER_REVISION, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn resolve_pause_reached(&self) -> bool {
+        self.inner.failpoint.load(Ordering::SeqCst) == FAILPOINT_RESOLVE_PAUSED
+    }
+
+    #[cfg(test)]
+    fn resume_resolve(&self) {
+        let _ = self.inner.failpoint.compare_exchange(
+            FAILPOINT_RESOLVE_PAUSED,
+            FAILPOINT_NONE,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
     pub fn create_session(
@@ -912,11 +938,30 @@ impl SessionStore {
         session_id: &SessionId,
         tx_id: &TransactionId,
     ) -> Result<Option<CommitReceipt>, SessionStoreError> {
-        let connection = self.connection()?;
-        let session_key = session_key_with_connection(&connection, session_id)?;
-        match load_receipt_from_connection(&connection, session_id, session_key, tx_id) {
-            Ok(receipt) => Ok(Some(receipt)),
-            Err(SessionStoreError::TransactionNotFound { .. }) => Ok(None),
+        let mut connection = self.connection()?;
+        let snapshot = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let session_key = session_key_with_connection(&snapshot, session_id)?;
+        match load_receipt_from_connection(&snapshot, session_id, session_key, tx_id) {
+            Ok(receipt) => {
+                let revision = snapshot.query_row(
+                    "SELECT revision FROM sessions WHERE session_key = ?1",
+                    params![session_key],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                #[cfg(test)]
+                self.pause_resolve_if_requested();
+                ensure_catalog_projection_current(
+                    &snapshot,
+                    session_key,
+                    from_sql_u64(revision, "session revision")?,
+                )?;
+                snapshot.commit()?;
+                Ok(Some(receipt))
+            }
+            Err(SessionStoreError::TransactionNotFound { .. }) => {
+                snapshot.commit()?;
+                Ok(None)
+            }
             Err(error) => Err(error),
         }
     }
@@ -954,35 +999,12 @@ impl SessionStore {
                 event_count: row.get(7)?,
             })
         })?;
-        let mut transactions = Vec::new();
+        let mut decoders = Vec::new();
         let mut revision_indexes = HashMap::new();
-        let mut declarations = HashMap::new();
         for raw in transaction_rows {
-            let raw = raw?;
-            let revision = from_sql_u64(raw.revision, "transaction revision")?;
-            let base_revision = from_sql_u64(raw.base_revision, "base revision")?;
-            let first_event_seq = from_sql_u64(raw.first_event_seq, "first event sequence")?;
-            let event_count = usize_from_sql(raw.event_count, "event count")?;
-            if raw.clock_id.trim().is_empty() {
-                return Err(SessionStoreError::Corrupt(format!(
-                    "transaction {} has an empty clock ID",
-                    raw.tx_id
-                )));
-            }
-            revision_indexes.insert(revision, transactions.len());
-            declarations.insert(revision, (first_event_seq, event_count, raw.clock_id));
-            transactions.push(CommitReceipt {
-                session_id: session_id.clone(),
-                tx_id: TransactionId::from_raw(raw.tx_id),
-                base_revision,
-                revision,
-                request_digest: raw.request_digest,
-                committed_at_ms: raw.committed_at_ms,
-                // `event_count` is persisted data, not allocation authority. Populate from the
-                // rows actually returned and validate the declaration after replay so a corrupt
-                // count cannot panic or force an attacker-sized allocation.
-                events: Vec::new(),
-            });
+            let decoder = TransactionDecoder::new(session_id, raw?)?;
+            revision_indexes.insert(decoder.revision(), decoders.len());
+            decoders.push(decoder);
         }
         drop(statement);
 
@@ -992,65 +1014,24 @@ impl SessionStore {
              WHERE session_key = ?1
              ORDER BY seq ASC",
         )?;
-        let event_rows = event_statement.query_map(params![session_key], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-            ))
-        })?;
+        let event_rows =
+            event_statement.query_map(params![session_key], raw_stored_event_from_row)?;
         for row in event_rows {
-            let (revision, ordinal, seq, wall_time_ms, monotonic_ns, event_json) = row?;
-            let revision = from_sql_u64(revision, "event transaction revision")?;
+            let raw = row?;
+            let revision = from_sql_u64(raw.transaction_revision, "event transaction revision")?;
             let Some(index) = revision_indexes.get(&revision).copied() else {
                 return Err(SessionStoreError::Corrupt(format!(
                     "event references missing transaction revision {revision}"
                 )));
             };
-            let ordinal = usize_from_sql(ordinal, "event transaction ordinal")?;
-            if ordinal != transactions[index].events.len() {
-                return Err(SessionStoreError::Corrupt(format!(
-                    "transaction {} event ordinal {ordinal} is not contiguous",
-                    transactions[index].tx_id
-                )));
-            }
-            let event_tx_id = transactions[index].tx_id.clone();
-            let clock_id = declarations[&revision].2.clone();
-            transactions[index].events.push(RecordedEvent {
-                seq: from_sql_u64(seq, "event sequence")?,
-                tx_id: event_tx_id,
-                time: EventTime {
-                    wall_time_ms,
-                    clock_id,
-                    monotonic_ns: from_sql_u64(monotonic_ns, "event monotonic timestamp")?,
-                },
-                event: serde_json::from_slice(&event_json)?,
-            });
+            decoders[index].push(raw)?;
         }
         drop(event_statement);
 
-        for transaction in &transactions {
-            let declaration = &declarations[&transaction.revision];
-            if transaction.events.len() != declaration.1
-                || transaction.events.first().map(|event| event.seq) != Some(declaration.0)
-            {
-                return Err(SessionStoreError::Corrupt(format!(
-                    "transaction {} does not contain its declared event range",
-                    transaction.tx_id
-                )));
-            }
-            if request_digest(transaction.base_revision, &transaction.events)?
-                != transaction.request_digest
-            {
-                return Err(SessionStoreError::Corrupt(format!(
-                    "transaction {} request digest does not match its canonical events",
-                    transaction.tx_id
-                )));
-            }
-        }
+        let transactions = decoders
+            .into_iter()
+            .map(TransactionDecoder::finish)
+            .collect::<Result<Vec<_>, _>>()?;
 
         validate_loaded_transactions(&transactions)?;
         if transactions
@@ -1168,6 +1149,25 @@ impl SessionStore {
                 Ordering::SeqCst,
             )
             .is_ok()
+    }
+
+    #[cfg(test)]
+    fn pause_resolve_if_requested(&self) {
+        if self
+            .inner
+            .failpoint
+            .compare_exchange(
+                FAILPOINT_PAUSE_RESOLVE_AFTER_REVISION,
+                FAILPOINT_RESOLVE_PAUSED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            while self.inner.failpoint.load(Ordering::SeqCst) == FAILPOINT_RESOLVE_PAUSED {
+                std::thread::yield_now();
+            }
+        }
     }
 }
 
@@ -1439,6 +1439,133 @@ struct RawTransaction {
     event_count: i64,
 }
 
+struct RawStoredEvent {
+    transaction_revision: i64,
+    ordinal: i64,
+    seq: i64,
+    wall_time_ms: i64,
+    monotonic_ns: i64,
+    event_json: Vec<u8>,
+}
+
+/// Builds one receipt from untrusted SQLite rows.
+///
+/// Full-session loading and exact transaction resolution deliberately use different query plans,
+/// but they must accept and reject the same stored transaction shapes. Keeping the row validation
+/// here prevents those two trust boundaries from drifting apart.
+struct TransactionDecoder {
+    receipt: CommitReceipt,
+    first_event_seq: u64,
+    expected_event_count: usize,
+    clock_id: String,
+}
+
+impl TransactionDecoder {
+    fn new(session_id: &SessionId, raw: RawTransaction) -> Result<Self, SessionStoreError> {
+        if raw.clock_id.trim().is_empty() {
+            return Err(corrupt_transaction(&raw.tx_id, "has an empty clock ID"));
+        }
+        let decoder = Self {
+            receipt: CommitReceipt {
+                session_id: session_id.clone(),
+                tx_id: TransactionId::from_raw(raw.tx_id),
+                base_revision: from_sql_u64(raw.base_revision, "base revision")?,
+                revision: from_sql_u64(raw.revision, "transaction revision")?,
+                request_digest: raw.request_digest,
+                committed_at_ms: raw.committed_at_ms,
+                // The declaration is untrusted allocation input. Grow only from rows SQLite
+                // actually returns and compare the exact count in `finish`.
+                events: Vec::new(),
+            },
+            first_event_seq: from_sql_u64(raw.first_event_seq, "first event sequence")?,
+            expected_event_count: usize_from_sql(raw.event_count, "event count")?,
+            clock_id: raw.clock_id,
+        };
+        decoder.event_range()?;
+        Ok(decoder)
+    }
+
+    fn revision(&self) -> u64 {
+        self.receipt.revision
+    }
+
+    fn event_range(&self) -> Result<(u64, u64), SessionStoreError> {
+        let event_span = self
+            .expected_event_count
+            .checked_sub(1)
+            .ok_or_else(|| corrupt_transaction(&self.receipt.tx_id, "declares no events"))?;
+        let event_span = u64::try_from(event_span)
+            .map_err(|_| corrupt_transaction(&self.receipt.tx_id, "event count is too large"))?;
+        let last_event_seq = self
+            .first_event_seq
+            .checked_add(event_span)
+            .ok_or_else(|| corrupt_transaction(&self.receipt.tx_id, "event range overflows"))?;
+        Ok((self.first_event_seq, last_event_seq))
+    }
+
+    fn push(&mut self, raw: RawStoredEvent) -> Result<(), SessionStoreError> {
+        let event_revision = from_sql_u64(raw.transaction_revision, "event transaction revision")?;
+        let ordinal = usize_from_sql(raw.ordinal, "event transaction ordinal")?;
+        if event_revision != self.receipt.revision || ordinal != self.receipt.events.len() {
+            return Err(corrupt_transaction(
+                &self.receipt.tx_id,
+                "event range contains the wrong revision or ordinal",
+            ));
+        }
+        self.receipt.events.push(RecordedEvent {
+            seq: from_sql_u64(raw.seq, "event sequence")?,
+            tx_id: self.receipt.tx_id.clone(),
+            time: EventTime {
+                wall_time_ms: raw.wall_time_ms,
+                clock_id: self.clock_id.clone(),
+                monotonic_ns: from_sql_u64(raw.monotonic_ns, "event monotonic timestamp")?,
+            },
+            event: serde_json::from_slice(&raw.event_json)?,
+        });
+        Ok(())
+    }
+
+    fn finish(self) -> Result<CommitReceipt, SessionStoreError> {
+        if self.receipt.events.len() != self.expected_event_count
+            || self
+                .receipt
+                .events
+                .iter()
+                .enumerate()
+                .any(|(index, event)| event.seq != self.first_event_seq + index as u64)
+        {
+            return Err(corrupt_transaction(
+                &self.receipt.tx_id,
+                "does not contain its declared event range",
+            ));
+        }
+        if request_digest(self.receipt.base_revision, &self.receipt.events)?
+            != self.receipt.request_digest
+        {
+            return Err(corrupt_transaction(
+                &self.receipt.tx_id,
+                "request digest does not match its canonical events",
+            ));
+        }
+        Ok(self.receipt)
+    }
+}
+
+fn raw_stored_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawStoredEvent> {
+    Ok(RawStoredEvent {
+        transaction_revision: row.get(0)?,
+        ordinal: row.get(1)?,
+        seq: row.get(2)?,
+        wall_time_ms: row.get(3)?,
+        monotonic_ns: row.get(4)?,
+        event_json: row.get(5)?,
+    })
+}
+
+fn corrupt_transaction(tx_id: &impl std::fmt::Display, detail: &str) -> SessionStoreError {
+    SessionStoreError::Corrupt(format!("transaction {tx_id} {detail}"))
+}
+
 fn load_receipt_from_connection(
     connection: &Connection,
     session_id: &SessionId,
@@ -1470,24 +1597,11 @@ fn load_receipt_from_connection(
             session_id: session_id.clone(),
             tx_id: tx_id.clone(),
         })?;
-    let base_revision = from_sql_u64(raw.base_revision, "base revision")?;
-    let revision = from_sql_u64(raw.revision, "transaction revision")?;
-    let first_event_seq = from_sql_u64(raw.first_event_seq, "first event sequence")?;
-    let expected_event_count = usize_from_sql(raw.event_count, "event count")?;
-    if raw.clock_id.trim().is_empty() {
-        return Err(SessionStoreError::Corrupt(format!(
-            "transaction {tx_id} has an empty clock ID"
-        )));
-    }
-    let event_span = expected_event_count.checked_sub(1).ok_or_else(|| {
-        SessionStoreError::Corrupt(format!("transaction {tx_id} declares no events"))
-    })?;
-    let event_span = u64::try_from(event_span).map_err(|_| {
-        SessionStoreError::Corrupt(format!("transaction {tx_id} event count is too large"))
-    })?;
-    let last_event_seq = first_event_seq.checked_add(event_span).ok_or_else(|| {
-        SessionStoreError::Corrupt(format!("transaction {tx_id} event range overflows"))
-    })?;
+    let mut decoder = TransactionDecoder::new(session_id, raw)?;
+    let (first_event_seq, last_event_seq) = decoder.event_range()?;
+    // The declared range is the primary-key range for one committed transaction, so ambiguous
+    // commit resolution stays O(transaction events), not O(session history). `resolve` verifies
+    // the catalog projection first; journal tampering outside this range invalidates that marker.
     let mut statement = connection.prepare(
         "SELECT transaction_revision, ordinal, seq, wall_time_ms, monotonic_ns, event_json
          FROM journal_events
@@ -1500,65 +1614,12 @@ fn load_receipt_from_connection(
             to_sql_i64(first_event_seq)?,
             to_sql_i64(last_event_seq)?
         ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, Vec<u8>>(5)?,
-            ))
-        },
+        raw_stored_event_from_row,
     )?;
-    // Do not reserve from the untrusted declaration. A malformed count is diagnosed by the exact
-    // range check below instead of becoming a capacity-overflow panic or an enormous allocation.
-    let mut events = Vec::new();
     for row in rows {
-        let (event_revision, ordinal, seq, wall_time_ms, monotonic_ns, event_json) = row?;
-        let event_revision = from_sql_u64(event_revision, "event transaction revision")?;
-        let ordinal = usize_from_sql(ordinal, "event transaction ordinal")?;
-        if event_revision != revision || ordinal != events.len() {
-            return Err(SessionStoreError::Corrupt(format!(
-                "transaction {tx_id} event range contains the wrong revision or ordinal"
-            )));
-        }
-        events.push(RecordedEvent {
-            seq: from_sql_u64(seq, "event sequence")?,
-            tx_id: tx_id.clone(),
-            time: EventTime {
-                wall_time_ms,
-                clock_id: raw.clock_id.clone(),
-                monotonic_ns: from_sql_u64(monotonic_ns, "event monotonic timestamp")?,
-            },
-            event: serde_json::from_slice::<SessionEvent>(&event_json)?,
-        });
+        decoder.push(row?)?;
     }
-    if events.len() != expected_event_count
-        || events
-            .iter()
-            .enumerate()
-            .any(|(index, event)| event.seq != first_event_seq + index as u64)
-    {
-        return Err(SessionStoreError::Corrupt(format!(
-            "transaction {} does not contain its declared event range",
-            tx_id
-        )));
-    }
-    if request_digest(base_revision, &events)? != raw.request_digest {
-        return Err(SessionStoreError::Corrupt(format!(
-            "transaction {tx_id} request digest does not match its canonical events"
-        )));
-    }
-    Ok(CommitReceipt {
-        session_id: session_id.clone(),
-        tx_id: tx_id.clone(),
-        base_revision,
-        revision,
-        request_digest: raw.request_digest,
-        committed_at_ms: raw.committed_at_ms,
-        events,
-    })
+    decoder.finish()
 }
 
 fn validate_retry_matches(
@@ -1964,6 +2025,7 @@ mod tests {
     use rusqlite::{Connection, params};
     use std::fs::{File, OpenOptions, TryLockError};
     use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn in_memory_store_obeys_append_contract() {
@@ -2131,6 +2193,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(secondary_index_count, 0);
+        let resolve_query_plan = connection
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT transaction_revision, ordinal, seq
+                 FROM journal_events
+                 WHERE session_key = 1 AND seq BETWEEN 10 AND 20
+                 ORDER BY seq ASC",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            .to_lowercase();
+        assert!(resolve_query_plan.contains("search journal_events using primary key"));
+        assert!(!resolve_query_plan.contains("temp b-tree"));
         let without_rowid = connection
             .query_row(
                 "SELECT wr FROM pragma_table_list WHERE name = 'journal_events'",
@@ -2472,6 +2551,44 @@ mod tests {
     }
 
     #[test]
+    fn load_and_resolve_reject_events_outside_the_declared_transaction_range() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let session = create_session(&store, "extra-transaction-event");
+        let permit = store.acquire_writer(&session.id).unwrap();
+        let request = append_request(&session.id, "tx-extra-transaction-event", 0, two_events());
+        store.append(&request, &permit).unwrap();
+
+        let extra_event = serde_json::to_vec(&SessionEvent::RunStarted {
+            run_id: RunId::from_raw("extra-run"),
+        })
+        .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO journal_events (
+                    session_key, seq, transaction_revision, ordinal,
+                    wall_time_ms, monotonic_ns, event_json
+                 ) VALUES (
+                    (SELECT session_key FROM sessions WHERE id = ?1), 2, 1, 2, 3, 3, ?2
+                 )",
+                params![session.id.as_str(), extra_event],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            store.load(&session.id),
+            Err(SessionStoreError::Corrupt(message))
+                if message.contains("declared event range")
+        ));
+        assert!(matches!(
+            store.resolve(&session.id, &request.tx_id),
+            Err(SessionStoreError::Corrupt(message))
+                if message.contains("catalog projection")
+        ));
+    }
+
+    #[test]
     fn load_observes_complete_snapshots_during_concurrent_appends() {
         const APPEND_COUNT: u64 = 200;
 
@@ -2575,6 +2692,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_uses_one_snapshot_across_concurrent_catalog_advancement() {
+        let directory = test_directory("resolve-snapshot");
+        let store = SessionStore::open_project(&directory).unwrap();
+        let session = create_session(&store, "resolve-snapshot");
+        let permit = store.acquire_writer(&session.id).unwrap();
+        let request = append_request(&session.id, "tx-resolve-snapshot", 0, two_events());
+        let expected = store.append(&request, &permit).unwrap();
+
+        store.pause_resolve_after_revision();
+        let resolver = store.clone();
+        let session_id = session.id.clone();
+        let tx_id = request.tx_id.clone();
+        let resolving = std::thread::spawn(move || resolver.resolve(&session_id, &tx_id));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !store.resolve_pause_reached() {
+            assert!(Instant::now() < deadline, "resolve did not reach its pause");
+            std::thread::yield_now();
+        }
+
+        let mut external = Connection::open(store.database_path().unwrap()).unwrap();
+        let advancement = external.transaction().unwrap();
+        advancement
+            .execute(
+                "UPDATE sessions SET revision = revision + 1 WHERE id = ?1",
+                params![session.id.as_str()],
+            )
+            .unwrap();
+        advancement
+            .execute(
+                "UPDATE session_catalog_projection
+                    SET indexed_revision = indexed_revision + 1
+                  WHERE session_key = (SELECT session_key FROM sessions WHERE id = ?1)",
+                params![session.id.as_str()],
+            )
+            .unwrap();
+        advancement.commit().unwrap();
+
+        store.resume_resolve();
+        let resolved = resolving.join().unwrap().unwrap().unwrap();
+        assert_eq!(resolved, expected);
+
+        drop(external);
+        drop(permit);
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn digest_gate_is_followed_by_exact_event_comparison() {
         let store = SessionStore::open_in_memory().unwrap();
         let session = create_session(&store, "digest-collision");
@@ -2645,8 +2810,8 @@ mod tests {
             .unwrap();
         let request = AppendTx::from_planned(session.id, 0, &batch);
         let receipt = store.append(&request, &permit).unwrap();
-        assert_eq!(receipt.events, batch.events);
-        machine.apply_batch(&batch).unwrap();
+        assert_eq!(receipt.events.as_slice(), batch.events());
+        machine.apply_batch(batch).unwrap();
         assert_eq!(machine.next_seq(), 1);
     }
 

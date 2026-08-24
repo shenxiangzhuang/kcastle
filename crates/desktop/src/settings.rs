@@ -307,16 +307,25 @@ fn reasoning_key(effort: &ReasoningEffort) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     use super::*;
+
+    static NEXT_TEST_ROOT: AtomicU64 = AtomicU64::new(0);
 
     fn test_root() -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("kcastle-settings-test-{suffix}"));
+        let sequence = NEXT_TEST_ROOT.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-settings-test-{}-{suffix}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&root).unwrap();
         root
     }

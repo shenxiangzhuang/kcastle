@@ -43,8 +43,8 @@ pub(crate) fn composer_status(state: &AppState) -> String {
         && stats.steps == 0
         && stats.llm_ns == 0
         && stats.tool_ns == 0
-        && stats.input_tokens == 0
-        && stats.output_tokens == 0
+        && stats.input_tokens() == 0
+        && stats.total_output_tokens() == 0
     {
         return String::new();
     }
@@ -68,10 +68,10 @@ pub(crate) fn composer_status(state: &AppState) -> String {
             groups.push(durations.join(" · "));
         }
         let mut speeds = Vec::new();
-        if stats.ttft_steps > 0 {
+        if stats.ttft_samples > 0 {
             speeds.push(format!(
                 "TTFT avg {}",
-                compact_duration(stats.ttft_ns / stats.ttft_steps as u64)
+                compact_duration(stats.ttft_ns / stats.ttft_samples as u64)
             ));
         }
         if stats.decode_ns > 0 {
@@ -86,19 +86,21 @@ pub(crate) fn composer_status(state: &AppState) -> String {
             groups.push(speeds.join(" · "));
         }
     }
-    if stats.input_tokens > 0 || stats.output_tokens > 0 {
+    let input_tokens = stats.input_tokens();
+    let output_tokens = stats.total_output_tokens();
+    if input_tokens > 0 || output_tokens > 0 {
         if let Some(percent) = stats
-            .cached_tokens
+            .cache_read_input_tokens
             .saturating_mul(100)
-            .saturating_add(stats.input_tokens / 2)
-            .checked_div(stats.input_tokens)
+            .saturating_add(input_tokens / 2)
+            .checked_div(input_tokens)
         {
             groups.push(format!("Cache hit {percent}%"));
         }
         groups.push(format!(
             "Input {} tok · Output {} tok",
-            compact_number(stats.input_tokens),
-            compact_number(stats.output_tokens),
+            compact_number(input_tokens),
+            compact_number(output_tokens),
         ));
     }
     groups.join(" | ")

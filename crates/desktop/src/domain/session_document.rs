@@ -3,9 +3,8 @@ use std::fmt;
 
 use kcastle_agent::{
     AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
-    RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SessionEvent, StepId,
-    StepOutcome, TokenUsage, ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus,
-    TurnEndReason, TurnId,
+    RequestHeaderReason, RequestId, SessionEvent, StepId, StepOutcome, TokenUsage,
+    ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnId,
 };
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -18,6 +17,8 @@ pub(crate) struct SessionDocument {
     display_ordinals: DisplayOrdinals,
     stats: SessionStats,
     revisions: ProjectionRevisions,
+    #[cfg(test)]
+    conversation_order_scan_work: usize,
 }
 
 /// Stable display labels assigned when an entity first enters trajectory order.
@@ -90,8 +91,6 @@ pub(crate) struct ProjectionRevisions {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ExecutionGraph {
-    runs: HashMap<RunId, RunNode>,
-    turns: HashMap<TurnId, TurnNode>,
     steps: HashMap<StepId, StepNode>,
     inputs: HashMap<InputId, InputNode>,
     requests: HashMap<RequestId, ResponseNode>,
@@ -103,50 +102,18 @@ pub(crate) struct ExecutionGraph {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RunNode {
-    id: RunId,
-    started: EventTime,
-    completed: Option<EventTime>,
-    outcome: Option<RunOutcome>,
-    error: Option<String>,
-    source_seqs: Vec<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct TurnNode {
-    id: TurnId,
-    run_id: RunId,
-    started: EventTime,
-    completed: Option<EventTime>,
-    reason: Option<TurnEndReason>,
-    source_seqs: Vec<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct StepNode {
-    id: StepId,
     turn_id: TurnId,
     started: EventTime,
-    completed: Option<EventTime>,
-    outcome: Option<StepOutcome>,
-    error: Option<String>,
     request_ids: Vec<RequestId>,
-    source_seqs: Vec<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InputState {
-    Submitted,
-    Attached,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InputNode {
-    id: InputId,
     text: String,
     origin: InputOrigin,
     step_id: Option<StepId>,
-    state: InputState,
+    attached: bool,
     attached_payload: String,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
@@ -176,17 +143,13 @@ struct ToolCallMetadata {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ResponseNode {
-    request_id: RequestId,
     step_id: StepId,
-    model: String,
     segments: Vec<ResponseSegment>,
     active_segment: Option<usize>,
     combined_text: String,
     tool_payload: String,
     tool_calls: HashMap<CallId, ToolCallMetadata>,
     tool_call_order: Vec<CallId>,
-    completed_items_json: String,
-    response: Option<ResponseInfo>,
     status: ItemStatus,
     visible: bool,
     timing: TimingMetrics,
@@ -196,15 +159,10 @@ struct ResponseNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ToolNode {
-    call_id: CallId,
     request_id: RequestId,
-    parent_call_id: Option<CallId>,
     name: String,
     arguments: String,
     output: String,
-    authorization: Option<ToolAuthorizationDecision>,
-    execution_outcome: Option<ToolExecutionOutcome>,
-    item_json: String,
     status: ItemStatus,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
@@ -212,13 +170,8 @@ struct ToolNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CompactionNode {
-    id: CompactionId,
-    run_id: RunId,
-    tokens_before: usize,
-    first_kept_id: u64,
     summary: String,
-    response: Option<ResponseInfo>,
-    outcome: Option<StepOutcome>,
+    usage: Option<TokenUsage>,
     status: ItemStatus,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
@@ -250,8 +203,6 @@ struct PromptNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RequestFailureNode {
-    step_id: StepId,
-    request_id: Option<RequestId>,
     error: String,
     timing: TimingMetrics,
     source_seqs: Vec<u64>,
@@ -479,44 +430,58 @@ pub(crate) struct TrajectoryItemView<'a> {
     pub(crate) source_seqs: &'a [u64],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DetailsView<'a> {
-    pub(crate) id: &'a TrajectoryItemId,
-    pub(crate) kind: TrajectoryKind,
-    pub(crate) title: &'a str,
-    pub(crate) text: &'a str,
-    pub(crate) payload: Option<&'a str>,
-    pub(crate) status: ItemStatus,
-    pub(crate) timing: &'a TimingMetrics,
-    pub(crate) usage: Option<TokenUsage>,
-    pub(crate) source_seqs: &'a [u64],
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ProjectionDelta {
     pub(crate) first_seq: Option<u64>,
     pub(crate) last_seq: Option<u64>,
     pub(crate) changed_conversation: Vec<ConversationItemId>,
     pub(crate) changed_trajectory: Vec<TrajectoryItemId>,
-    pub(crate) conversation_order_changed: bool,
-    pub(crate) trajectory_order_changed: bool,
+    pub(crate) conversation_order: OrderMutation,
+    pub(crate) trajectory_order: OrderMutation,
     pub(crate) geometry_changed: bool,
     pub(crate) stats_changed: bool,
     pub(crate) revisions: ProjectionRevisions,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct PlannedBatch {
-    expected_next_seq: u64,
-    events: Vec<RecordedEvent>,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum OrderMutation {
+    #[default]
+    None,
+    Append,
+    Reorder,
+}
+
+impl OrderMutation {
+    fn append(&mut self) {
+        if *self == Self::None {
+            *self = Self::Append;
+        }
+    }
+
+    fn reorder(&mut self) {
+        *self = Self::Reorder;
+    }
+
+    fn merge(&mut self, mutation: Self) {
+        match mutation {
+            Self::None => {}
+            Self::Append => self.append(),
+            Self::Reorder => self.reorder(),
+        }
+    }
+
+    pub(crate) fn changed(self) -> bool {
+        self != Self::None
+    }
+
+    pub(crate) fn is_append(self) -> bool {
+        self == Self::Append
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProjectionError {
     Sequence { expected: u64, actual: u64 },
-    StalePlan { expected: u64, actual: u64 },
-    Duplicate { kind: &'static str, id: String },
-    Missing { kind: &'static str, id: String },
 }
 
 impl fmt::Display for ProjectionError {
@@ -525,12 +490,6 @@ impl fmt::Display for ProjectionError {
             Self::Sequence { expected, actual } => {
                 write!(formatter, "expected event seq {expected}, got {actual}")
             }
-            Self::StalePlan { expected, actual } => write!(
-                formatter,
-                "planned batch starts at seq {expected}, document is at {actual}"
-            ),
-            Self::Duplicate { kind, id } => write!(formatter, "duplicate {kind} {id}"),
-            Self::Missing { kind, id } => write!(formatter, "missing {kind} {id}"),
         }
     }
 }
@@ -542,13 +501,18 @@ struct EventChanges {
     conversation: Vec<ConversationItemId>,
     trajectory: Vec<TrajectoryItemId>,
     ordinal_context: Vec<TrajectoryItemId>,
-    conversation_order: bool,
-    trajectory_order: bool,
+    conversation_order: OrderMutation,
+    trajectory_order: OrderMutation,
     geometry: bool,
     stats: bool,
 }
 
 impl SessionDocument {
+    #[cfg(test)]
+    pub(crate) fn conversation_order_scan_work(&self) -> usize {
+        self.conversation_order_scan_work
+    }
+
     pub(crate) fn from_events(events: Vec<RecordedEvent>) -> Result<Self, ProjectionError> {
         let mut document = Self::default();
         document.apply_batch(events)?;
@@ -558,11 +522,6 @@ impl SessionDocument {
     #[cfg(test)]
     pub(crate) fn cursor(&self) -> EventCursor {
         self.cursor
-    }
-
-    #[cfg(test)]
-    pub(crate) fn graph(&self) -> &ExecutionGraph {
-        &self.graph
     }
 
     pub(crate) fn stats(&self) -> SessionStats {
@@ -577,11 +536,13 @@ impl SessionDocument {
         &self.display_ordinals
     }
 
-    pub(crate) fn plan_batch(
-        &self,
+    pub(crate) fn apply_batch(
+        &mut self,
         events: Vec<RecordedEvent>,
-    ) -> Result<PlannedBatch, ProjectionError> {
-        let mut overlay = PlanOverlay::default();
+    ) -> Result<ProjectionDelta, ProjectionError> {
+        // SessionMachine is the semantic trust boundary for committed events. Desktop only
+        // verifies the transport cursor before mutating its read model so a malformed sequence
+        // cannot leak a partial projection.
         let mut expected = self.cursor.next_seq;
         for recorded in &events {
             if recorded.seq != expected {
@@ -590,29 +551,12 @@ impl SessionDocument {
                     actual: recorded.seq,
                 });
             }
-            self.validate_event(&recorded.event, &mut overlay)?;
             expected = expected.saturating_add(1);
-        }
-        Ok(PlannedBatch {
-            expected_next_seq: self.cursor.next_seq,
-            events,
-        })
-    }
-
-    pub(crate) fn apply_planned(
-        &mut self,
-        plan: PlannedBatch,
-    ) -> Result<ProjectionDelta, ProjectionError> {
-        if self.cursor.next_seq != plan.expected_next_seq {
-            return Err(ProjectionError::StalePlan {
-                expected: plan.expected_next_seq,
-                actual: self.cursor.next_seq,
-            });
         }
         let mut delta = ProjectionDelta::default();
         let mut changed_conversation = HashSet::new();
         let mut changed_trajectory = HashSet::new();
-        for recorded in plan.events {
+        for recorded in events {
             delta.first_seq.get_or_insert(recorded.seq);
             delta.last_seq = Some(recorded.seq);
             self.apply_recorded(
@@ -627,14 +571,6 @@ impl SessionDocument {
         }
         delta.revisions = self.revisions;
         Ok(delta)
-    }
-
-    pub(crate) fn apply_batch(
-        &mut self,
-        events: Vec<RecordedEvent>,
-    ) -> Result<ProjectionDelta, ProjectionError> {
-        let plan = self.plan_batch(events)?;
-        self.apply_planned(plan)
     }
 
     pub(crate) fn conversation(&self) -> Vec<ConversationItemView<'_>> {
@@ -673,19 +609,11 @@ impl SessionDocument {
         self.trajectory_item(id)
     }
 
-    pub(crate) fn details<'a>(&'a self, id: &'a TrajectoryItemId) -> Option<DetailsView<'a>> {
-        let item = self.trajectory_item(id)?;
-        Some(DetailsView {
-            id: item.id,
-            kind: item.kind,
-            title: item.title,
-            text: item.text,
-            payload: item.payload,
-            status: item.status,
-            timing: item.timing,
-            usage: item.usage,
-            source_seqs: item.source_seqs,
-        })
+    pub(crate) fn details<'a>(
+        &'a self,
+        id: &'a TrajectoryItemId,
+    ) -> Option<TrajectoryItemView<'a>> {
+        self.trajectory_item(id)
     }
 
     pub(crate) fn details_raw(&self, id: &TrajectoryItemId) -> Option<String> {
@@ -713,7 +641,7 @@ impl SessionDocument {
         let mut changes = EventChanges::default();
         self.apply_event(recorded, &mut changes);
         let mut ordinal_ids = changes.ordinal_context.clone();
-        if changes.trajectory_order {
+        if changes.trajectory_order.changed() {
             ordinal_ids.extend(changes.trajectory.iter().cloned());
         }
         if !ordinal_ids.is_empty() {
@@ -733,10 +661,10 @@ impl SessionDocument {
         }
         changes.stats |= self.stats != stats_before;
 
-        if !changes.conversation.is_empty() || changes.conversation_order {
+        if !changes.conversation.is_empty() || changes.conversation_order.changed() {
             self.revisions.conversation = self.revisions.conversation.saturating_add(1);
         }
-        if !changes.trajectory.is_empty() || changes.trajectory_order {
+        if !changes.trajectory.is_empty() || changes.trajectory_order.changed() {
             self.revisions.trajectory = self.revisions.trajectory.saturating_add(1);
         }
         if changes.geometry {
@@ -756,8 +684,8 @@ impl SessionDocument {
                 delta.changed_trajectory.push(id);
             }
         }
-        delta.conversation_order_changed |= changes.conversation_order;
-        delta.trajectory_order_changed |= changes.trajectory_order;
+        delta.conversation_order.merge(changes.conversation_order);
+        delta.trajectory_order.merge(changes.trajectory_order);
         delta.geometry_changed |= changes.geometry;
         delta.stats_changed |= changes.stats;
     }
@@ -766,74 +694,19 @@ impl SessionDocument {
         let seq = recorded.seq;
         let time = &recorded.time;
         match &recorded.event {
-            SessionEvent::RunStarted { run_id } => {
-                self.graph.runs.insert(
-                    run_id.clone(),
-                    RunNode {
-                        id: run_id.clone(),
-                        started: time.clone(),
-                        completed: None,
-                        outcome: None,
-                        error: None,
-                        source_seqs: vec![seq],
-                    },
-                );
-            }
-            SessionEvent::RunTerminated {
-                run_id,
-                outcome,
-                error,
-            } => {
-                let run = self
-                    .graph
-                    .runs
-                    .get_mut(run_id)
-                    .expect("run termination was validated");
-                run.completed.get_or_insert_with(|| time.clone());
-                run.outcome.get_or_insert(*outcome);
-                if run.error.is_none() {
-                    run.error.clone_from(error);
-                }
-                run.source_seqs.push(seq);
-            }
-            SessionEvent::TurnStarted { run_id, turn_id } => {
-                self.graph.turns.insert(
-                    turn_id.clone(),
-                    TurnNode {
-                        id: turn_id.clone(),
-                        run_id: run_id.clone(),
-                        started: time.clone(),
-                        completed: None,
-                        reason: None,
-                        source_seqs: vec![seq],
-                    },
-                );
-            }
-            SessionEvent::TurnTerminated { turn_id, reason } => {
-                let turn = self
-                    .graph
-                    .turns
-                    .get_mut(turn_id)
-                    .expect("turn termination was validated");
-                if turn.completed.is_none() {
-                    turn.completed = Some(time.clone());
-                    turn.reason = Some(*reason);
-                    self.stats.turns = self.stats.turns.saturating_add(1);
-                }
-                turn.source_seqs.push(seq);
+            SessionEvent::RunStarted { .. }
+            | SessionEvent::RunTerminated { .. }
+            | SessionEvent::TurnStarted { .. } => {}
+            SessionEvent::TurnTerminated { .. } => {
+                self.stats.turns = self.stats.turns.saturating_add(1);
             }
             SessionEvent::StepStarted { turn_id, step_id } => {
                 self.graph.steps.insert(
                     step_id.clone(),
                     StepNode {
-                        id: step_id.clone(),
                         turn_id: turn_id.clone(),
                         started: time.clone(),
-                        completed: None,
-                        outcome: None,
-                        error: None,
                         request_ids: Vec::new(),
-                        source_seqs: vec![seq],
                     },
                 );
             }
@@ -842,21 +715,14 @@ impl SessionDocument {
                 outcome,
                 error,
             } => {
-                let request_ids = {
-                    let step = self
-                        .graph
-                        .steps
-                        .get_mut(step_id)
-                        .expect("step termination was validated");
-                    if step.completed.is_none() {
-                        step.completed = Some(time.clone());
-                        step.outcome = Some(*outcome);
-                        step.error.clone_from(error);
-                        self.stats.steps = self.stats.steps.saturating_add(1);
-                    }
-                    step.source_seqs.push(seq);
-                    step.request_ids.clone()
-                };
+                self.stats.steps = self.stats.steps.saturating_add(1);
+                let request_ids = self
+                    .graph
+                    .steps
+                    .get(step_id)
+                    .expect("committed step must exist")
+                    .request_ids
+                    .clone();
 
                 let terminal_status = status_from_step_outcome(*outcome);
                 let mut has_visible_response = false;
@@ -892,8 +758,6 @@ impl SessionDocument {
                         self.graph.failures.insert(
                             step_id.clone(),
                             RequestFailureNode {
-                                step_id: step_id.clone(),
-                                request_id: None,
                                 error: error
                                     .clone()
                                     .unwrap_or_else(|| "model request did not complete".to_owned()),
@@ -911,7 +775,7 @@ impl SessionDocument {
                         );
                         self.trajectory_order.push(failure_id.clone());
                         changes.trajectory.push(failure_id);
-                        changes.trajectory_order = true;
+                        changes.trajectory_order.append();
                         changes.geometry = true;
                     }
                 }
@@ -925,11 +789,10 @@ impl SessionDocument {
                 self.graph.inputs.insert(
                     input_id.clone(),
                     InputNode {
-                        id: input_id.clone(),
                         text: input.clone(),
                         origin: *origin,
                         step_id: None,
-                        state: InputState::Submitted,
+                        attached: false,
                         attached_payload: String::new(),
                         timing,
                         source_seqs: vec![seq],
@@ -941,8 +804,8 @@ impl SessionDocument {
                 self.trajectory_order.push(trajectory_id.clone());
                 changes.conversation.push(conversation_id);
                 changes.trajectory.push(trajectory_id);
-                changes.conversation_order = true;
-                changes.trajectory_order = true;
+                changes.conversation_order.append();
+                changes.trajectory_order.append();
                 changes.geometry = true;
             }
             SessionEvent::InputAttached {
@@ -956,7 +819,7 @@ impl SessionDocument {
                     .get_mut(input_id)
                     .expect("input attachment was validated");
                 input.step_id = Some(step_id.clone());
-                input.state = InputState::Attached;
+                input.attached = true;
                 input.attached_payload = serde_json::to_string(items).unwrap_or_default();
                 input.source_seqs.push(seq);
                 changes
@@ -981,17 +844,13 @@ impl SessionDocument {
                 self.graph.requests.insert(
                     request_id.clone(),
                     ResponseNode {
-                        request_id: request_id.clone(),
                         step_id: step_id.clone(),
-                        model: model.clone(),
                         segments: Vec::new(),
                         active_segment: None,
                         combined_text: String::new(),
                         tool_payload: String::new(),
                         tool_calls: HashMap::new(),
                         tool_call_order: Vec::new(),
-                        completed_items_json: String::new(),
-                        response: None,
                         status: ItemStatus::Pending,
                         visible: false,
                         timing: TimingMetrics::default(),
@@ -1028,11 +887,12 @@ impl SessionDocument {
                     );
                     if kind == PromptChangeKind::Initial {
                         self.trajectory_order.insert(0, id.clone());
+                        changes.trajectory_order.reorder();
                     } else {
                         self.trajectory_order.push(id.clone());
+                        changes.trajectory_order.append();
                     }
                     changes.trajectory.push(id);
-                    changes.trajectory_order = true;
                     changes.geometry = true;
                 }
             }
@@ -1105,8 +965,6 @@ impl SessionDocument {
                     self.graph.failures.insert(
                         step_id.clone(),
                         RequestFailureNode {
-                            step_id,
-                            request_id: Some(request_id.clone()),
                             error: error.clone(),
                             timing,
                             source_seqs: vec![seq],
@@ -1114,7 +972,7 @@ impl SessionDocument {
                     );
                     self.trajectory_order.push(id.clone());
                     changes.trajectory.push(id);
-                    changes.trajectory_order = true;
+                    changes.trajectory_order.append();
                     changes.geometry = true;
                 }
             }
@@ -1219,7 +1077,7 @@ impl SessionDocument {
                     };
                     if created {
                         self.conversation_order.push(id.clone());
-                        changes.conversation_order = true;
+                        changes.conversation_order.append();
                     }
                     changes.conversation.push(id);
                 }
@@ -1234,7 +1092,7 @@ impl SessionDocument {
                 if became_visible {
                     let id = TrajectoryItemId::Assistant(request_id.clone());
                     self.trajectory_order.push(id.clone());
-                    changes.trajectory_order = true;
+                    changes.trajectory_order.append();
                     changes.trajectory.push(id);
                 } else if self
                     .graph
@@ -1276,8 +1134,6 @@ impl SessionDocument {
                         .expect("assistant completion was validated");
                     let was_visible = response.visible;
                     response.source_seqs.push(seq);
-                    response.completed_items_json =
-                        serde_json::to_string(items).unwrap_or_default();
                     response.tool_call_order = tool_call_order_from_items(items);
                     response.tool_calls = merge_final_tool_calls(
                         std::mem::take(&mut response.tool_calls),
@@ -1288,7 +1144,6 @@ impl SessionDocument {
                     }
                     response.tool_payload =
                         format_tool_payload(&response.tool_calls, &response.tool_call_order);
-                    response.response = Some(response_info.clone());
                     response.usage = response_info.usage.or(response.usage);
                     response.status = ItemStatus::Completed;
                     response.timing.completed = Some(EventTimeRef::from(time));
@@ -1312,38 +1167,55 @@ impl SessionDocument {
                 self.stats.replace_contribution(before, after);
 
                 if old_segment_ids != segment_ids {
-                    let insertion = self
-                        .conversation_order
-                        .iter()
-                        .position(|id| {
-                            matches!(
+                    if old_segment_ids.is_empty() {
+                        self.conversation_order
+                            .extend(segment_ids.iter().copied().map(|ordinal| {
+                                ConversationItemId::ResponseSegment {
+                                    request_id: request_id.clone(),
+                                    ordinal,
+                                }
+                            }));
+                        changes.conversation_order.append();
+                    } else {
+                        #[cfg(test)]
+                        {
+                            self.conversation_order_scan_work = self
+                                .conversation_order_scan_work
+                                .saturating_add(self.conversation_order.len().saturating_mul(2));
+                        }
+                        let insertion = self
+                            .conversation_order
+                            .iter()
+                            .position(|id| {
+                                matches!(
+                                    id,
+                                    ConversationItemId::ResponseSegment {
+                                        request_id: candidate,
+                                        ..
+                                    } if candidate == request_id
+                                )
+                            })
+                            .unwrap_or(self.conversation_order.len());
+                        self.conversation_order.retain(|id| {
+                            !matches!(
                                 id,
                                 ConversationItemId::ResponseSegment {
                                     request_id: candidate,
                                     ..
                                 } if candidate == request_id
                             )
-                        })
-                        .unwrap_or(self.conversation_order.len());
-                    self.conversation_order.retain(|id| {
-                        !matches!(
-                            id,
-                            ConversationItemId::ResponseSegment {
-                                request_id: candidate,
-                                ..
-                            } if candidate == request_id
-                        )
-                    });
-                    for (offset, ordinal) in segment_ids.iter().copied().enumerate() {
-                        self.conversation_order.insert(
-                            (insertion + offset).min(self.conversation_order.len()),
-                            ConversationItemId::ResponseSegment {
-                                request_id: request_id.clone(),
-                                ordinal,
-                            },
-                        );
+                        });
+                        for (offset, ordinal) in segment_ids.iter().copied().enumerate() {
+                            self.conversation_order.insert(
+                                (insertion + offset).min(self.conversation_order.len()),
+                                ConversationItemId::ResponseSegment {
+                                    request_id: request_id.clone(),
+                                    ordinal,
+                                },
+                            );
+                        }
+                        changes.conversation_order.reorder();
                     }
-                    changes.conversation_order = true;
                 }
                 for ordinal in segment_ids {
                     changes
@@ -1356,7 +1228,7 @@ impl SessionDocument {
                 let trajectory_id = TrajectoryItemId::Assistant(request_id.clone());
                 if became_visible {
                     self.trajectory_order.push(trajectory_id.clone());
-                    changes.trajectory_order = true;
+                    changes.trajectory_order.append();
                 }
                 changes.trajectory.push(trajectory_id);
                 changes.geometry = true;
@@ -1364,7 +1236,7 @@ impl SessionDocument {
             SessionEvent::ToolCallRequested {
                 request_id,
                 call_id,
-                parent_call_id,
+                ..
             } => {
                 let (became_visible, placeholder, metadata) = {
                     let response = self
@@ -1402,7 +1274,7 @@ impl SessionDocument {
                     };
                     if created {
                         self.conversation_order.push(id.clone());
-                        changes.conversation_order = true;
+                        changes.conversation_order.append();
                     }
                     changes.conversation.push(id);
                 }
@@ -1410,7 +1282,6 @@ impl SessionDocument {
                     let id = TrajectoryItemId::Assistant(request_id.clone());
                     self.trajectory_order.push(id.clone());
                     changes.trajectory.push(id);
-                    changes.trajectory_order = true;
                 } else {
                     changes
                         .trajectory
@@ -1427,15 +1298,10 @@ impl SessionDocument {
                 self.graph.tools.insert(
                     call_id.clone(),
                     ToolNode {
-                        call_id: call_id.clone(),
                         request_id: request_id.clone(),
-                        parent_call_id: parent_call_id.clone(),
                         name,
                         arguments,
                         output: String::new(),
-                        authorization: None,
-                        execution_outcome: None,
-                        item_json: String::new(),
                         status: ItemStatus::Running,
                         timing: TimingMetrics {
                             started: Some(
@@ -1455,8 +1321,8 @@ impl SessionDocument {
                 self.trajectory_order.push(trajectory_id.clone());
                 changes.conversation.push(conversation_id);
                 changes.trajectory.push(trajectory_id);
-                changes.conversation_order = true;
-                changes.trajectory_order = true;
+                changes.conversation_order.append();
+                changes.trajectory_order.append();
                 changes.geometry = true;
             }
             SessionEvent::ToolAuthorizationResolved { call_id, decision } => {
@@ -1465,7 +1331,6 @@ impl SessionDocument {
                     .tools
                     .get_mut(call_id)
                     .expect("tool authorization was validated");
-                tool.authorization = Some(*decision);
                 tool.timing.authorization_resolved = Some(EventTimeRef::from(time));
                 tool.status = match decision {
                     ToolAuthorizationDecision::NotRequired | ToolAuthorizationDecision::Allowed => {
@@ -1525,7 +1390,6 @@ impl SessionDocument {
                     .get_mut(call_id)
                     .expect("tool execution finish was validated");
                 tool.timing.execution_finished = Some(EventTimeRef::from(time));
-                tool.execution_outcome = Some(*outcome);
                 tool.status = status_from_tool_execution(*outcome);
                 tool.source_seqs.push(seq);
                 changes
@@ -1553,7 +1417,6 @@ impl SessionDocument {
                     .get_mut(call_id)
                     .expect("tool result was validated");
                 tool.output = tool_result_preview(item);
-                tool.item_json = serde_json::to_string(item).unwrap_or_default();
                 tool.status = status_from_tool_result(*status);
                 tool.timing.completed = Some(EventTimeRef::from(time));
                 tool.source_seqs.push(seq);
@@ -1567,22 +1430,12 @@ impl SessionDocument {
                     .push(TrajectoryItemId::Tool(call_id.clone()));
                 changes.geometry = true;
             }
-            SessionEvent::CompactionStarted {
-                compaction_id,
-                run_id,
-                tokens_before,
-                first_kept_id,
-            } => {
+            SessionEvent::CompactionStarted { compaction_id, .. } => {
                 self.graph.compactions.insert(
                     compaction_id.clone(),
                     CompactionNode {
-                        id: compaction_id.clone(),
-                        run_id: run_id.clone(),
-                        tokens_before: *tokens_before,
-                        first_kept_id: *first_kept_id,
                         summary: String::new(),
-                        response: None,
-                        outcome: None,
+                        usage: None,
                         status: ItemStatus::Running,
                         timing: TimingMetrics {
                             started: Some(EventTimeRef::from(time)),
@@ -1597,8 +1450,8 @@ impl SessionDocument {
                 self.trajectory_order.push(trajectory_id.clone());
                 changes.conversation.push(conversation_id);
                 changes.trajectory.push(trajectory_id);
-                changes.conversation_order = true;
-                changes.trajectory_order = true;
+                changes.conversation_order.append();
+                changes.trajectory_order.append();
                 changes.geometry = true;
             }
             SessionEvent::CompactionFinished {
@@ -1612,9 +1465,8 @@ impl SessionDocument {
                     .compactions
                     .get_mut(compaction_id)
                     .expect("compaction finish was validated");
-                compaction.outcome = Some(*outcome);
                 compaction.summary = summary.clone().unwrap_or_default();
-                compaction.response.clone_from(response);
+                compaction.usage = response.as_ref().and_then(|response| response.usage);
                 compaction.status = status_from_step_outcome(*outcome);
                 compaction.timing.completed = Some(EventTimeRef::from(time));
                 compaction.source_seqs.push(seq);
@@ -1645,7 +1497,7 @@ impl SessionDocument {
                     title: None,
                     text: &input.text,
                     payload: nonempty(&input.attached_payload),
-                    status: if input.state == InputState::Attached {
+                    status: if input.attached {
                         ItemStatus::Completed
                     } else {
                         ItemStatus::Pending
@@ -1750,7 +1602,7 @@ impl SessionDocument {
                     title: input_title(input.origin),
                     text: &input.text,
                     payload: nonempty(&input.attached_payload),
-                    status: if input.state == InputState::Attached {
+                    status: if input.attached {
                         ItemStatus::Completed
                     } else {
                         ItemStatus::Pending
@@ -1817,10 +1669,7 @@ impl SessionDocument {
                     payload: None,
                     status: compaction.status,
                     timing: &compaction.timing,
-                    usage: compaction
-                        .response
-                        .as_ref()
-                        .and_then(|response| response.usage),
+                    usage: compaction.usage,
                     turn_id: None,
                     step_id: None,
                     source_seqs: &compaction.source_seqs,
@@ -1838,8 +1687,8 @@ impl SessionDocument {
                     status: ItemStatus::Failed,
                     timing: &failure.timing,
                     usage: None,
-                    turn_id: self.turn_for_step(&failure.step_id),
-                    step_id: Some(&failure.step_id),
+                    turn_id: self.turn_for_step(step_id),
+                    step_id: Some(step_id),
                     source_seqs: &failure.source_seqs,
                 })
             }
@@ -1854,16 +1703,14 @@ impl SessionDocument {
     fn stats_from_full_scan(&self) -> SessionStats {
         let mut stats = SessionStats {
             turns: self
-                .graph
-                .turns
-                .values()
-                .filter(|turn| turn.completed.is_some())
+                .events
+                .iter()
+                .filter(|event| matches!(&event.event, SessionEvent::TurnTerminated { .. }))
                 .count(),
             steps: self
-                .graph
-                .steps
-                .values()
-                .filter(|step| step.completed.is_some())
+                .events
+                .iter()
+                .filter(|event| matches!(&event.event, SessionEvent::StepTerminated { .. }))
                 .count(),
             ..SessionStats::default()
         };
@@ -2307,215 +2154,11 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-#[derive(Default)]
-struct PlanOverlay {
-    runs: HashSet<RunId>,
-    turns: HashSet<TurnId>,
-    steps: HashSet<StepId>,
-    inputs: HashSet<InputId>,
-    requests: HashSet<RequestId>,
-    tools: HashSet<CallId>,
-    compactions: HashSet<CompactionId>,
-}
-
-impl SessionDocument {
-    fn validate_event(
-        &self,
-        event: &SessionEvent,
-        overlay: &mut PlanOverlay,
-    ) -> Result<(), ProjectionError> {
-        match event {
-            SessionEvent::RunStarted { run_id } => {
-                require_new(
-                    !self.graph.runs.contains_key(run_id) && overlay.runs.insert(run_id.clone()),
-                    "run",
-                    run_id,
-                )?;
-            }
-            SessionEvent::RunTerminated { run_id, .. } => {
-                require_present(
-                    self.graph.runs.contains_key(run_id) || overlay.runs.contains(run_id),
-                    "run",
-                    run_id,
-                )?;
-            }
-            SessionEvent::TurnStarted { run_id, turn_id } => {
-                require_present(
-                    self.graph.runs.contains_key(run_id) || overlay.runs.contains(run_id),
-                    "run",
-                    run_id,
-                )?;
-                require_new(
-                    !self.graph.turns.contains_key(turn_id)
-                        && overlay.turns.insert(turn_id.clone()),
-                    "turn",
-                    turn_id,
-                )?;
-            }
-            SessionEvent::TurnTerminated { turn_id, .. } => {
-                require_present(
-                    self.graph.turns.contains_key(turn_id) || overlay.turns.contains(turn_id),
-                    "turn",
-                    turn_id,
-                )?;
-            }
-            SessionEvent::StepStarted { turn_id, step_id } => {
-                require_present(
-                    self.graph.turns.contains_key(turn_id) || overlay.turns.contains(turn_id),
-                    "turn",
-                    turn_id,
-                )?;
-                require_new(
-                    !self.graph.steps.contains_key(step_id)
-                        && overlay.steps.insert(step_id.clone()),
-                    "step",
-                    step_id,
-                )?;
-            }
-            SessionEvent::StepTerminated { step_id, .. } => {
-                self.require_step(step_id, overlay)?;
-            }
-            SessionEvent::InputSubmitted { input_id, .. } => {
-                require_new(
-                    !self.graph.inputs.contains_key(input_id)
-                        && overlay.inputs.insert(input_id.clone()),
-                    "input",
-                    input_id,
-                )?;
-            }
-            SessionEvent::InputAttached {
-                input_id, step_id, ..
-            } => {
-                require_present(
-                    self.graph.inputs.contains_key(input_id) || overlay.inputs.contains(input_id),
-                    "input",
-                    input_id,
-                )?;
-                self.require_step(step_id, overlay)?;
-            }
-            SessionEvent::RequestSnapshot {
-                request_id,
-                step_id,
-                ..
-            } => {
-                self.require_step(step_id, overlay)?;
-                require_new(
-                    !self.graph.requests.contains_key(request_id)
-                        && overlay.requests.insert(request_id.clone()),
-                    "request",
-                    request_id,
-                )?;
-            }
-            SessionEvent::ModelRequestStarted { request_id }
-            | SessionEvent::ModelRequestFailed { request_id, .. }
-            | SessionEvent::AssistantChunk { request_id, .. }
-            | SessionEvent::AssistantCompleted { request_id, .. } => {
-                self.require_request(request_id, overlay)?;
-            }
-            SessionEvent::ToolCallRequested {
-                request_id,
-                call_id,
-                ..
-            } => {
-                self.require_request(request_id, overlay)?;
-                require_new(
-                    !self.graph.tools.contains_key(call_id)
-                        && overlay.tools.insert(call_id.clone()),
-                    "tool call",
-                    call_id,
-                )?;
-            }
-            SessionEvent::ToolAuthorizationResolved { call_id, .. }
-            | SessionEvent::ToolDispatchIntended { call_id }
-            | SessionEvent::ToolExecutionStarted { call_id }
-            | SessionEvent::ToolExecutionFinished { call_id, .. }
-            | SessionEvent::ToolResultAttached { call_id, .. } => {
-                require_present(
-                    self.graph.tools.contains_key(call_id) || overlay.tools.contains(call_id),
-                    "tool call",
-                    call_id,
-                )?;
-            }
-            SessionEvent::CompactionStarted {
-                compaction_id,
-                run_id,
-                ..
-            } => {
-                require_present(
-                    self.graph.runs.contains_key(run_id) || overlay.runs.contains(run_id),
-                    "run",
-                    run_id,
-                )?;
-                require_new(
-                    !self.graph.compactions.contains_key(compaction_id)
-                        && overlay.compactions.insert(compaction_id.clone()),
-                    "compaction",
-                    compaction_id,
-                )?;
-            }
-            SessionEvent::CompactionFinished { compaction_id, .. } => {
-                require_present(
-                    self.graph.compactions.contains_key(compaction_id)
-                        || overlay.compactions.contains(compaction_id),
-                    "compaction",
-                    compaction_id,
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn require_step(&self, step_id: &StepId, overlay: &PlanOverlay) -> Result<(), ProjectionError> {
-        require_present(
-            self.graph.steps.contains_key(step_id) || overlay.steps.contains(step_id),
-            "step",
-            step_id,
-        )
-    }
-
-    fn require_request(
-        &self,
-        request_id: &RequestId,
-        overlay: &PlanOverlay,
-    ) -> Result<(), ProjectionError> {
-        require_present(
-            self.graph.requests.contains_key(request_id) || overlay.requests.contains(request_id),
-            "request",
-            request_id,
-        )
-    }
-}
-
-fn require_new(
-    condition: bool,
-    kind: &'static str,
-    id: &impl fmt::Display,
-) -> Result<(), ProjectionError> {
-    condition
-        .then_some(())
-        .ok_or_else(|| ProjectionError::Duplicate {
-            kind,
-            id: id.to_string(),
-        })
-}
-
-fn require_present(
-    condition: bool,
-    kind: &'static str,
-    id: &impl fmt::Display,
-) -> Result<(), ProjectionError> {
-    condition
-        .then_some(())
-        .ok_or_else(|| ProjectionError::Missing {
-            kind,
-            id: id.to_string(),
-        })
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use kcastle_agent::{
-        EasyInputMessage, InputItem, SessionConfig, ToolExecutionOutcome, TurnEndReason, TxId,
+        EasyInputMessage, InputItem, ResponseInfo, RunId, RunOutcome, SessionConfig,
+        ToolExecutionOutcome, TurnEndReason, TxId,
     };
     use proptest::prelude::*;
 
@@ -2543,7 +2186,7 @@ mod tests {
         }
     }
 
-    fn recorded(seq: u64, event: SessionEvent) -> RecordedEvent {
+    pub(crate) fn recorded(seq: u64, event: SessionEvent) -> RecordedEvent {
         RecordedEvent {
             seq,
             tx_id: TxId::from_raw(format!("tx-{seq}")),
@@ -2556,7 +2199,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> Vec<RecordedEvent> {
+    pub(crate) fn fixture() -> Vec<RecordedEvent> {
         let run_id = id::<RunId>("run-1");
         let turn_1 = id::<TurnId>("turn-1");
         let step_1 = id::<StepId>("step-1");
@@ -3168,44 +2811,45 @@ mod tests {
     }
 
     #[test]
-    fn invalid_plan_is_atomic_and_a_plan_cannot_be_applied_stale() {
+    fn sequence_preflight_rejects_the_whole_batch_before_projection() {
         let mut document = SessionDocument::default();
-        let before = document.clone();
-        let error = document
-            .apply_batch(vec![recorded(
-                0,
-                SessionEvent::TurnStarted {
-                    run_id: RunId::from("missing"),
-                    turn_id: TurnId::from("turn"),
-                },
-            )])
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            ProjectionError::Missing { kind: "run", .. }
-        ));
-        assert_eq!(document, before);
-
-        let stale = document
-            .plan_batch(vec![recorded(
-                0,
-                SessionEvent::RunStarted {
-                    run_id: RunId::from("planned"),
-                },
-            )])
-            .unwrap();
         document
             .apply_batch(vec![recorded(
                 0,
                 SessionEvent::RunStarted {
-                    run_id: RunId::from("other"),
+                    run_id: RunId::from("run"),
                 },
             )])
             .unwrap();
+        let before = document.clone();
+        let error = document
+            .apply_batch(vec![
+                recorded(
+                    1,
+                    SessionEvent::RunTerminated {
+                        run_id: RunId::from("run"),
+                        outcome: RunOutcome::Completed,
+                        error: None,
+                    },
+                ),
+                recorded(
+                    3,
+                    SessionEvent::InputSubmitted {
+                        input_id: InputId::from("never-applied"),
+                        input: "never visible".to_owned(),
+                        origin: InputOrigin::Queue,
+                    },
+                ),
+            ])
+            .unwrap_err();
         assert!(matches!(
-            document.apply_planned(stale),
-            Err(ProjectionError::StalePlan { .. })
+            error,
+            ProjectionError::Sequence {
+                expected: 2,
+                actual: 3
+            }
         ));
+        assert_eq!(document, before);
     }
 
     #[test]
@@ -3223,46 +2867,20 @@ mod tests {
     }
 
     #[test]
-    fn rejected_batch_does_not_leak_partial_selectors() {
-        let mut document = SessionDocument::default();
-        let rejected = vec![
-            recorded(
-                0,
-                SessionEvent::RunStarted {
-                    run_id: RunId::from("would-have-been-visible"),
-                },
-            ),
-            recorded(
-                1,
-                SessionEvent::TurnStarted {
-                    run_id: RunId::from("missing"),
-                    turn_id: TurnId::from("invalid-turn"),
-                },
-            ),
-        ];
-        assert!(document.apply_batch(rejected).is_err());
-        assert_eq!(document.cursor(), EventCursor::default());
-        assert!(document.conversation().is_empty());
-        assert!(document.trajectory().is_empty());
-        assert_eq!(document.stats(), SessionStats::default());
-        assert_eq!(document.graph(), &ExecutionGraph::default());
-    }
-
-    #[test]
     fn projection_delta_separates_content_stats_and_geometry_invalidation() {
         let events = fixture();
         let mut document = SessionDocument::default();
         document.apply_batch(events[..7].to_vec()).unwrap();
 
         let first_token = document.apply_batch(vec![events[7].clone()]).unwrap();
-        assert!(!first_token.conversation_order_changed);
-        assert!(first_token.trajectory_order_changed);
+        assert!(!first_token.conversation_order.changed());
+        assert!(first_token.trajectory_order.is_append());
         assert!(first_token.geometry_changed);
         assert!(!first_token.stats_changed);
 
         let usage = document.apply_batch(vec![events[8].clone()]).unwrap();
-        assert!(!usage.conversation_order_changed);
-        assert!(!usage.trajectory_order_changed);
+        assert!(!usage.conversation_order.changed());
+        assert!(!usage.trajectory_order.changed());
         assert!(!usage.geometry_changed);
         assert!(usage.stats_changed);
         assert_eq!(
@@ -3273,7 +2891,7 @@ mod tests {
         let completed = document.apply_batch(vec![events[9].clone()]).unwrap();
         assert!(completed.geometry_changed);
         assert!(completed.stats_changed);
-        assert!(!completed.trajectory_order_changed);
+        assert!(!completed.trajectory_order.changed());
     }
 
     proptest! {

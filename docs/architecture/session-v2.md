@@ -82,16 +82,27 @@ placement.
 
 ## Desktop ownership and performance
 
-Each GPUI `SessionRuntime` owns one mutable `SessionDocument` and publishes one immutable,
-revision-stamped `Arc<SessionView>`. Applying a committed batch produces a small patch of changed
-stable IDs; persistent maps and vectors share untouched structure and preserve stable record arcs.
-Presentation overlays and markdown update only changed messages, while bounded transient notices
-are stored outside the canonical view.
+Each GPUI `SessionRuntime` owns one mutable `SessionDocument` and publishes one immutable
+`Arc<SessionView>`. `SessionMachine` is the sole semantic validator: the desktop only preflights the
+committed event cursor before applying a complete batch, so it cannot partially project a transport
+gap and does not maintain a second lifecycle state machine. Applying a committed batch produces a
+small patch of changed stable IDs; persistent maps and vectors share untouched structure and
+preserve stable record arcs.
 
-Timeline layout is a pure transformation with one geometry source for rendering and hit testing.
-The renderer clips to a dedicated plot rectangle. Interval lookup serves hover and selection, and
-subpixel lane binning limits rendered primitives while preserving the full semantic item set.
-Selection and viewport are independent typed states bound to an axis/document generation.
+Canonical messages carry a monotonic content revision. Visible GPUI rows synchronize markdown
+directly by `(projection generation, message ID, revision, markdown mode)`, making unchanged rows an
+O(1) check without aliasing a replacement runtime that reused the same session namespace and IDs.
+The namespace scopes transient expansion and rating overlays; bounded notices bypass the
+presentation store entirely, so no second presentation change journal is needed.
+
+Timeline layout is a pure transformation with one geometry source for rendering and hit testing,
+one bounded field-aware change journal for search and geometry consumers, and record indices as the
+only cell identity inside a projection generation. Consecutive search-only revisions coalesce into
+one range, so an off-screen geometry consumer keeps continuity during arbitrarily long streaming
+text. The renderer clips to a dedicated plot rectangle. Interval lookup serves hover and selection,
+and subpixel lane binning limits rendered primitives while preserving the full semantic item set.
+Selection and viewport are independent typed states bound to an axis/document generation; an
+in-progress drag is the only additional interaction state.
 
 ## Verification gates
 

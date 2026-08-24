@@ -16,7 +16,7 @@ use kcastle_agent::{
 
 use crate::dialogs::Modal;
 use crate::domain::session_document::SessionDocument;
-use crate::domain::timeline::AxisRange;
+use crate::domain::timeline::{AxisId, AxisRange};
 use crate::domain::{
     Action, AppState, ComposerMenu, DetailsTab, Effect, Message, Role, RunState, ScrollIntent,
     Surface, TimelineMode, TrajectoryItemId, next_message_id, reduce,
@@ -160,7 +160,6 @@ struct PendingRuntimeSelection {
 struct RuntimeObservation {
     completed_runs: u64,
     transcript_updates: u64,
-    presentation_sequence: u64,
     catalog_synced_revision: u64,
     metadata_generation: u64,
     is_terminal: bool,
@@ -170,13 +169,15 @@ struct RuntimeObservation {
 pub(crate) struct TimelineDragState {
     pub(crate) pan: bool,
     pub(crate) start_value: f64,
+    pub(crate) current_value: f64,
     pub(crate) start_x: f32,
     pub(crate) record_id: Option<TrajectoryItemId>,
-    pub(crate) initial_viewport: Option<AxisRange>,
+    pub(crate) initial_viewport: AxisRange,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TimelineHoverState {
+    pub(crate) axis: AxisId,
     pub(crate) fraction: f64,
     pub(crate) record_id: Option<TrajectoryItemId>,
 }
@@ -193,7 +194,7 @@ pub(crate) enum SidebarSessionStatus {
 pub(crate) struct DesktopApp {
     pub(crate) core: AppState,
     pub(crate) layout_runtime: GpuiLayoutRuntime,
-    pub(crate) message_presentations: MessagePresentationStore,
+    pub(crate) message_presentations: RefCell<MessagePresentationStore>,
     pub(crate) selected_runtime: Entity<SessionRuntime>,
     project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
     pub(crate) input: Entity<TextareaState>,
@@ -221,7 +222,6 @@ pub(crate) struct DesktopApp {
     pub(crate) selected_started_at: Option<Instant>,
     pub(crate) project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
     pub(crate) project_archived_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
-    pub(crate) session_activity: HashMap<PathBuf, u64>,
     pub(crate) session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
     session_catalog_indices: HashMap<RuntimeKey, usize>,
     pub(crate) available_update: Option<AvailableUpdate>,
@@ -287,13 +287,8 @@ impl DesktopApp {
         );
         let project_sessions = load_project_sessions(&project_store);
         let project_archived_sessions = load_project_archived_sessions(&project_store);
-        let session_activity = load_session_activity(&project_sessions);
         let session_catalog_indices =
             build_session_catalog_indices(&project_store, &project_sessions);
-        let sessions = project_sessions
-            .get(&project.sessions_dir)
-            .cloned()
-            .unwrap_or_default();
         let viewport = window.viewport_size();
         let mut core = AppState::new(LayoutInput {
             viewport_width: f32::from(viewport.width),
@@ -306,7 +301,6 @@ impl DesktopApp {
         core.workspace.expanded_projects = HashSet::from([project.path.clone()]);
         core.workspace.sessions_dir = project.sessions_dir.clone();
         core.session.current = current_session.clone();
-        core.session.sessions = sessions;
         let session_search_documents = build_session_search_documents(&project_store);
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -369,7 +363,7 @@ impl DesktopApp {
         let app = Self {
             core,
             layout_runtime: GpuiLayoutRuntime::default(),
-            message_presentations: MessagePresentationStore::default(),
+            message_presentations: RefCell::new(MessagePresentationStore::default()),
             selected_runtime: runtime,
             project_runtimes,
             input,
@@ -397,7 +391,6 @@ impl DesktopApp {
             selected_started_at: None,
             project_sessions,
             project_archived_sessions,
-            session_activity,
             session_search_documents,
             session_catalog_indices,
             available_update: None,
@@ -407,7 +400,7 @@ impl DesktopApp {
                 initial_runtime_key.clone(),
                 runtime_subscription,
             )]),
-            runtime_recency: HashMap::from([(initial_runtime_key, 1)]),
+            runtime_recency: HashMap::from([(initial_runtime_key.clone(), 1)]),
             runtime_access_clock: 1,
             open_generation: 0,
             inflight_session_opens: HashMap::new(),
@@ -422,6 +415,12 @@ impl DesktopApp {
                 bounds_subscription,
             ],
         };
+        app.message_presentations
+            .borrow_mut()
+            .activate(presentation_namespace(
+                &initial_runtime_key.0,
+                &initial_runtime_key.1,
+            ));
         #[cfg(not(test))]
         app.check_for_updates(window, cx);
         app
@@ -432,7 +431,6 @@ impl DesktopApp {
         let location = self.runtime_location(runtime);
         let selected = runtime.entity_id() == self.selected_runtime.entity_id();
         let mut selected_transcript_updates = 0;
-        let mut presentation_update = None;
         let mut became_terminal = false;
         if let Some((project_id, session_id)) = &location {
             let key = (project_id.clone(), session_id.clone());
@@ -456,11 +454,6 @@ impl DesktopApp {
             }
             if selected {
                 self.unread_sessions.remove(&key);
-                presentation_update = Some(
-                    runtime
-                        .read(cx)
-                        .presentation_update_since(previous_observation.presentation_sequence),
-                );
             }
 
             let catalog_missing = !observation.session.path.as_os_str().is_empty()
@@ -497,7 +490,6 @@ impl DesktopApp {
                 RuntimeObservation {
                     completed_runs: observation.completed_runs,
                     transcript_updates: observation.transcript_updates,
-                    presentation_sequence: observation.presentation_sequence,
                     catalog_synced_revision: if catalog_refreshed {
                         observation.durable_revision
                     } else {
@@ -535,28 +527,6 @@ impl DesktopApp {
         let snapshot = runtime.read(cx).snapshot();
         self.apply_selected_runtime_snapshot(snapshot);
         self.refresh_selected_details_raw(cx);
-        if let (Some((project_id, session_id)), Some((_, full_reset, messages))) =
-            (location.as_ref(), presentation_update)
-        {
-            let namespace = presentation_namespace(project_id, session_id);
-            if full_reset
-                || !self.message_presentations.sync_changed(
-                    &namespace,
-                    messages.iter().map(|message| {
-                        (
-                            message.key,
-                            message.revision,
-                            message.text.as_str(),
-                            message.role == Role::Assistant,
-                        )
-                    }),
-                )
-            {
-                self.sync_message_presentations();
-            }
-        } else if location.is_none() {
-            self.sync_message_presentations();
-        }
         if selected_transcript_updates > 0 {
             self.dispatch_local(
                 Action::StreamDeltasReceived(selected_transcript_updates),
@@ -579,10 +549,6 @@ impl DesktopApp {
     }
 
     fn apply_selected_runtime_snapshot(&mut self, snapshot: SessionRuntimeSnapshot) {
-        debug_assert_eq!(
-            snapshot.view.revision,
-            snapshot.view.trajectory.source_revision()
-        );
         if let Some(model_id) = snapshot.config.model_id.as_deref()
             && let Some(index) = self.models.iter().position(|model| model.id == model_id)
             && self.models[index].model.has_api_key()
@@ -633,11 +599,12 @@ impl DesktopApp {
             }
             let needs_catalog_refresh = !snapshot.session.path.as_os_str().is_empty()
                 && !self
-                    .core
-                    .session
-                    .sessions
-                    .iter()
-                    .any(|session| session.id == session_id);
+                    .project_store
+                    .project(self.core.workspace.active_project)
+                    .and_then(|project| self.project_sessions.get(&project.sessions_dir))
+                    .is_some_and(|sessions| {
+                        sessions.iter().any(|session| session.id == session_id)
+                    });
             if needs_catalog_refresh
                 && let Some(project_id) = self
                     .project_store
@@ -667,7 +634,6 @@ impl DesktopApp {
             .or_insert(RuntimeObservation {
                 completed_runs: observation.completed_runs,
                 transcript_updates: observation.transcript_updates,
-                presentation_sequence: 0,
                 catalog_synced_revision: observation.durable_revision,
                 metadata_generation: observation.metadata_generation,
                 is_terminal: !runtime.read(cx).is_active(),
@@ -913,7 +879,6 @@ impl DesktopApp {
         if let Some(key) = &location {
             let observation = runtime.read(cx).observation();
             let previous = self.runtime_observations.entry(key.clone()).or_default();
-            previous.presentation_sequence = observation.presentation_sequence;
             previous.completed_runs = observation.completed_runs;
             previous.transcript_updates = observation.transcript_updates;
             previous.metadata_generation = observation.metadata_generation;
@@ -1349,7 +1314,6 @@ impl DesktopApp {
             Role::Notice,
             text.into(),
         ))));
-        self.sync_message_presentations();
     }
 
     fn sync_message_presentations(&mut self) {
@@ -1357,24 +1321,7 @@ impl DesktopApp {
             .runtime_location(&self.selected_runtime)
             .map(|(project_id, session_id)| presentation_namespace(&project_id, &session_id))
             .unwrap_or_else(|| "unregistered-session".to_owned());
-        let messages = self
-            .core
-            .session_view
-            .conversation
-            .messages
-            .iter()
-            .chain(self.core.transient_messages.iter());
-        self.message_presentations.replace_all(
-            namespace,
-            messages.map(|message| {
-                (
-                    message.key,
-                    message.revision,
-                    message.text.as_str(),
-                    message.role == Role::Assistant,
-                )
-            }),
-        );
+        self.message_presentations.get_mut().activate(namespace);
     }
 
     pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1596,6 +1543,7 @@ impl DesktopApp {
         };
         if self
             .message_presentations
+            .get_mut()
             .toggle_expanded(message_id)
             .is_some_and(|expanded| expanded && self.core.follow_chat_tail)
         {
@@ -1632,7 +1580,13 @@ impl DesktopApp {
                 .records
                 .iter()
                 .enumerate()
-                .find(|(_, record)| record.call_id.as_deref() == Some(call_id))
+                .find(|(_, record)| {
+                    matches!(
+                        &record.id,
+                        TrajectoryItemId::Tool(record_call_id)
+                            if record_call_id.as_str() == call_id
+                    )
+                })
             else {
                 return;
             };
@@ -1662,6 +1616,7 @@ impl DesktopApp {
         };
         if self
             .message_presentations
+            .get_mut()
             .rate(message_id, positive)
             .is_some()
         {
@@ -1996,17 +1951,11 @@ impl DesktopApp {
         };
         let generation = self.begin_runtime_selection_intent();
         self.save_current_view_state();
-        let sessions = self
-            .project_sessions
-            .get(&project.sessions_dir)
-            .cloned()
-            .unwrap_or_default();
         self.dispatch(
             Action::ActivateWorkspace {
                 index,
                 cwd: project.path.clone(),
                 sessions_dir: project.sessions_dir.clone(),
-                sessions,
             },
             window,
             cx,
@@ -2100,6 +2049,7 @@ impl DesktopApp {
         self.project_runtimes.remove(&project.id);
         for session_id in presentation_sessions {
             self.message_presentations
+                .get_mut()
                 .remove_session(&presentation_namespace(&project.id, &session_id));
         }
         self.inflight_session_opens
@@ -2354,13 +2304,12 @@ impl DesktopApp {
         &mut self,
         project_index: usize,
         session: SessionInfo,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match Session::restore(&session) {
             Ok(_) => {
                 self.reload_archived_sessions(project_index);
-                self.reload_project_session_list(project_index, window, cx);
+                self.reload_project_session_list(project_index);
                 self.notice(format!("Restored “{}”", session.title));
             }
             Err(error) => self.notice(format!("Could not restore session: {error}")),
@@ -2396,10 +2345,12 @@ impl DesktopApp {
             let key = (project.id.clone(), session.id.clone());
             let namespace = presentation_namespace(&project.id, &session.id);
             self.remove_cached_runtime(&key);
-            self.message_presentations.remove_session(&namespace);
+            self.message_presentations
+                .get_mut()
+                .remove_session(&namespace);
             self.unread_sessions.remove(&key);
         }
-        self.reload_project_session_list(project_index, window, cx);
+        self.reload_project_session_list(project_index);
         let removed_selected = project_index == self.core.workspace.active_project
             && same_path(previous_path, &self.core.session.current);
         if removed_selected {
@@ -2414,21 +2365,13 @@ impl DesktopApp {
         }
     }
 
-    fn reload_project_session_list(
-        &mut self,
-        project_index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn reload_project_session_list(&mut self, project_index: usize) {
         let sessions_dir = self
             .project_store
             .project(project_index)
             .map(|project| project.sessions_dir.clone());
         if let Some(sessions_dir) = sessions_dir {
-            let sessions = self.reload_sessions(&sessions_dir);
-            if project_index == self.core.workspace.active_project {
-                self.dispatch(Action::RefreshSessions(sessions), window, cx);
-            }
+            self.reload_sessions(&sessions_dir);
         }
         self.refresh_session_search_documents();
     }
@@ -2559,10 +2502,7 @@ impl DesktopApp {
     }
 
     pub(crate) fn session_modified_at(&self, session: &SessionInfo) -> u64 {
-        self.session_activity
-            .get(&session.path)
-            .copied()
-            .unwrap_or(session.created_at)
+        session.updated_at
     }
 
     fn refresh_session_search_documents(&mut self) {
@@ -2608,27 +2548,6 @@ impl DesktopApp {
             sessions.len() - 1
         };
         self.session_catalog_indices.insert(key, index);
-        self.session_activity
-            .insert(session.path.clone(), session.updated_at);
-        if self
-            .project_store
-            .project(self.core.workspace.active_project)
-            .is_some_and(|active| &active.id == project_id)
-        {
-            if self
-                .core
-                .session
-                .sessions
-                .get(index)
-                .is_some_and(|existing| existing.id == session.id)
-            {
-                self.core.session.sessions[index] = session.clone();
-            } else if index == self.core.session.sessions.len() {
-                self.core.session.sessions.push(session.clone());
-            } else {
-                self.core.session.sessions.clone_from(sessions);
-            }
-        }
     }
 
     /// Refreshes one project's metadata and search projection from one SQLite catalog snapshot.
@@ -2650,13 +2569,8 @@ impl DesktopApp {
 
         if let Some(previous) = self.project_sessions.get(&project.sessions_dir) {
             for session in previous {
-                self.session_activity.remove(&session.path);
                 self.session_search_documents.remove(&session.path);
             }
-        }
-        for session in &catalog.sessions {
-            self.session_activity
-                .insert(session.path.clone(), session.updated_at);
         }
         for (path, search) in catalog.search {
             self.session_search_documents.insert(
@@ -2675,17 +2589,6 @@ impl DesktopApp {
                     .enumerate()
                     .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
             );
-        }
-        if self
-            .project_store
-            .project(self.core.workspace.active_project)
-            .is_some_and(|active| active.id == project.id)
-        {
-            self.core.session.sessions = self
-                .project_sessions
-                .get(&project.sessions_dir)
-                .cloned()
-                .unwrap_or_default();
         }
         true
     }
@@ -2709,15 +2612,6 @@ impl DesktopApp {
                 .cloned()
                 .unwrap_or_default(),
         };
-        if let Some(previous) = self.project_sessions.get(sessions_dir) {
-            for session in previous {
-                self.session_activity.remove(&session.path);
-            }
-        }
-        for session in &sessions {
-            self.session_activity
-                .insert(session.path.clone(), session_modified_at_from_disk(session));
-        }
         self.project_sessions
             .insert(sessions_dir.to_owned(), sessions.clone());
         if let Some(project_id) = project_id {
@@ -2736,7 +2630,6 @@ impl DesktopApp {
     fn refresh_project_session_cache(&mut self) {
         let sessions = load_project_sessions(&self.project_store);
         let archived_sessions = load_project_archived_sessions(&self.project_store);
-        self.session_activity = load_session_activity(&sessions);
         self.project_sessions = sessions;
         self.project_archived_sessions = archived_sessions;
         self.session_catalog_indices =
@@ -3025,20 +2918,6 @@ fn load_project_archived_sessions(
     sessions
 }
 
-fn load_session_activity(
-    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
-) -> HashMap<PathBuf, u64> {
-    project_sessions
-        .values()
-        .flatten()
-        .map(|session| (session.path.clone(), session_modified_at_from_disk(session)))
-        .collect()
-}
-
-fn session_modified_at_from_disk(session: &SessionInfo) -> u64 {
-    session.updated_at
-}
-
 fn truncate_chars(value: &str, limit: usize) -> String {
     let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = compact.chars();
@@ -3285,10 +3164,10 @@ mod tests {
     fn assistant_messages_use_the_semantic_markdown_renderer() {
         let message = message(Role::Assistant, "## Result\n\nbody".into());
         let mut presentations = MessagePresentationStore::default();
-        presentations.sync([(message.key, message.text.as_str(), true)]);
+        presentations.activate("test-session");
         assert!(
             !presentations
-                .get(message.key)
+                .sync_message(message.key, 1, message.revision, &message.text, true)
                 .markdown
                 .tail_blocks()
                 .is_empty()
@@ -3368,8 +3247,14 @@ mod tests {
                     .join(kcastle_agent::SESSION_DATABASE_FILE)
                     .is_file()
             );
-            assert_eq!(app.core.session.sessions.len(), 1);
-            assert_eq!(app.core.session.sessions[0].path, app.core.session.current);
+            assert_eq!(
+                app.project_sessions[&app.core.workspace.sessions_dir].len(),
+                1
+            );
+            assert_eq!(
+                app.project_sessions[&app.core.workspace.sessions_dir][0].path,
+                app.core.session.current
+            );
         });
 
         close_test_window(view, cx);
@@ -3436,9 +3321,9 @@ mod tests {
         );
         assert!(!archived.path.exists());
 
-        cx.update(|window, app| {
+        cx.update(|_window, app| {
             view.update(app, |this, cx| {
-                this.restore_archived_session(active_project, archived.clone(), window, cx)
+                this.restore_archived_session(active_project, archived.clone(), cx)
             });
         });
         cx.read_entity(&view, |app, _| {
@@ -3713,16 +3598,10 @@ mod tests {
                     .selected = missing_id.clone();
 
                 let generation = this.begin_runtime_selection_intent();
-                let sessions = this
-                    .project_sessions
-                    .get(&project_b.sessions_dir)
-                    .cloned()
-                    .unwrap_or_default();
                 let _ = this.transition(Action::ActivateWorkspace {
                     index: project_b_index,
                     cwd: project_b.path.clone(),
                     sessions_dir: project_b.sessions_dir.clone(),
-                    sessions,
                 });
                 let key = (
                     project_b.id.clone(),
@@ -4049,7 +3928,6 @@ mod tests {
                         RuntimeObservation {
                             completed_runs: observation.completed_runs,
                             transcript_updates: observation.transcript_updates,
-                            presentation_sequence: observation.presentation_sequence,
                             catalog_synced_revision: observation.durable_revision,
                             metadata_generation: observation.metadata_generation,
                             is_terminal: false,

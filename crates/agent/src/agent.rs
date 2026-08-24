@@ -1502,7 +1502,7 @@ impl Agent {
             }
             Err(error) => return Err(error.into()),
         };
-        if receipt.events != planned.events
+        if receipt.events.as_slice() != planned.events()
             || receipt.base_revision != self.revision
             || receipt.revision != self.revision.saturating_add(1)
         {
@@ -1510,7 +1510,7 @@ impl Agent {
                 "session store receipt did not match the planned transaction".into(),
             ));
         }
-        self.machine.apply_batch(&planned)?;
+        self.machine.apply_batch(planned)?;
         self.revision = receipt.revision;
         self.info.updated_at = millis_to_seconds(receipt.committed_at_ms);
         publish(sink, AgentEvent::SessionCommitted(receipt.clone()));
@@ -1628,7 +1628,7 @@ impl Agent {
         };
         let message = error.to_string();
         let terminal = recovery
-            .events
+            .into_events()
             .into_iter()
             .map(|recorded| {
                 let event = match recorded.event {

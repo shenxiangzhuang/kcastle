@@ -11,17 +11,15 @@ use crate::domain::session_document::{
 };
 use crate::domain::trajectory::{TrajectoryProjection, TrajectoryRecord};
 
-/// One immutable, revision-stamped desktop read model. Both visible surfaces
+/// One immutable desktop read model. Both visible surfaces
 /// are materialized from the same `SessionDocument` snapshot before this value
 /// is published, so the UI cannot observe a new conversation with an old
 /// trajectory (or vice versa).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SessionView {
-    pub(crate) revision: u64,
     pub(crate) conversation: ConversationState,
     pub(crate) trajectory: TrajectoryProjection,
     conversation_revision: u64,
-    tool_schema_fingerprint: u64,
     conversation_indices: PersistentHashMap<ConversationItemId, usize>,
     claimed_message_keys: PersistentHashSet<MessageId>,
     #[cfg(test)]
@@ -35,21 +33,15 @@ impl SessionView {
         tool_schemas: &HashMap<String, String>,
         previous: Option<&Self>,
     ) -> Self {
-        let revision = document.revisions().document;
         let trajectory = previous.map_or_else(
             || TrajectoryProjection::from_document(document),
             |view| TrajectoryProjection::from_document_reusing(document, Some(&view.trajectory)),
         );
-        debug_assert_eq!(revision, trajectory.source_revision());
         let revisions = document.revisions();
-        let tool_schema_fingerprint = tool_schema_fingerprint(tool_schemas);
-        let reuse_conversation = previous.is_some_and(|previous| {
-            previous.conversation_revision == revisions.conversation
-                && previous.tool_schema_fingerprint == tool_schema_fingerprint
-        });
+        let reuse_conversation = previous
+            .is_some_and(|previous| previous.conversation_revision == revisions.conversation);
         let messages = if let Some(previous) = previous
             && previous.conversation_revision == revisions.conversation
-            && previous.tool_schema_fingerprint == tool_schema_fingerprint
         {
             previous.conversation.messages.clone()
         } else {
@@ -107,7 +99,11 @@ impl SessionView {
                 .expect("reused conversation has a previous view")
                 .materialized_messages
         } else {
-            messages.len()
+            previous.map_or(messages.len(), |previous| {
+                previous
+                    .materialized_messages
+                    .saturating_add(messages.len())
+            })
         };
 
         let stats = document.stats();
@@ -121,13 +117,10 @@ impl SessionView {
             title: display_title(title),
             turns: stats.turns,
         };
-
         Self {
-            revision,
             conversation,
             trajectory,
             conversation_revision: revisions.conversation,
-            tool_schema_fingerprint,
             conversation_indices,
             claimed_message_keys,
             #[cfg(test)]
@@ -142,19 +135,16 @@ impl SessionView {
         tool_schemas: &HashMap<String, String>,
         previous: &Self,
     ) -> Self {
-        let tool_schema_fingerprint = tool_schema_fingerprint(tool_schemas);
-        if previous.tool_schema_fingerprint != tool_schema_fingerprint {
-            return Self::from_document(document, title, tool_schemas, Some(previous));
-        }
-
         let revisions = document.revisions();
         let trajectory = TrajectoryProjection::after_delta(document, delta, &previous.trajectory);
         let ordinals = document.display_ordinals();
         let mut messages = previous.conversation.messages.clone();
         let mut conversation_indices = previous.conversation_indices.clone();
         let mut claimed_message_keys = previous.claimed_message_keys.clone();
-        let appended = if delta.conversation_order_changed {
-            appended_conversation_ids(document, delta, previous)
+        let appended = if delta.conversation_order.is_append() {
+            appended_conversation_ids(document, previous)
+        } else if delta.conversation_order.changed() {
+            None
         } else {
             Some(&[][..])
         };
@@ -176,12 +166,12 @@ impl SessionView {
             materialized = materialized.saturating_add(1);
         }
         for id in &delta.changed_conversation {
-            if appended.contains(id) {
-                continue;
-            }
-            let Some(index) = previous.conversation_indices.get(id).copied() else {
+            let Some(index) = conversation_indices.get(id).copied() else {
                 return Self::from_document(document, title, tool_schemas, Some(previous));
             };
+            if index >= previous.conversation.messages.len() {
+                continue;
+            }
             let Some(item) = document.conversation_by_id(id) else {
                 return Self::from_document(document, title, tool_schemas, Some(previous));
             };
@@ -206,7 +196,6 @@ impl SessionView {
 
         let stats = document.stats();
         Self {
-            revision: revisions.document,
             conversation: ConversationState {
                 messages,
                 title: display_title(title),
@@ -220,7 +209,6 @@ impl SessionView {
             },
             trajectory,
             conversation_revision: revisions.conversation,
-            tool_schema_fingerprint,
             conversation_indices,
             claimed_message_keys,
             #[cfg(test)]
@@ -236,7 +224,6 @@ impl SessionView {
 
 fn appended_conversation_ids<'a>(
     document: &'a SessionDocument,
-    delta: &ProjectionDelta,
     previous: &SessionView,
 ) -> Option<&'a [ConversationItemId]> {
     let ids = document.conversation_ids();
@@ -246,9 +233,6 @@ fn appended_conversation_ids<'a>(
         || suffix
             .iter()
             .any(|id| previous.conversation_indices.contains_key(id))
-        || suffix
-            .iter()
-            .any(|id| !delta.changed_conversation.contains(id))
     {
         return None;
     }
@@ -332,7 +316,7 @@ fn materialize_message(
     refresh_message_search_text(&mut message);
 
     if let Some(previous) = previous {
-        if same_canonical_message(previous, &message) {
+        if previous.as_ref() == &message {
             return Arc::clone(previous);
         }
         message.revision = previous.revision.saturating_add(1);
@@ -340,22 +324,13 @@ fn materialize_message(
     Arc::new(message)
 }
 
+#[cfg(test)]
 fn same_canonical_message(previous: &Message, current: &Message) -> bool {
-    previous.key == current.key
-        && previous.role == current.role
-        && previous.tool_call_id == current.tool_call_id
-        && previous.title == current.title
-        && previous.text == current.text
-        && previous.payload == current.payload
-        && previous.schema == current.schema
-        && previous.pending == current.pending
-        && previous.failed == current.failed
-        && previous.started_at_ms == current.started_at_ms
-        && previous.duration_ms == current.duration_ms
-        && previous.turn == current.turn
-        && previous.step == current.step
-        && previous.request_id == current.request_id
-        && previous.search_text == current.search_text
+    let mut previous = previous.clone();
+    let mut current = current.clone();
+    previous.revision = 0;
+    current.revision = 0;
+    previous == current
 }
 
 fn role_snapshot(role: ConversationRole) -> Role {
@@ -448,170 +423,18 @@ fn semantic_hash(id: &ConversationItemId) -> u64 {
     hash
 }
 
-fn tool_schema_fingerprint(tool_schemas: &HashMap<String, String>) -> u64 {
-    let mut entries = tool_schemas.iter().collect::<Vec<_>>();
-    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-    let mut hash = 14_695_981_039_346_656_037_u64;
-    for (name, schema) in entries {
-        for byte in name.bytes().chain([0]).chain(schema.bytes()).chain([0]) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(1_099_511_628_211);
-        }
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use kcastle_agent::{
-        AssistantChunk, EasyInputMessage, EventTime, InputId, InputItem, InputOrigin,
-        RecordedEvent, RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome,
-        SessionConfig, SessionEvent, StepId, StepOutcome, TokenUsage, TurnEndReason, TurnId, TxId,
+        AssistantChunk, InputId, InputOrigin, RequestHeaderReason, RequestId, RunId, SessionConfig,
+        SessionEvent, StepId, TurnId,
     };
 
     use super::*;
-
-    fn recorded(seq: u64, event: SessionEvent) -> RecordedEvent {
-        RecordedEvent {
-            seq,
-            tx_id: TxId::from_raw(format!("tx-{seq}")),
-            time: EventTime {
-                wall_time_ms: i64::try_from(seq).unwrap_or(i64::MAX),
-                clock_id: "session-view-test".to_owned(),
-                monotonic_ns: seq.saturating_mul(1_000_000),
-            },
-            event,
-        }
-    }
-
-    fn fixture_events() -> Vec<RecordedEvent> {
-        let run_id = RunId::from("run-1");
-        let turn_id = TurnId::from("turn-1");
-        let step_id = StepId::from("step-1");
-        let input_id = InputId::from("input-1");
-        let request_id = RequestId::from("request-1");
-        let usage = TokenUsage {
-            uncached_input_tokens: 10,
-            cache_read_input_tokens: 40,
-            cache_write_input_tokens: 2,
-            output_tokens: 5,
-            reasoning_output_tokens: 3,
-        };
-        let input = |text: &str| InputItem::from(EasyInputMessage::from(text));
-        vec![
-            recorded(
-                0,
-                SessionEvent::RunStarted {
-                    run_id: run_id.clone(),
-                },
-            ),
-            recorded(
-                1,
-                SessionEvent::TurnStarted {
-                    run_id: run_id.clone(),
-                    turn_id: turn_id.clone(),
-                },
-            ),
-            recorded(
-                2,
-                SessionEvent::StepStarted {
-                    turn_id: turn_id.clone(),
-                    step_id: step_id.clone(),
-                },
-            ),
-            recorded(
-                3,
-                SessionEvent::InputSubmitted {
-                    input_id: input_id.clone(),
-                    input: "question".to_owned(),
-                    origin: InputOrigin::Initial,
-                },
-            ),
-            recorded(
-                4,
-                SessionEvent::InputAttached {
-                    input_id,
-                    step_id: step_id.clone(),
-                    items: vec![input("question")],
-                },
-            ),
-            recorded(
-                5,
-                SessionEvent::RequestSnapshot {
-                    request_id: request_id.clone(),
-                    step_id: step_id.clone(),
-                    reason: RequestHeaderReason::Initial,
-                    model: "fixture".to_owned(),
-                    instructions: Some("test".to_owned()),
-                    tools: Vec::new(),
-                    reasoning_effort: None,
-                    max_output_tokens: None,
-                    session_config: SessionConfig::default(),
-                },
-            ),
-            recorded(
-                6,
-                SessionEvent::ModelRequestStarted {
-                    request_id: request_id.clone(),
-                },
-            ),
-            recorded(
-                7,
-                SessionEvent::AssistantChunk {
-                    request_id: request_id.clone(),
-                    chunk: AssistantChunk::OutputTextDelta {
-                        delta: "answer".to_owned(),
-                    },
-                },
-            ),
-            recorded(
-                8,
-                SessionEvent::AssistantCompleted {
-                    request_id,
-                    items: vec![input("answer")],
-                    response: ResponseInfo {
-                        id: "response-1".to_owned(),
-                        model: "fixture".to_owned(),
-                        usage: Some(usage),
-                    },
-                },
-            ),
-            recorded(
-                9,
-                SessionEvent::StepTerminated {
-                    step_id,
-                    outcome: StepOutcome::Completed,
-                    error: None,
-                },
-            ),
-            recorded(
-                10,
-                SessionEvent::TurnTerminated {
-                    turn_id,
-                    reason: TurnEndReason::Completed,
-                },
-            ),
-            recorded(
-                11,
-                SessionEvent::RunTerminated {
-                    run_id,
-                    outcome: RunOutcome::Completed,
-                    error: None,
-                },
-            ),
-        ]
-    }
+    use crate::domain::session_document::tests::{fixture as fixture_events, recorded};
 
     fn fixture() -> SessionDocument {
         SessionDocument::from_events(fixture_events()).unwrap()
-    }
-
-    #[test]
-    fn conversation_and_trajectory_share_one_revision() {
-        let document = fixture();
-        let view = SessionView::from_document(&document, "Fixture", &HashMap::new(), None);
-        assert_eq!(view.revision, document.revisions().document);
-        assert_eq!(view.revision, view.trajectory.source_revision());
     }
 
     #[test]
@@ -658,7 +481,6 @@ mod tests {
             incremental =
                 SessionView::after_delta(&document, &delta, "Fixture", &schemas, &incremental);
             let rebuilt = SessionView::from_document(&document, "Fixture", &schemas, None);
-            assert_eq!(incremental.revision, rebuilt.revision);
             assert_eq!(incremental.trajectory.records, rebuilt.trajectory.records);
             assert_eq!(
                 incremental.conversation.messages.len(),
@@ -680,14 +502,44 @@ mod tests {
         let document = fixture();
         let view = SessionView::from_document(&document, "Fixture", &HashMap::new(), None);
         assert_eq!(view.conversation.title, "Fixture");
-        assert_eq!(view.conversation.turns, 1);
-        assert_eq!(view.conversation.tool_calls, 0);
-        assert_eq!(view.trajectory.stats().turns, 1);
-        assert_eq!(view.trajectory.stats().input_tokens, 52);
+        assert_eq!(view.conversation.turns, 2);
+        assert_eq!(view.conversation.tool_calls, 1);
+        assert_eq!(view.trajectory.stats().turns, 2);
+        assert_eq!(view.trajectory.stats().input_tokens(), 103);
 
         let untitled =
             SessionView::from_document(&document, "Untitled session", &HashMap::new(), None);
         assert_eq!(untitled.conversation.title, "New chat");
+    }
+
+    #[test]
+    fn final_response_without_streaming_appends_only_its_message() {
+        let events = fixture_events();
+        let completion = events
+            .iter()
+            .find_map(|event| {
+                matches!(event.event, SessionEvent::AssistantCompleted { .. })
+                    .then(|| event.event.clone())
+            })
+            .unwrap();
+        let mut document = SessionDocument::from_events(events[..7].to_vec()).unwrap();
+        let schemas = HashMap::new();
+        let previous = SessionView::from_document(&document, "Fixture", &schemas, None);
+        let untouched = Arc::clone(&previous.conversation.messages[0]);
+        let scan_work = document.conversation_order_scan_work();
+
+        let delta = document
+            .apply_batch(vec![recorded(document.cursor().next_seq, completion)])
+            .unwrap();
+        assert!(delta.conversation_order.is_append());
+        assert_eq!(document.conversation_order_scan_work(), scan_work);
+        let current = SessionView::after_delta(&document, &delta, "Fixture", &schemas, &previous);
+
+        assert_eq!(
+            current.materialized_messages() - previous.materialized_messages(),
+            1
+        );
+        assert!(Arc::ptr_eq(&untouched, &current.conversation.messages[0]));
     }
 
     #[test]
@@ -815,7 +667,6 @@ mod tests {
         ));
 
         let rebuilt = SessionView::from_document(&document, "Large", &schemas, None);
-        assert_eq!(view.revision, rebuilt.revision);
         assert_eq!(view.trajectory.records, rebuilt.trajectory.records);
         assert_eq!(
             view.conversation.messages.len(),
