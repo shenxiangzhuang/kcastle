@@ -4,6 +4,8 @@ use async_openai::types::responses::{
 use im::{HashMap, OrdMap, Vector};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod compaction;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponseMetadata {
     pub id: String,

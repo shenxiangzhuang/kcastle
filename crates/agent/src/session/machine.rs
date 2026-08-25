@@ -7,10 +7,10 @@ use async_openai::types::responses::{
 use im::{HashMap, HashSet, OrdMap};
 use thiserror::Error;
 
-use crate::session::SessionConfig;
 #[cfg(test)]
-use crate::session::context::ContextEntry;
-use crate::session::context::ContextState;
+use crate::context::ContextEntry;
+use crate::context::ContextState;
+use crate::session::SessionConfig;
 use crate::session::event::{
     AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin,
     RecordedEvent, RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SessionEvent,

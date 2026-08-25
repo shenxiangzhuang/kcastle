@@ -21,7 +21,9 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
 fn pure_layers_do_not_depend_on_gpui() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for layer in ["domain", "layout", "application"] {
-        for path in rust_files(&source.join(layer)) {
+        let mut paths = rust_files(&source.join(layer));
+        paths.push(source.join(format!("{layer}.rs")));
+        for path in paths {
             let text = fs::read_to_string(&path).expect("source file should be readable");
             assert!(
                 !text.contains("gpui::") && !text.contains("use gpui"),
@@ -99,4 +101,30 @@ fn agent_public_api_excludes_desktop_presentation_policy() {
             "desktop presentation policy leaked into agent public API: {forbidden}"
         );
     }
+}
+
+#[test]
+fn agent_harness_modules_follow_ownership_boundaries() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("agent")
+        .join("src");
+    let agent = fs::read_to_string(source.join("agent.rs")).expect("Agent source should exist");
+    let agent_loop =
+        fs::read_to_string(source.join("agent_loop.rs")).expect("agent loop source should exist");
+    let context =
+        fs::read_to_string(source.join("context.rs")).expect("context source should exist");
+    let session =
+        fs::read_to_string(source.join("session.rs")).expect("session source should exist");
+
+    assert!(agent.contains("pub struct Agent"));
+    assert!(agent.contains("impl Agent"));
+    assert!(agent_loop.contains("struct AgentLoop"));
+    assert!(agent_loop.contains("mod control;"));
+    assert!(context.contains("mod compaction;"));
+    assert!(!session.contains("mod context;"));
+    assert!(source.join("agent_loop/control.rs").is_file());
+    assert!(source.join("context/compaction.rs").is_file());
+    assert!(!source.join("runtime.rs").exists());
+    assert!(!source.join("runtime").exists());
 }
