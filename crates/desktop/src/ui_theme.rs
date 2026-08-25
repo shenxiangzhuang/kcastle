@@ -54,6 +54,7 @@ pub(crate) mod metrics {
     pub(crate) const COLLAPSED_TITLEBAR_CONTROLS_WIDTH: f32 = 224.0;
     pub(crate) const COLLAPSED_CONTENT_LEADING: f32 = 240.0;
     pub(crate) const COMPOSER_RADIUS: f32 = 22.0;
+    pub(crate) const COMPOSER_CONTROLS_BOTTOM_INSET: f32 = 12.0;
     pub(crate) const WORKSPACE_ROW_HEIGHT: f32 = 34.0;
     pub(crate) const SESSION_ROW_HEIGHT: f32 = 32.0;
     pub(crate) const SIDEBAR_ICON_SLOT: f32 = 16.0;

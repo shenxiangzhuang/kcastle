@@ -198,7 +198,7 @@ impl DesktopApp {
                     .justify_between()
                     .gap_3()
                     .px_2()
-                    .pb_2()
+                    .pb(px(metrics::COMPOSER_CONTROLS_BOTTOM_INSET))
                     .child(
                         div()
                             .flex()
