@@ -3,20 +3,27 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub(crate) mod context;
+pub(crate) mod event;
+pub(crate) mod machine;
+pub(crate) mod store;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::session_event::RecordedEvent;
-use crate::session_machine::{PendingInput, SessionMachine, SessionMachineError};
-use crate::session_store::{
+use crate::session::event::RecordedEvent;
+use crate::session::machine::{PendingInput, SessionMachine, SessionMachineError};
+use crate::session::store::{
     ArchiveFilter, CreateStoredSession, LoadedSession, MetadataUpdate, SESSION_DATABASE_FILE,
     SessionErrorClass, SessionStore, SessionStoreError, StoredSessionMetadata, classify_io_error,
 };
-use crate::state::State;
+pub fn validate_events(events: &[RecordedEvent]) -> Result<(), SessionMachineError> {
+    SessionMachine::from_events(events).map(|_| ())
+}
 
 pub const DEFAULT_PROJECT_ID: &str = "default";
-pub const ARCHIVE_DIRECTORY: &str = "archive";
+const ARCHIVE_DIRECTORY: &str = "archive";
 const SESSION_LOCATOR_EXTENSION: &str = "session-v2";
 
 #[derive(Debug, Error)]
@@ -113,13 +120,9 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionCatalog {
     pub sessions: Vec<SessionInfo>,
-    pub search: HashMap<PathBuf, SessionSearchData>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionSearchData {
-    pub values: Arc<[String]>,
-    pub searchable: Arc<str>,
+    /// Raw canonical values extracted atomically with the journal revision. Consumers own search
+    /// normalization, snippets, and presentation summaries.
+    pub search_values: HashMap<PathBuf, Arc<[String]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,10 +136,6 @@ pub struct SessionSnapshot {
 impl SessionSnapshot {
     pub fn info(&self) -> &SessionInfo {
         &self.info
-    }
-
-    pub fn state(&self) -> &State {
-        self.machine.state()
     }
 
     pub fn events(&self) -> &[RecordedEvent] {
@@ -233,11 +232,25 @@ impl Session {
         config: SessionConfig,
         id: SessionId,
     ) -> Result<Self, SessionError> {
+        Self::create_named_in_project_with_id(directory, project_id, config, id, "Untitled session")
+            .await
+    }
+
+    pub async fn create_named_in_project_with_id(
+        directory: impl AsRef<Path>,
+        project_id: impl Into<String>,
+        config: SessionConfig,
+        id: SessionId,
+        title: impl Into<String>,
+    ) -> Result<Self, SessionError> {
         let directory = canonical_session_directory(directory.as_ref());
         let project_id = project_id.into();
-        tokio::task::spawn_blocking(move || Self::create_inner(directory, project_id, config, id))
-            .await
-            .map_err(|error| SessionError::Invalid(format!("session task failed: {error}")))?
+        let title = title.into();
+        tokio::task::spawn_blocking(move || {
+            Self::create_inner(directory, project_id, config, id, title)
+        })
+        .await
+        .map_err(|error| SessionError::Invalid(format!("session task failed: {error}")))?
     }
 
     fn create_inner(
@@ -245,12 +258,13 @@ impl Session {
         project_id: String,
         config: SessionConfig,
         id: SessionId,
+        title: String,
     ) -> Result<Self, SessionError> {
         let store = SessionStore::open_project(&directory)?;
         let metadata = store.create_session(CreateStoredSession {
             id: id.clone(),
             project_id,
-            title: "Untitled session".into(),
+            title,
             config,
             created_at_ms: now_millis(),
         })?;
@@ -428,13 +442,19 @@ impl Session {
         for entry in store.catalog(project_id, filter)? {
             let metadata = entry.metadata;
             let path = locator(&directory, &metadata.id, archived);
-            let values: Arc<[String]> = entry.search_values.into();
-            let searchable = values.join("\n").to_lowercase().into();
-            let search = SessionSearchData { values, searchable };
-            catalog.search.insert(path.clone(), search);
+            catalog
+                .search_values
+                .insert(path.clone(), entry.search_values.into());
             catalog.sessions.push(info_from_metadata(path, &metadata));
         }
         Ok(catalog)
+    }
+
+    pub fn archived_catalog_in_project(
+        directory: impl AsRef<Path>,
+        project_id: &str,
+    ) -> Result<SessionCatalog, SessionError> {
+        Self::catalog_in_project(directory.as_ref().join(ARCHIVE_DIRECTORY), project_id)
     }
 
     pub fn delete(session: &SessionInfo) -> Result<(), SessionError> {
@@ -469,10 +489,6 @@ impl Session {
 
     pub fn info(&self) -> &SessionInfo {
         &self.info
-    }
-
-    pub fn state(&self) -> &State {
-        self.machine.state()
     }
 
     pub fn events(&self) -> &[RecordedEvent] {
@@ -511,16 +527,6 @@ impl Session {
             store: self.store,
             config: self.config,
         }
-    }
-
-    pub async fn set_initial_title(&mut self, message: &str) -> Result<(), SessionError> {
-        if self.info.title != "Untitled session" {
-            return Ok(());
-        }
-        if let Some(title) = initial_title(message) {
-            self.rename(&title).await?;
-        }
-        Ok(())
     }
 
     pub async fn rename(&mut self, title: &str) -> Result<(), SessionError> {
@@ -624,19 +630,6 @@ fn millis_to_seconds(millis: i64) -> u64 {
     u64::try_from(millis.max(0)).unwrap_or_default() / 1_000
 }
 
-fn initial_title(message: &str) -> Option<String> {
-    let title = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = title.chars();
-    let title = chars.by_ref().take(48).collect::<String>();
-    (!title.is_empty()).then(|| {
-        if chars.next().is_some() {
-            format!("{title}…")
-        } else {
-            title
-        }
-    })
-}
-
 fn now_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -671,6 +664,25 @@ mod tests {
         assert_eq!(catalog.sessions, vec![session.info.clone()]);
         // A live Session intentionally owns the project's SQLite connection. Windows does not
         // allow its database or WAL files to be removed until that capability is released.
+        drop(session);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn caller_supplies_initial_session_title() {
+        let directory = temp_directory("named-session");
+        let session = Session::create_named_in_project_with_id(
+            &directory,
+            "project-a",
+            SessionConfig::default(),
+            SessionId::from_raw("named-session"),
+            "Desktop-owned title",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.info().title, "Desktop-owned title");
+
         drop(session);
         fs::remove_dir_all(directory).unwrap();
     }

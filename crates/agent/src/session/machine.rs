@@ -8,15 +8,15 @@ use im::{HashMap, HashSet, OrdMap};
 use thiserror::Error;
 
 use crate::session::SessionConfig;
-use crate::session_event::{
+#[cfg(test)]
+use crate::session::context::ContextEntry;
+use crate::session::context::ContextState;
+use crate::session::event::{
     AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin,
     RecordedEvent, RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SessionEvent,
     StepId, StepOutcome, ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus,
     TurnEndReason, TurnId, TxId,
 };
-use crate::state::State;
-#[cfg(test)]
-use crate::state::StateEntry;
 
 /// Increment when an existing serialized event sequence can no longer be interpreted with the
 /// same validity and state-transition semantics.
@@ -43,10 +43,6 @@ impl PlannedBatch {
         &self.tx_id
     }
 
-    pub fn expected_seq(&self) -> u64 {
-        self.expected_seq
-    }
-
     pub fn events(&self) -> &[RecordedEvent] {
         &self.events
     }
@@ -69,7 +65,7 @@ pub enum SessionMachineError {
     #[error("invalid session event: {0}")]
     Invalid(String),
     #[error("could not project event into model state: {0}")]
-    State(String),
+    ContextState(String),
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +158,7 @@ struct CompactionRecord {
 #[derive(Debug, Clone)]
 pub struct SessionMachine {
     next_seq: u64,
-    state: State,
+    state: ContextState,
     inputs: HashMap<InputId, InputRecord>,
     next_input_ordinal: u64,
     pending_input_ordinals: HashMap<InputId, u64>,
@@ -193,7 +189,7 @@ impl Default for SessionMachine {
     fn default() -> Self {
         Self {
             next_seq: 0,
-            state: State::default(),
+            state: ContextState::default(),
             inputs: HashMap::new(),
             next_input_ordinal: 0,
             pending_input_ordinals: HashMap::new(),
@@ -238,11 +234,12 @@ impl SessionMachine {
         Ok(machine)
     }
 
+    #[cfg(test)]
     pub fn next_seq(&self) -> u64 {
         self.next_seq
     }
 
-    pub fn state(&self) -> &State {
+    pub fn state(&self) -> &ContextState {
         &self.state
     }
 
@@ -277,30 +274,15 @@ impl SessionMachine {
         self.active_step.as_ref()
     }
 
-    /// The request currently owned by the active step, if it has not reached a terminal event.
-    /// Runtimes use this to include `ModelRequestFailed` in the same terminal transaction as the
-    /// enclosing step, turn, and run.
-    pub fn active_request(&self) -> Option<&RequestId> {
-        self.active_step
-            .as_ref()
-            .and_then(|step_id| self.steps.get(step_id))
-            .and_then(|step| step.current_request.as_ref())
-    }
-
     pub fn active_compaction(&self) -> Option<&CompactionId> {
         self.active_compaction.as_ref()
     }
 
+    #[cfg(test)]
     pub fn step_first_token(&self, step_id: &StepId) -> Option<&EventTime> {
         self.steps
             .get(step_id)
             .and_then(|step| step.first_token.as_ref())
-    }
-
-    pub fn request_first_token(&self, request_id: &RequestId) -> Option<&EventTime> {
-        self.requests
-            .get(request_id)
-            .and_then(|request| request.first_token.as_ref())
     }
 
     pub fn unresolved_tool_calls(&self) -> Vec<CallId> {
@@ -795,7 +777,7 @@ impl SessionMachine {
                 validate_attached_input(input_id, input, items)?;
                 self.state
                     .append_items(items.clone(), None)
-                    .map_err(SessionMachineError::State)?;
+                    .map_err(SessionMachineError::ContextState)?;
                 self.inputs
                     .get_mut(input_id)
                     .expect("validated input is indexed")
@@ -940,7 +922,7 @@ impl SessionMachine {
                 }
                 self.state
                     .append_items(items.clone(), Some(response.to_provider()))
-                    .map_err(SessionMachineError::State)?;
+                    .map_err(SessionMachineError::ContextState)?;
                 self.clear_current_request(&step_id, request_id)?;
                 self.steps
                     .get_mut(&step_id)
@@ -1091,7 +1073,7 @@ impl SessionMachine {
                 };
                 self.state
                     .append_items(vec![item.clone()], None)
-                    .map_err(SessionMachineError::State)?;
+                    .map_err(SessionMachineError::ContextState)?;
                 self.tools
                     .get_mut(call_id)
                     .expect("validated tool is indexed")
@@ -1176,7 +1158,7 @@ impl SessionMachine {
                             compaction.tokens_before,
                             response.as_ref().map(ResponseInfo::to_provider),
                         )
-                        .map_err(SessionMachineError::State)?;
+                        .map_err(SessionMachineError::ContextState)?;
                 }
                 compaction.finished = true;
                 self.active_compaction = None;
@@ -1351,7 +1333,7 @@ impl SessionMachine {
 #[derive(Debug, Clone, PartialEq)]
 struct MachineSnapshot {
     next_seq: u64,
-    entries: Vec<StateEntry>,
+    entries: Vec<ContextEntry>,
     pending: Vec<PendingInput>,
     active_run: Option<RunId>,
     active_turn: Option<TurnId>,

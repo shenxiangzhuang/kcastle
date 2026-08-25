@@ -38,10 +38,6 @@ build:
 qa: fmt-check clippy test build
     git diff --check
 
-# Run the terminal client; pass extra arguments after `--`.
-tui *args:
-    cargo run -p kcastle -- {{args}}
-
 # Build and package the release desktop binary as a signed macOS app.
 macos-app:
     scripts/package-macos-app release

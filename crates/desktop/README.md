@@ -6,19 +6,16 @@ macOS window behavior.
 
 ## Run on macOS
 
-Set at least one provider key, then launch the bundled application:
+Launch the bundled application:
 
 ```sh
-export OPENAI_API_KEY=...
-# or: export DEEPSEEK_API_KEY=...
-
 just macos-run
 ```
 
 Use `just macos-run-debug` for a debug build. These recipes create and sign
 `target/Kcastle.app` before launching it. A bare `cargo run -p kcastle-desktop` starts an
 unbundled executable and does not reproduce all AppKit behavior, especially fullscreen titlebar
-reveal.
+reveal. Configure at least one provider in **Settings → Models** before starting a session.
 
 Desktop preferences are stored in `~/.kcastle/settings.json`. The Models tab follows the DSH
 provider-card flow: configured providers stay editable, while Add provider lets you choose OpenAI

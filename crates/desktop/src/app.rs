@@ -1,6 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,13 +12,20 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, InputState, TextareaState};
 use gpui_component::{Theme, ThemeMode};
+use kcastle_agent::{Agent, Model, Session, SessionConfig, SessionError, SessionId, SessionInfo};
 #[cfg(test)]
-use kcastle_agent::SessionStoreError;
-use kcastle_agent::{
-    ARCHIVE_DIRECTORY, Agent, Model, Session, SessionCatalog, SessionConfig, SessionError,
-    SessionErrorClass, SessionId, SessionInfo,
-};
+use kcastle_agent::{SessionCatalog, SessionStoreError};
 
+use crate::application::session_catalog::{
+    SessionCatalogCache, SessionSearchDocument, apply_project_catalog_result,
+    load_project_archived_sessions, load_session_catalog_cache, matching_search_snippet,
+    remove_project_catalog_members, remove_session_catalog_entry, should_clear_catalog_after_error,
+};
+#[cfg(test)]
+use crate::application::session_catalog::{
+    clear_project_catalog_cache, load_session_catalog_cache_with, session_search_document,
+    truncate_chars,
+};
 use crate::dialogs::Modal;
 use crate::domain::session_document::SessionDocument;
 use crate::domain::timeline::{AxisId, AxisRange, DomainRange};
@@ -166,13 +174,6 @@ impl Default for SessionViewState {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SessionSearchDocument {
-    pub(crate) searchable: Arc<str>,
-    pub(crate) summary: String,
-    pub(crate) snippets: Arc<[String]>,
-}
-
 pub(crate) struct DesktopStartup {
     pub(crate) agent: Agent,
     pub(crate) models: Vec<ConfiguredModel>,
@@ -190,13 +191,6 @@ struct ProjectSessionRuntimes {
 type RuntimeKey = (ProjectId, SessionId);
 type OpenSessionKey = (ProjectId, PathBuf);
 
-#[derive(Default)]
-struct SessionCatalogCache {
-    project_sessions: HashMap<PathBuf, Vec<SessionInfo>>,
-    session_search_documents: HashMap<PathBuf, SessionSearchDocument>,
-    session_catalog_indices: HashMap<RuntimeKey, usize>,
-}
-
 const MAX_CACHED_TERMINAL_RUNTIMES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,10 +203,6 @@ enum SessionOpenCompletion {
 
 fn invalid_session_open_error(error: &SessionError) -> bool {
     should_clear_catalog_after_error(error)
-}
-
-fn should_clear_catalog_after_error(error: &SessionError) -> bool {
-    error.classification() == SessionErrorClass::DeterministicInvalid
 }
 
 fn session_open_error_notice(error: &SessionError) -> Option<String> {
@@ -2563,8 +2553,7 @@ impl DesktopApp {
             return;
         };
         let sessions_dir = project.sessions_dir.clone();
-        let directory = sessions_dir.join(ARCHIVE_DIRECTORY);
-        match Session::catalog_in_project(&directory, project.id.as_str()) {
+        match Session::archived_catalog_in_project(&sessions_dir, project.id.as_str()) {
             Ok(catalog) => {
                 self.project_archived_sessions
                     .insert(sessions_dir.clone(), catalog.sessions);
@@ -2975,213 +2964,6 @@ fn presentation_namespace(project_id: &ProjectId, session_id: &SessionId) -> Str
     format!("{}:{project_id}{}", project_id.len(), session_id.as_str())
 }
 
-fn load_session_catalog_cache(project_store: &ProjectStore) -> SessionCatalogCache {
-    load_session_catalog_cache_with(project_store, |directory, project_id| {
-        Session::catalog_in_project(directory, project_id)
-    })
-}
-
-fn load_session_catalog_cache_with(
-    project_store: &ProjectStore,
-    mut load: impl FnMut(&Path, &str) -> Result<SessionCatalog, SessionError>,
-) -> SessionCatalogCache {
-    let project_count = project_store.projects().len();
-    let mut cache = SessionCatalogCache {
-        project_sessions: HashMap::with_capacity(project_count),
-        session_search_documents: HashMap::new(),
-        session_catalog_indices: HashMap::new(),
-    };
-    for project in project_store.projects() {
-        cache
-            .project_sessions
-            .entry(project.sessions_dir.clone())
-            .or_default();
-        apply_project_catalog_result(
-            &project.id,
-            &project.sessions_dir,
-            load(&project.sessions_dir, project.id.as_str()),
-            &mut cache.project_sessions,
-            &mut cache.session_search_documents,
-            &mut cache.session_catalog_indices,
-        );
-    }
-    cache
-}
-
-fn session_search_document(values: Arc<[String]>, searchable: Arc<str>) -> SessionSearchDocument {
-    let summary = values
-        .iter()
-        .find(|value| value.chars().count() >= 4 && !value.starts_with("resp_"))
-        .map(|value| truncate_chars(value, 88))
-        .unwrap_or_default();
-    SessionSearchDocument {
-        searchable,
-        summary,
-        snippets: values,
-    }
-}
-
-fn remove_project_catalog_members(
-    project_id: &ProjectId,
-    sessions_dir: &Path,
-    project_sessions: &HashMap<PathBuf, Vec<SessionInfo>>,
-    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
-    catalog_indices: &mut HashMap<RuntimeKey, usize>,
-) {
-    let Some(sessions) = project_sessions.get(sessions_dir) else {
-        return;
-    };
-    for session in sessions {
-        search_documents.remove(&session.path);
-        catalog_indices.remove(&(project_id.clone(), session.id.clone()));
-    }
-}
-
-fn clear_project_catalog_cache(
-    project_id: &ProjectId,
-    sessions_dir: &Path,
-    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
-    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
-    catalog_indices: &mut HashMap<RuntimeKey, usize>,
-) {
-    remove_project_catalog_members(
-        project_id,
-        sessions_dir,
-        project_sessions,
-        search_documents,
-        catalog_indices,
-    );
-    project_sessions.insert(sessions_dir.to_owned(), Vec::new());
-}
-
-fn apply_project_catalog_result(
-    project_id: &ProjectId,
-    sessions_dir: &Path,
-    result: Result<SessionCatalog, SessionError>,
-    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
-    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
-    catalog_indices: &mut HashMap<RuntimeKey, usize>,
-) -> bool {
-    match result {
-        Ok(catalog) => {
-            replace_project_catalog_cache(
-                project_id,
-                sessions_dir,
-                catalog,
-                project_sessions,
-                search_documents,
-                catalog_indices,
-            );
-            true
-        }
-        Err(error) if should_clear_catalog_after_error(&error) => {
-            clear_project_catalog_cache(
-                project_id,
-                sessions_dir,
-                project_sessions,
-                search_documents,
-                catalog_indices,
-            );
-            false
-        }
-        Err(_) => false,
-    }
-}
-
-fn replace_project_catalog_cache(
-    project_id: &ProjectId,
-    sessions_dir: &Path,
-    catalog: SessionCatalog,
-    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
-    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
-    catalog_indices: &mut HashMap<RuntimeKey, usize>,
-) {
-    remove_project_catalog_members(
-        project_id,
-        sessions_dir,
-        project_sessions,
-        search_documents,
-        catalog_indices,
-    );
-    let SessionCatalog { sessions, search } = catalog;
-    search_documents.extend(search.into_iter().map(|(path, search)| {
-        (
-            path,
-            session_search_document(search.values, search.searchable),
-        )
-    }));
-    project_sessions.insert(sessions_dir.to_owned(), sessions);
-    if let Some(sessions) = project_sessions.get(sessions_dir) {
-        catalog_indices.extend(
-            sessions
-                .iter()
-                .enumerate()
-                .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
-        );
-    }
-}
-
-fn remove_session_catalog_entry(
-    project_id: &ProjectId,
-    sessions_dir: &Path,
-    path: &Path,
-    project_sessions: &mut HashMap<PathBuf, Vec<SessionInfo>>,
-    search_documents: &mut HashMap<PathBuf, SessionSearchDocument>,
-    catalog_indices: &mut HashMap<RuntimeKey, usize>,
-) -> Option<SessionId> {
-    search_documents.remove(path);
-    let sessions = project_sessions.get_mut(sessions_dir)?;
-    let index = sessions
-        .iter()
-        .position(|session| same_path(&session.path, path))?;
-    let removed = sessions.remove(index);
-
-    catalog_indices.remove(&(project_id.clone(), removed.id.clone()));
-    catalog_indices.extend(
-        sessions
-            .iter()
-            .enumerate()
-            .map(|(index, session)| ((project_id.clone(), session.id.clone()), index)),
-    );
-    Some(removed.id)
-}
-
-fn load_project_archived_sessions(
-    project_store: &ProjectStore,
-) -> HashMap<PathBuf, Vec<SessionInfo>> {
-    let mut sessions = HashMap::new();
-    for project in project_store.projects() {
-        let directory = project.sessions_dir.join(ARCHIVE_DIRECTORY);
-        match Session::catalog_in_project(&directory, project.id.as_str()) {
-            Ok(catalog) => {
-                sessions.insert(project.sessions_dir.clone(), catalog.sessions);
-            }
-            Err(_) => {
-                sessions.insert(project.sessions_dir.clone(), Vec::new());
-            }
-        }
-    }
-    sessions
-}
-
-fn truncate_chars(value: &str, limit: usize) -> String {
-    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = compact.chars();
-    let text = chars.by_ref().take(limit).collect::<String>();
-    if chars.next().is_some() {
-        format!("{}…", text.trim_end())
-    } else {
-        text
-    }
-}
-
-fn matching_search_snippet(values: &[String], query: &str) -> Option<String> {
-    values
-        .iter()
-        .find(|value| value.to_lowercase().contains(query))
-        .map(|value| truncate_chars(value, 88))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3483,7 +3265,7 @@ mod tests {
             let mut sessions = HashMap::from([(sessions_dir.clone(), vec![session.clone()])]);
             let mut documents = HashMap::from([(
                 path.clone(),
-                session_search_document(Arc::from(["retained".into()]), Arc::from("retained")),
+                session_search_document(Arc::from(["retained".into()])),
             )]);
             let mut indices = HashMap::from([((project_id.clone(), session_id.clone()), 0)]);
 
@@ -3527,7 +3309,7 @@ mod tests {
                 *reads.entry(project_id.to_owned()).or_default() += 1;
                 let mut catalog = SessionCatalog {
                     sessions: Vec::with_capacity(SESSIONS_PER_PROJECT),
-                    search: HashMap::with_capacity(SESSIONS_PER_PROJECT),
+                    search_values: HashMap::with_capacity(SESSIONS_PER_PROJECT),
                 };
                 for index in 0..SESSIONS_PER_PROJECT {
                     let raw_id = format!("{project_id}-{index}");
@@ -3542,13 +3324,9 @@ mod tests {
                         created_at: index as u64,
                         updated_at: index as u64,
                     });
-                    catalog.search.insert(
-                        path,
-                        kcastle_agent::SessionSearchData {
-                            values: Arc::from([title.clone()]),
-                            searchable: Arc::from(title.to_lowercase()),
-                        },
-                    );
+                    catalog
+                        .search_values
+                        .insert(path, Arc::from([title.clone()]));
                 }
                 Ok(catalog)
             },
@@ -3615,8 +3393,7 @@ mod tests {
                 )],
             ),
         ]);
-        let document =
-            || session_search_document(Arc::from(["needle".into()]), Arc::from("needle"));
+        let document = || session_search_document(Arc::from(["needle".into()]));
         let mut documents = HashMap::from([
             (invalid_path.clone(), document()),
             (other_path.clone(), document()),
@@ -3714,7 +3491,7 @@ mod tests {
                     .push(invalid.clone());
                 this.session_search_documents.insert(
                     invalid_path.clone(),
-                    session_search_document(Arc::from(["stale".into()]), Arc::from("stale")),
+                    session_search_document(Arc::from(["stale".into()])),
                 );
                 this.session_catalog_indices
                     .insert((project_b.id.clone(), invalid_id.clone()), 0);
@@ -3763,11 +3540,11 @@ mod tests {
         let mut documents = HashMap::from([
             (
                 first_path.clone(),
-                session_search_document(Arc::from(["first".into()]), Arc::from("first")),
+                session_search_document(Arc::from(["first".into()])),
             ),
             (
                 second_path.clone(),
-                session_search_document(Arc::from(["second".into()]), Arc::from("second")),
+                session_search_document(Arc::from(["second".into()])),
             ),
         ]);
         let mut indices = HashMap::from([
@@ -3935,7 +3712,7 @@ mod tests {
                     .insert((project.id.clone(), invalid.id.clone()), 0);
                 this.session_search_documents.insert(
                     invalid.path.clone(),
-                    session_search_document(Arc::from(["invalid".into()]), Arc::from("invalid")),
+                    session_search_document(Arc::from(["invalid".into()])),
                 );
                 let generation = this.begin_runtime_selection_intent();
                 let key = (project.id.clone(), invalid.path.clone());
@@ -4025,10 +3802,6 @@ mod tests {
             assert_eq!(app.project_archived_sessions[&sessions_dir].len(), 1);
             app.project_archived_sessions[&sessions_dir][0].clone()
         });
-        assert_eq!(
-            archived.path.parent(),
-            Some(sessions_dir.join(ARCHIVE_DIRECTORY).as_path())
-        );
         assert!(!archived.path.exists());
 
         cx.update(|_window, app| {

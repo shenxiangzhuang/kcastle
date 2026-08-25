@@ -9,6 +9,7 @@ use kcastle_agent::{
     SessionInfo,
 };
 
+use crate::agent_config::initial_session_title;
 use crate::domain::session_document::SessionDocument;
 use crate::domain::{ApprovalState, RunId, SessionView};
 use crate::settings::EnterBehavior;
@@ -626,11 +627,13 @@ impl SessionRuntime {
         let session_id = self.session.id.clone();
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = Session::create_in_project_with_id(
+            let title = initial_session_title(&input).unwrap_or_else(|| "Untitled session".into());
+            let result = Session::create_named_in_project_with_id(
                 sessions_dir,
                 project_id,
                 runtime_config,
                 session_id,
+                title,
             )
             .await;
             let _ = cx.update(|window, app| {
@@ -833,10 +836,6 @@ impl SessionRuntime {
                 self.approvals.clear();
                 self.lifecycle.observe_terminal(RunTerminal::Failed(error));
             }
-            AgentEvent::RunStarted(_)
-            | AgentEvent::ModelStarted(_)
-            | AgentEvent::CompactionStarted { .. }
-            | AgentEvent::CompactionFinished { .. } => {}
         }
     }
 

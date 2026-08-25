@@ -8,11 +8,9 @@ use gpui::{
     WindowOptions, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
-use kcastle_agent::{
-    Agent, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID, Model, OPENAI_MODEL_PRESETS,
-    OPENAI_PROVIDER_ID, Session,
-};
+use kcastle_agent::{Agent, Session};
 
+mod agent_config;
 mod app;
 mod application;
 #[cfg(test)]
@@ -34,13 +32,15 @@ mod ui;
 mod ui_theme;
 mod updater;
 
+use agent_config::{
+    DEEPSEEK_PROVIDER_ID, INSTRUCTIONS, OPENAI_PROVIDER_ID, build_model, default_provider_profile,
+};
 use app::{ConfiguredModel, DesktopApp, DesktopStartup, active_model_index};
 use assets::DesktopAssets;
 use project::ProjectStore;
-use settings::{Appearance, ProviderModel, ProviderProfile, SettingsStore};
+use settings::{Appearance, ProviderProfile, SettingsStore};
 
 pub(crate) const APP_NAME: &str = "Kcastle";
-pub(crate) const INSTRUCTIONS: &str = "You are Kcastle, a concise coding agent. Use the shell tool when it helps. Inspect before editing, report tool errors honestly, and stop when the task is complete.";
 const DATA_ROOT_ENV: &str = "KCASTLE_DATA_DIR";
 
 fn init_ui(cx: &mut App) {
@@ -166,50 +166,6 @@ fn models_from_profiles(profiles: &[ProviderProfile]) -> Vec<ConfiguredModel> {
     models
 }
 
-pub(crate) fn default_provider_profile(provider_id: &str) -> ProviderProfile {
-    match provider_id {
-        DEEPSEEK_PROVIDER_ID => ProviderProfile::new(
-            DEEPSEEK_PROVIDER_ID,
-            "DeepSeek",
-            "https://api.deepseek.com",
-            DEEPSEEK_MODEL_PRESETS
-                .iter()
-                .map(|preset| {
-                    ProviderModel::new(preset.id, preset.display_name, preset.context_window, None)
-                })
-                .collect(),
-        ),
-        OPENAI_PROVIDER_ID => ProviderProfile::new(
-            OPENAI_PROVIDER_ID,
-            "OpenAI",
-            "https://api.openai.com/v1",
-            OPENAI_MODEL_PRESETS
-                .iter()
-                .map(|preset| {
-                    ProviderModel::new(preset.id, preset.display_name, preset.context_window, None)
-                })
-                .collect(),
-        ),
-        _ => unreachable!("unsupported provider: {provider_id}"),
-    }
-}
-
-pub(crate) fn build_model(
-    provider: &ProviderProfile,
-    profile: &ProviderModel,
-    api_key: String,
-) -> Model {
-    Model::new(
-        provider.display_name.clone(),
-        api_key,
-        provider.api_base.clone(),
-        profile.model_id.clone(),
-        profile.context_window,
-    )
-    .with_max_output_tokens(profile.max_output_tokens)
-    .with_provider_reasoning(&provider.provider_id)
-}
-
 fn data_root() -> Result<PathBuf, Box<dyn Error>> {
     resolve_data_root(
         env::var_os(DATA_ROOT_ENV),
@@ -243,7 +199,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
+    use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
     use super::{desktop_startup, models_from_profiles, resolve_data_root};
 

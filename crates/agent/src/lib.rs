@@ -1,35 +1,25 @@
-mod agent;
-mod compaction;
+mod model;
+mod runtime;
 mod session;
-mod session_event;
-mod session_machine;
-mod session_store;
-mod state;
-mod tool;
+mod tools;
 
-pub use async_openai::types::responses::{
-    EasyInputMessage, FunctionCallOutputItemParam, InputItem, Item, ResponseUsage,
-};
+pub use async_openai::types::responses::{EasyInputMessage, InputItem};
 
-pub use agent::{
-    ActiveAgent, Agent, AgentError, AgentEvent, DEEPSEEK_MODEL_PRESETS, DEEPSEEK_PROVIDER_ID,
-    Model, ModelPreset, OPENAI_MODEL_PRESETS, OPENAI_PROVIDER_ID, ReasoningEffort, RunControl,
-    RunSummary,
+pub use model::{Model, ReasoningEffort};
+pub use runtime::compaction::CompactionConfig;
+pub use runtime::{ActiveAgent, Agent, AgentError, AgentEvent, RunControl, RunSummary};
+pub use session::event::{
+    AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
+    RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SESSION_FORMAT_VERSION,
+    SessionEvent, StepId, StepOutcome, TokenUsage, ToolAuthorizationDecision, ToolExecutionOutcome,
+    ToolResultStatus, TurnEndReason, TurnId, TxId,
 };
-pub use compaction::CompactionConfig;
-pub use session::{
-    ARCHIVE_DIRECTORY, DEFAULT_PROJECT_ID, Session, SessionCatalog, SessionConfig, SessionError,
-    SessionId, SessionInfo, SessionSearchData, SessionSnapshot,
-};
-pub use session_event::{
-    AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin,
-    RecordedEvent, RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome,
-    SESSION_FORMAT_VERSION, SessionEvent, StepId, StepOutcome, TokenUsage,
-    ToolAuthorizationDecision, ToolExecutionOutcome, ToolResultStatus, TurnEndReason, TurnId, TxId,
-};
-pub use session_machine::{PendingInput, PlannedBatch, SessionMachine, SessionMachineError};
-pub use session_store::{
+pub use session::machine::{PendingInput, SessionMachineError};
+pub use session::store::{
     CommitReceipt, SESSION_DATABASE_FILE, SessionErrorClass, SessionStoreError,
 };
-pub use state::{ResponseMetadata, State, StateEntry, TranscriptItem};
-pub use tool::{AgentTool, Env, ShellTool, ToolResult};
+pub use session::{
+    DEFAULT_PROJECT_ID, Session, SessionCatalog, SessionConfig, SessionError, SessionId,
+    SessionInfo, SessionSnapshot, validate_events,
+};
+pub use tools::{AgentTool, Env, ShellTool, ToolResult};

@@ -4,272 +4,38 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use async_openai::Client;
-use async_openai::config::OpenAIConfig;
-use async_openai::error::OpenAIError;
-pub use async_openai::types::responses::ReasoningEffort;
+pub(crate) mod compaction;
+mod control;
+
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputMessage, FunctionCallOutputItemParam, FunctionToolCall, InputItem,
-    Item, OutputItem, Reasoning, Response, ResponseStreamEvent, ResponseUsage, Tool,
+    Item, OutputItem, Reasoning, Response, ResponseStreamEvent, Tool,
 };
 use futures_util::StreamExt;
-use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use crate::compaction::{
+use crate::model::{Model, ReasoningEffort};
+use crate::runtime::compaction::{
     CompactionConfig, SUMMARY_INSTRUCTIONS, context_tokens, prepare_compaction,
 };
-use crate::session::{Session, SessionConfig, SessionError, SessionInfo, SessionParts};
-use crate::session_event::{
+use crate::session::event::{
     AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin, RequestId,
     ResponseInfo, RunId, RunOutcome, SessionEvent, StepId, StepOutcome, ToolAuthorizationDecision,
     ToolExecutionOutcome, ToolResultStatus, TurnEndReason, TurnId, TxId,
 };
-use crate::session_machine::{PlannedBatch, SessionMachine, SessionMachineError};
-use crate::session_store::{
+use crate::session::machine::{PlannedBatch, SessionMachine};
+use crate::session::store::{
     AppendTx, CommitReceipt, MetadataUpdate, SessionStore, SessionStoreError, SessionWriterPermit,
 };
-use crate::state::TranscriptItem;
-use crate::tool::{AgentTool, Env, ShellTool, ToolResult};
+use crate::session::{Session, SessionConfig, SessionError, SessionInfo, SessionParts};
+use crate::tools::{AgentTool, Env, ShellTool, ToolResult};
+pub use control::{ActiveAgent, AgentError, AgentEvent, RunControl, RunSummary};
+use control::{ApprovalCommand, InputCommand, RunChannels};
 
 const DEFAULT_MAX_TURNS: usize = 100;
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ModelPreset {
-    pub id: &'static str,
-    pub display_name: &'static str,
-    pub context_window: usize,
-}
-
-pub const DEEPSEEK_PROVIDER_ID: &str = "deepseek-official";
-pub const OPENAI_PROVIDER_ID: &str = "openai";
-
-pub const DEEPSEEK_MODEL_PRESETS: &[ModelPreset] = &[
-    ModelPreset {
-        id: "deepseek-v4-flash",
-        display_name: "DeepSeek-V4-Flash",
-        context_window: 1_000_000,
-    },
-    ModelPreset {
-        id: "deepseek-v4-pro",
-        display_name: "DeepSeek-V4-Pro",
-        context_window: 1_000_000,
-    },
-];
-
-pub const OPENAI_MODEL_PRESETS: &[ModelPreset] = &[
-    ModelPreset {
-        id: "gpt-5.6-sol",
-        display_name: "GPT-5.6 Sol",
-        context_window: 1_050_000,
-    },
-    ModelPreset {
-        id: "gpt-5.6-terra",
-        display_name: "GPT-5.6 Terra",
-        context_window: 1_050_000,
-    },
-    ModelPreset {
-        id: "gpt-5.6-luna",
-        display_name: "GPT-5.6 Luna",
-        context_window: 1_050_000,
-    },
-];
-
-const DEEPSEEK_REASONING_EFFORTS: &[ReasoningEffort] = &[
-    ReasoningEffort::None,
-    ReasoningEffort::Low,
-    ReasoningEffort::High,
-];
-const OPENAI_REASONING_EFFORTS: &[ReasoningEffort] = &[
-    ReasoningEffort::None,
-    ReasoningEffort::Low,
-    ReasoningEffort::Medium,
-    ReasoningEffort::High,
-    ReasoningEffort::Xhigh,
-];
-
-#[derive(Clone)]
-pub struct Model {
-    name: String,
-    api_key: String,
-    api_base: String,
-    client: Client<OpenAIConfig>,
-    model: String,
-    context_window: usize,
-    max_output_tokens: Option<u32>,
-    reasoning_efforts: &'static [ReasoningEffort],
-    reasoning_effort: Option<ReasoningEffort>,
-}
-
-impl Model {
-    pub fn new(
-        name: impl Into<String>,
-        api_key: impl Into<String>,
-        api_base: impl Into<String>,
-        model: impl Into<String>,
-        context_window: usize,
-    ) -> Self {
-        let api_key = api_key.into();
-        let api_base = api_base.into();
-        let config = OpenAIConfig::new()
-            .with_api_key(api_key.clone())
-            .with_api_base(api_base.clone());
-        Self {
-            name: name.into(),
-            api_key,
-            api_base,
-            client: Client::with_config(config),
-            model: model.into(),
-            context_window,
-            max_output_tokens: None,
-            reasoning_efforts: &[],
-            reasoning_effort: None,
-        }
-    }
-
-    pub fn with_reasoning(
-        mut self,
-        reasoning_efforts: &'static [ReasoningEffort],
-        reasoning_effort: ReasoningEffort,
-    ) -> Self {
-        assert!(reasoning_efforts.contains(&reasoning_effort));
-        self.reasoning_efforts = reasoning_efforts;
-        self.reasoning_effort = Some(reasoning_effort);
-        self
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub fn api_base(&self) -> &str {
-        &self.api_base
-    }
-
-    pub fn has_api_key(&self) -> bool {
-        !self.api_key.trim().is_empty()
-    }
-
-    pub fn context_window(&self) -> usize {
-        self.context_window
-    }
-
-    pub fn max_output_tokens(&self) -> Option<u32> {
-        self.max_output_tokens
-    }
-
-    pub fn with_max_output_tokens(mut self, max_output_tokens: Option<u32>) -> Self {
-        self.max_output_tokens = max_output_tokens;
-        self
-    }
-
-    pub fn with_provider_reasoning(self, provider_id: &str) -> Self {
-        match provider_id {
-            DEEPSEEK_PROVIDER_ID | "deepseek" => {
-                self.with_reasoning(DEEPSEEK_REASONING_EFFORTS, ReasoningEffort::High)
-            }
-            OPENAI_PROVIDER_ID => {
-                self.with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium)
-            }
-            _ => self,
-        }
-    }
-
-    pub fn reasoning_efforts(&self) -> &'static [ReasoningEffort] {
-        self.reasoning_efforts
-    }
-
-    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
-        self.reasoning_effort.as_ref()
-    }
-
-    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        assert!(self.reasoning_efforts.contains(&reasoning_effort));
-        self.reasoning_effort = Some(reasoning_effort);
-    }
-
-    pub fn reconfigured(
-        &self,
-        name: impl Into<String>,
-        api_key: Option<String>,
-        api_base: impl Into<String>,
-        model: impl Into<String>,
-        context_window: usize,
-    ) -> Self {
-        let mut configured = Self::new(
-            name,
-            api_key.unwrap_or_else(|| self.api_key.clone()),
-            api_base,
-            model,
-            context_window,
-        );
-        configured.reasoning_efforts = self.reasoning_efforts;
-        configured.reasoning_effort = self.reasoning_effort.clone();
-        configured.max_output_tokens = self.max_output_tokens;
-        configured
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum AgentError {
-    #[error("agent input must not be empty")]
-    EmptyInput,
-    #[error("agent exceeded {0} model turns")]
-    MaxTurns(usize),
-    #[error("Responses stream ended without a completed response")]
-    MissingResponse,
-    #[error("model response failed: {0}")]
-    ModelResponse(String),
-    #[error("not enough history to compact")]
-    NothingToCompact,
-    #[error("agent operation was aborted")]
-    Aborted,
-    #[error("session machine failed: {0}")]
-    Machine(#[from] SessionMachineError),
-    #[error(transparent)]
-    OpenAI(#[from] OpenAIError),
-    #[error(transparent)]
-    Session(#[from] SessionError),
-    #[error(transparent)]
-    Store(#[from] SessionStoreError),
-    #[error("agent task failed: {0}")]
-    Task(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct RunSummary {
-    pub output: String,
-    pub response_id: String,
-    pub usage: Option<ResponseUsage>,
-}
-
-/// Durable UI content is published exclusively through `SessionCommitted`.
-/// The remaining variants are transient controls or completion notices.
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    SessionCommitted(CommitReceipt),
-    RunStarted(String),
-    ModelStarted(usize),
-    ApprovalRequired(FunctionToolCall),
-    CompactionStarted {
-        tokens_before: usize,
-    },
-    CompactionFinished {
-        tokens_before: usize,
-        first_kept_id: u64,
-        summary: String,
-    },
-    RunFinished(RunSummary),
-    RunAborted,
-    RunFailed(String),
-}
 
 type EventSink = mpsc::UnboundedSender<AgentEvent>;
 
@@ -357,17 +123,6 @@ impl Agent {
     /// Durable configuration loaded into the session snapshot currently owned by this agent.
     pub fn session_config(&self) -> &SessionConfig {
         &self.session_config
-    }
-
-    pub fn transcript(&self) -> Vec<TranscriptItem> {
-        self.machine.state().transcript()
-    }
-
-    pub fn latest_usage(&self) -> Option<&ResponseUsage> {
-        self.machine
-            .state()
-            .latest_response()
-            .and_then(|response| response.usage.as_ref())
     }
 
     pub fn set_model(&mut self, model: Model) {
@@ -565,9 +320,6 @@ impl Agent {
         if let Err(error) = self.commit_now(initial, &events).await {
             return Err(Box::new((self, error)));
         }
-        self.set_initial_title_best_effort(&input).await;
-        publish(&events, AgentEvent::RunStarted(input));
-
         let result = self
             .run_loop(run_id, turn_id, step_id, &mut channels, &events)
             .await;
@@ -595,7 +347,6 @@ impl Agent {
             }
             self.compact_once(false, None, channels, events).await?;
             request_count += 1;
-            publish(events, AgentEvent::ModelStarted(request_count));
 
             let response = self.request_model(&step_id, channels, events).await?;
             let calls = response
@@ -1006,7 +757,7 @@ impl Agent {
                 usage: response
                     .usage
                     .as_ref()
-                    .map(crate::session_event::TokenUsage::from_provider),
+                    .map(crate::session::event::TokenUsage::from_provider),
             },
         });
         completed.extend(response.output.iter().filter_map(|item| match item {
@@ -1429,7 +1180,7 @@ impl Agent {
         }
     }
 
-    fn pending_input(&self, origin: InputOrigin) -> Option<crate::session_machine::PendingInput> {
+    fn pending_input(&self, origin: InputOrigin) -> Option<crate::session::machine::PendingInput> {
         self.machine
             .pending_inputs()
             .into_iter()
@@ -1674,18 +1425,6 @@ impl Agent {
         Ok(())
     }
 
-    async fn set_initial_title_best_effort(&mut self, input: &str) {
-        if self.info.title != "Untitled session" {
-            return;
-        }
-        let title = input.split_whitespace().collect::<Vec<_>>().join(" ");
-        let title = title.chars().take(48).collect::<String>();
-        if title.is_empty() {
-            return;
-        }
-        let _ = self.rename_session(&title).await;
-    }
-
     async fn compact_once(
         &mut self,
         force: bool,
@@ -1730,8 +1469,6 @@ impl Agent {
             events,
         )
         .await?;
-        publish(events, AgentEvent::CompactionStarted { tokens_before });
-
         let mut builder = CreateResponseArgs::default();
         builder
             .model(self.model.model.clone())
@@ -1810,21 +1547,13 @@ impl Agent {
                 SessionEvent::CompactionFinished {
                     compaction_id,
                     outcome: StepOutcome::Completed,
-                    summary: Some(summary.clone()),
+                    summary: Some(summary),
                     response: Some(response_info(&response)),
                 },
             )],
             events,
         )
         .await?;
-        publish(
-            events,
-            AgentEvent::CompactionFinished {
-                tokens_before,
-                first_kept_id: prepared.first_kept_id,
-                summary,
-            },
-        );
         Ok(())
     }
 
@@ -1960,19 +1689,6 @@ struct ToolCompletion {
     status: ToolResultStatus,
 }
 
-struct InputCommand {
-    input_id: InputId,
-    input: String,
-    origin: InputOrigin,
-    acknowledgement: oneshot::Sender<Result<(), String>>,
-}
-
-struct ApprovalCommand {
-    call_id: String,
-    allow: bool,
-    acknowledgement: oneshot::Sender<Result<(), String>>,
-}
-
 fn requested_authorization(allow: bool) -> ToolAuthorizationDecision {
     if allow {
         ToolAuthorizationDecision::Allowed
@@ -2028,108 +1744,6 @@ fn reject_inactive_approval(approval: Option<ApprovalCommand>) {
     )));
 }
 
-struct RunChannels {
-    commands: mpsc::UnboundedReceiver<InputCommand>,
-    approvals: mpsc::UnboundedReceiver<ApprovalCommand>,
-    cancel: CancellationToken,
-}
-
-#[derive(Clone)]
-pub struct RunControl {
-    commands: mpsc::UnboundedSender<InputCommand>,
-    approvals: mpsc::UnboundedSender<ApprovalCommand>,
-    cancel: CancellationToken,
-}
-
-impl RunControl {
-    pub async fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
-        self.submit(message.into(), InputOrigin::Steer).await
-    }
-
-    pub async fn queue(&self, message: impl Into<String>) -> Result<(), AgentError> {
-        self.submit(message.into(), InputOrigin::Queue).await
-    }
-
-    async fn submit(&self, input: String, origin: InputOrigin) -> Result<(), AgentError> {
-        if input.trim().is_empty() {
-            return Err(AgentError::EmptyInput);
-        }
-        let (acknowledgement, accepted) = oneshot::channel();
-        self.commands
-            .send(InputCommand {
-                input_id: InputId::random(),
-                input,
-                origin,
-                acknowledgement,
-            })
-            .map_err(|error| AgentError::Task(error.to_string()))?;
-        accepted
-            .await
-            .map_err(|_| AgentError::Task("run settled before input admission completed".into()))?
-            .map_err(AgentError::Task)
-    }
-
-    pub async fn approve(&self, call_id: impl Into<String>, allow: bool) -> Result<(), AgentError> {
-        let (acknowledgement, accepted) = oneshot::channel();
-        self.approvals
-            .send(ApprovalCommand {
-                call_id: call_id.into(),
-                allow,
-                acknowledgement,
-            })
-            .map_err(|error| AgentError::Task(error.to_string()))?;
-        accepted
-            .await
-            .map_err(|_| {
-                AgentError::Task("run settled before tool authorization completed".into())
-            })?
-            .map_err(AgentError::Task)
-    }
-
-    pub fn abort(&self) {
-        self.cancel.cancel();
-    }
-}
-
-pub struct ActiveAgent {
-    control: RunControl,
-    events: mpsc::UnboundedReceiver<AgentEvent>,
-    task: JoinHandle<Agent>,
-}
-
-impl ActiveAgent {
-    pub fn control(&self) -> RunControl {
-        self.control.clone()
-    }
-
-    pub async fn next_event(&mut self) -> Option<AgentEvent> {
-        self.events.recv().await
-    }
-
-    pub async fn finish(mut self) -> Result<Agent, AgentError> {
-        loop {
-            tokio::select! {
-                result = &mut self.task => {
-                    return result.map_err(|error| AgentError::Task(error.to_string()));
-                }
-                event = self.events.recv() => {
-                    if event.is_none() {
-                        return (&mut self.task).await.map_err(|error| AgentError::Task(error.to_string()));
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ActiveAgent {
-    fn drop(&mut self) {
-        // Dropping the capability must not detach an unobservable background
-        // run whose closed command channels would otherwise remain readable.
-        self.control.abort();
-    }
-}
-
 fn user_items(message: String) -> Vec<InputItem> {
     vec![InputItem::from(EasyInputMessage::from(message))]
 }
@@ -2150,7 +1764,7 @@ fn response_info(response: &Response) -> ResponseInfo {
         usage: response
             .usage
             .as_ref()
-            .map(crate::session_event::TokenUsage::from_provider),
+            .map(crate::session::event::TokenUsage::from_provider),
     }
 }
 
@@ -2174,7 +1788,7 @@ fn millis_to_seconds(millis: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::AppendFailpoint;
+    use crate::session::store::AppendFailpoint;
     use async_openai::types::responses::FunctionTool;
     use futures_util::future::BoxFuture;
     use serde_json::json;
@@ -2693,7 +2307,6 @@ mod tests {
         let agent = active.finish().await.unwrap();
         server.await.unwrap();
 
-        assert!(format!("{:?}", agent.transcript()).contains("hello"));
         assert!(agent.machine.active_run().is_none());
         let loaded = agent.store.load(&agent.info.id).unwrap();
         let request_transaction = loaded

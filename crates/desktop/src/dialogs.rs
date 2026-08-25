@@ -12,8 +12,9 @@ use gpui_component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_component::{Disableable, Icon, IconName, IndexPath, Sizable};
-use kcastle_agent::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID, SessionInfo};
+use kcastle_agent::SessionInfo;
 
+use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
 use crate::assets::DesktopIconName;
 use crate::domain::Action;
@@ -1551,7 +1552,9 @@ fn display_path(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kcastle_agent::{DEEPSEEK_PROVIDER_ID, Model, OPENAI_PROVIDER_ID};
+    use kcastle_agent::Model;
+
+    use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
     use super::{
         SettingsDialog, SettingsPage, addable_provider_ids, parse_capacity,
