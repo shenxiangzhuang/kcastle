@@ -2,20 +2,31 @@
 set -euo pipefail
 
 repo=${0:A:h:h}
-profile=${1:-release}
-case "$profile" in
+mode=${1:-release}
+case "$mode" in
     release)
+        profile=release
         build_args=(-p kcastle-desktop --release --locked)
+        binary="$repo/target/$profile/kcastle-desktop"
         ;;
     debug)
+        profile=debug
         build_args=(-p kcastle-desktop --locked)
+        binary="$repo/target/$profile/kcastle-desktop"
+        ;;
+    --binary)
+        [[ $# -eq 2 ]] || {
+            print -u2 "usage: $0 [release|debug|--binary <path>]"
+            exit 2
+        }
+        build_args=()
+        binary=${2:A}
         ;;
     *)
-        print -u2 "usage: $0 [release|debug]"
+        print -u2 "usage: $0 [release|debug|--binary <path>]"
         exit 2
         ;;
 esac
-binary="$repo/target/$profile/kcastle-desktop"
 app="$repo/target/Kcastle.app"
 plist="$repo/crates/desktop/resources/Info.plist"
 icon="$repo/crates/desktop/assets/app-icon.svg"
@@ -24,7 +35,9 @@ trap 'rm -rf "$icon_work"' EXIT
 iconset="$icon_work/AppIcon.iconset"
 
 cd "$repo"
-cargo build "${build_args[@]}"
+if (( ${#build_args} )); then
+    cargo build "${build_args[@]}"
+fi
 [[ -x "$binary" ]]
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"

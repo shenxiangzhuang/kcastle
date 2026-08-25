@@ -128,7 +128,7 @@ jobs:
           fi
       - name: Bundle macOS desktop app
         if: runner.os == 'macOS'
-        run: scripts/package-macos-app target/${{ matrix.target }}/release/kcastle-desktop
+        run: scripts/package-macos-app --binary target/${{ matrix.target }}/release/kcastle-desktop
       - name: Build Velopack release
         shell: bash
         run: |
