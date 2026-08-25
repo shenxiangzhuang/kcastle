@@ -1,13 +1,16 @@
+mod agent;
+mod agent_loop;
+mod context;
 mod model;
-mod runtime;
 mod session;
 mod tools;
 
 pub use async_openai::types::responses::{EasyInputMessage, InputItem};
 
+pub use agent::Agent;
+pub use agent_loop::{ActiveAgent, AgentError, AgentEvent, RunControl, RunSummary};
+pub use context::compaction::CompactionConfig;
 pub use model::{Model, ReasoningEffort};
-pub use runtime::compaction::CompactionConfig;
-pub use runtime::{ActiveAgent, Agent, AgentError, AgentEvent, RunControl, RunSummary};
 pub use session::event::{
     AssistantChunk, CallId, CompactionId, EventTime, InputId, InputOrigin, RecordedEvent,
     RequestHeaderReason, RequestId, ResponseInfo, RunId, RunOutcome, SESSION_FORMAT_VERSION,

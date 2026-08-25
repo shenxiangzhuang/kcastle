@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::Agent;
+use crate::agent::Agent;
 use crate::session::SessionError;
 use crate::session::event::{InputId, InputOrigin};
 use crate::session::machine::SessionMachineError;

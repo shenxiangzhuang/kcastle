@@ -3,7 +3,6 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub(crate) mod context;
 pub(crate) mod event;
 pub(crate) mod machine;
 pub(crate) mod store;

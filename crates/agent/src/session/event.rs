@@ -6,8 +6,8 @@ use async_openai::types::responses::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::context::ResponseMetadata;
 use crate::session::SessionConfig;
-use crate::session::context::ResponseMetadata;
 
 pub const SESSION_FORMAT_VERSION: u32 = 3;
 
