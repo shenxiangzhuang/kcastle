@@ -3,8 +3,10 @@ use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
 
-use kcastle_agent::{DEEPSEEK_PROVIDER_ID, Model, ReasoningEffort};
+use kcastle_agent::{Model, ReasoningEffort};
 use serde::{Deserialize, Serialize};
+
+use crate::agent_config::DEEPSEEK_PROVIDER_ID;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ProviderModel {

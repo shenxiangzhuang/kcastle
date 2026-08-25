@@ -2847,7 +2847,7 @@ pub(crate) mod tests {
     #[test]
     fn golden_projection_preserves_dsh_semantics() {
         let events = fixture();
-        kcastle_agent::SessionMachine::from_events(&events)
+        kcastle_agent::validate_events(&events)
             .expect("golden input must itself be a committed v2 log");
         let document = SessionDocument::from_events(events).unwrap();
         let trajectory = document

@@ -7,8 +7,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-keywords = ["agent", "openai", "responses", "cli"]
-categories = ["api-bindings", "command-line-utilities"]
+keywords = ["agent", "openai", "responses", "harness"]
+categories = ["api-bindings", "development-tools"]
 
 [dependencies]
 async-openai.workspace = true

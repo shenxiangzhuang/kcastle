@@ -1,22 +1,17 @@
 # Kcastle
 
-[![Crates.io](https://img.shields.io/crates/v/kcastle.svg)](https://crates.io/crates/kcastle)
+[![Crates.io](https://img.shields.io/crates/v/kcastle-agent.svg)](https://crates.io/crates/kcastle-agent)
 
-A native agent harness with desktop and terminal clients.
+A native agent harness with a GPUI desktop application.
 
 ## Install
 
-- Desktop: download the DMG (macOS), Setup EXE (Windows), or AppImage/DEB (Linux) from [GitHub Releases](https://github.com/shenxiangzhuang/kcastle/releases).
-- Terminal: `cargo install kcastle --locked`.
+Download the DMG (macOS), Setup EXE (Windows), or AppImage/DEB (Linux) from
+[GitHub Releases](https://github.com/shenxiangzhuang/kcastle/releases).
 
 ## Run
 
-Set `OPENAI_API_KEY` or `DEEPSEEK_API_KEY`, then launch the downloaded desktop app or run:
-
-```bash
-kcastle
-```
-
+Launch the downloaded desktop app, then configure OpenAI or DeepSeek in **Settings → Models**.
 From a source checkout:
 
 ```bash

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::session::SessionConfig;
-use crate::state::ResponseMetadata;
+use crate::session::context::ResponseMetadata;
 
 pub const SESSION_FORMAT_VERSION: u32 = 3;
 
@@ -161,15 +161,7 @@ pub struct ResponseInfo {
 }
 
 impl ResponseInfo {
-    pub fn from_provider(response: &ResponseMetadata) -> Self {
-        Self {
-            id: response.id.clone(),
-            model: response.model.clone(),
-            usage: response.usage.as_ref().map(TokenUsage::from_provider),
-        }
-    }
-
-    pub fn to_provider(&self) -> ResponseMetadata {
+    pub(crate) fn to_provider(&self) -> ResponseMetadata {
         ResponseMetadata {
             id: self.id.clone(),
             model: self.model.clone(),

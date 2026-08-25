@@ -7,14 +7,11 @@
 - `cargo test --workspace --locked`
 - `cargo build --workspace --release --locked`
 - `cargo test -p kcastle-agent`
-- `cargo test -p kcastle`
 - `cargo test -p kcastle-desktop`
-- `cargo check -p kcastle`
 - `cargo check -p kcastle-desktop`
 
-The workspace-wide commands cover the agent core and both user interfaces. Package-specific
-commands are focused checks: `kcastle` is the terminal UI, while `kcastle-desktop` is the desktop
-UI.
+The workspace-wide commands cover the agent core and desktop application. Package-specific
+commands are focused checks for either `kcastle-agent` or `kcastle-desktop`.
 
 ## Release workflow
 
@@ -25,22 +22,21 @@ UI.
    agents and automation must not merge release pull requests.
 3. Only after confirming the pull request was merged, publish a GitHub Release from the merged
    commit using tag `v<version>`. Mark alpha and beta versions as pre-releases. The release workflow
-   publishes `kcastle-agent`, then `kcastle`, and uploads native binaries.
+   publishes `kcastle-agent` and uploads native desktop binaries.
 
 ## Architecture
 
-kcastle is a Rust workspace with an agent core and two user interfaces:
+kcastle is a Rust workspace with an agent core and one desktop application:
 
 | Package | Crate | Responsibility |
 | --- | --- | --- |
 | `kcastle-agent` | `kcastle_agent` library | UI-independent agent runtime, transactional `SessionMachine`, SQLite `SessionStore`, canonical session facts, compaction, `Env`, and tools |
-| `kcastle` | terminal binary | Ratatui/Crossterm rendering, terminal input, approvals, and TUI dependency composition |
 | `kcastle-desktop` | desktop binary | GPUI rendering, desktop input, approvals, session orchestration, and desktop dependency composition |
 
-The package dependency directions are `kcastle -> kcastle-agent` and
-`kcastle-desktop -> kcastle-agent`. The two UI packages do not depend on each other. The agent core
-must never import terminal or desktop infrastructure. It uses `async-openai` directly instead of
-maintaining a provider abstraction.
+The package dependency direction is `kcastle-desktop -> kcastle-agent`. The agent core must never
+import desktop infrastructure. It owns only the harness runtime and persistence semantics; product
+configuration, provider catalogs, session presentation, search formatting, and title policy belong
+to the desktop crate. It uses `async-openai` directly instead of maintaining a provider abstraction.
 
 ## Keeping this file current
 
@@ -77,7 +73,7 @@ maintaining a provider abstraction.
   otherwise settle.
 - Compaction commits a summary boundary and retains recent input batches in the canonical replayed
   surface; it does not rewrite prior journal transactions.
-- User interfaces derive durable content only from committed session transactions. Transient
+- The desktop interface derives durable content only from committed session transactions. Transient
   control signals may drive approvals, connection status, and notices but never conversation,
   trajectory, timing, or session statistics.
 - Conversation, trajectory, details, timing, search, and composer statistics are selectors over one
@@ -87,8 +83,8 @@ maintaining a provider abstraction.
 ## Conventions
 
 - Rust edition 2024; stable toolchain.
-- Tokio, async-openai Responses API, Serde, rusqlite/SQLite WAL for session transactions,
-  Ratatui/Crossterm for the TUI, and GPUI for the desktop UI.
+- Tokio, async-openai Responses API, Serde, rusqlite/SQLite WAL for session transactions, and GPUI
+  for the desktop UI.
 - `cargo fmt`; Clippy with warnings denied; built-in Rust test harness.
 - For bug fixes, reproduce the failure before implementing the fix.
 - Tests protect non-trivial behavior and trust boundaries; avoid tests for trivial configuration.

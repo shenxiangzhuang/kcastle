@@ -77,3 +77,26 @@ fn sidebar_rendering_does_not_list_sessions_from_disk() {
         "sidebar rendering must consume cached session metadata"
     );
 }
+
+#[test]
+fn agent_public_api_excludes_desktop_presentation_policy() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("agent")
+        .join("src")
+        .join("lib.rs");
+    let public_api = fs::read_to_string(source).expect("agent public API should be readable");
+    for forbidden in [
+        "TranscriptItem",
+        "SessionSearchData",
+        "SessionMachine,",
+        "PlannedBatch",
+        "ModelPreset",
+        "PROVIDER_ID",
+    ] {
+        assert!(
+            !public_api.contains(forbidden),
+            "desktop presentation policy leaked into agent public API: {forbidden}"
+        );
+    }
+}

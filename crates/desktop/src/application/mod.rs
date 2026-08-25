@@ -1,3 +1,4 @@
+pub(crate) mod session_catalog;
 mod view_model;
 
 pub(crate) use view_model::{

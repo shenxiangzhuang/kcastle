@@ -8,11 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::session::{SessionConfig, SessionId};
-use crate::session_event::{
+use crate::session::event::{
     AssistantChunk, EventTime, RecordedEvent, SESSION_FORMAT_VERSION, SessionEvent, TxId,
 };
-use crate::session_machine::{PlannedBatch, SESSION_MACHINE_SEMANTICS_VERSION};
+use crate::session::machine::{PlannedBatch, SESSION_MACHINE_SEMANTICS_VERSION};
+use crate::session::{SessionConfig, SessionId};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2151,12 +2151,12 @@ mod tests {
         SESSION_DATABASE_FILE, SessionErrorClass, SessionStore, SessionStoreError, TransactionId,
         validate_retry_matches, writer_lock_file_name,
     };
-    use crate::session::{SessionConfig, SessionId};
-    use crate::session_event::{
+    use crate::session::event::{
         AssistantChunk, EventDraft, EventTime, InputId, InputOrigin, RecordedEvent, RequestId,
         ResponseInfo, RunId, SessionEvent, StepId, TurnId, TxId,
     };
-    use crate::session_machine::SessionMachine;
+    use crate::session::machine::SessionMachine;
+    use crate::session::{SessionConfig, SessionId};
     use async_openai::types::responses::{EasyInputMessage, InputItem};
     use rusqlite::{Connection, params};
     use std::fs::{File, OpenOptions, TryLockError};
@@ -2536,7 +2536,7 @@ mod tests {
             .args([
                 "--ignored",
                 "--exact",
-                "session_store::tests::append_pause_subprocess",
+                "session::store::tests::append_pause_subprocess",
                 "--nocapture",
             ])
             .env("KCASTLE_TEST_DATABASE_PATH", &database_path)

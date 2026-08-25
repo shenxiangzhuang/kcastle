@@ -28,7 +28,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify release tag
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle-agent") | .version')
           test "v${version}" = "${GITHUB_REF_NAME}"
       - name: Publish kcastle-agent
         run: cargo publish --locked -p kcastle-agent
@@ -42,11 +42,6 @@ jobs:
             sleep 10
           done
           exit 1
-      - name: Publish kcastle
-        run: cargo publish --locked -p kcastle
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
   desktop-apps:
     strategy:
       fail-fast: false
@@ -101,7 +96,7 @@ jobs:
       - name: Verify release tag
         shell: bash
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kcastle-agent") | .version')
           test "v${version}" = "$RELEASE_TAG"
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
