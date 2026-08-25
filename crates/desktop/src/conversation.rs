@@ -275,7 +275,7 @@ impl DesktopApp {
                     .flex()
                     .flex_col()
                     .w_full()
-                    .gap_4()
+                    .gap(px(metrics::ASSISTANT_ACTIONS_TOP_GAP))
                     .text_color(colors.text)
                     .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
                     .child(assistant_body(
