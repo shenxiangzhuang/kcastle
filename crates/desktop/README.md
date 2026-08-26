@@ -39,6 +39,29 @@ In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
 
+## UI automation contract
+
+Core controls expose stable accessibility identifiers through GPUI/AccessKit. On macOS these are
+available as `AXIdentifier` values and are preferred over visible text or accessibility-tree
+positions in automation:
+
+| Flow | Identifier |
+| --- | --- |
+| New session | `kcastle.session.new` |
+| Session search input | `kcastle.session.search.input` |
+| Chat / Trajectory tabs | `kcastle.conversation.chat`, `kcastle.conversation.trajectory` |
+| Composer input group | `kcastle.composer.input` |
+| Permission / model controls | `kcastle.composer.permission`, `kcastle.composer.model` |
+| Send / stop | `kcastle.composer.send`, `kcastle.composer.stop` |
+| Tool approval | `kcastle.approval.allow`, `kcastle.approval.deny` |
+| Trajectory search input | `kcastle.trajectory.search.input` |
+| Settings / active dialog | `kcastle.settings.open`, `kcastle.dialog` |
+
+The multiline text input is the `MultilineTextInput` descendant of `kcastle.composer.input` and is
+labelled `Message the agent`. Workspace and session identifiers are derived from their durable
+project and session IDs instead of list positions. Treat identifiers in `ui_automation.rs` as a
+compatibility contract: layout and visible copy may change without renaming them.
+
 The desktop trajectory surface is projected directly from session events rather than chat rows. It
 has fixed Input, Model, and Tools swimlanes. Duration switches equal-width operations to recorded
 durations with idle time compressed, matching the DSH desktop surface; complete wall-clock timing

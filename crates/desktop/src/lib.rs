@@ -30,6 +30,7 @@ mod sidebar;
 mod streaming_markdown;
 mod trajectory;
 mod ui;
+mod ui_automation;
 mod ui_theme;
 mod updater;
 

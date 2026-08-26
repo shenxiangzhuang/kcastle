@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, relative,
+    StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
+    relative,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::Textarea;
@@ -14,6 +15,7 @@ use crate::app::{DesktopApp, composer_model_indices};
 use crate::application::{composer_status, empty_conversation_view_model};
 use crate::domain::{Action, ComposerMenu, RunState};
 use crate::platform::gpui::measured_container;
+use crate::ui_automation::ids;
 use crate::ui_theme::{UiPalette, metrics, palette};
 
 impl DesktopApp {
@@ -161,6 +163,14 @@ impl DesktopApp {
         };
         let measurement_owner = cx.entity().downgrade();
         div()
+            .id(if hero {
+                "hero-composer"
+            } else {
+                "docked-composer"
+            })
+            .role(Role::Form)
+            .accessibility_id(ids::COMPOSER)
+            .aria_label("Message composer")
             .relative()
             .flex()
             .flex_col()
@@ -180,11 +190,20 @@ impl DesktopApp {
             ))
             .child(
                 div()
+                    .id(if hero {
+                        "hero-composer-input"
+                    } else {
+                        "docked-composer-input"
+                    })
+                    .role(Role::Group)
+                    .accessibility_id(ids::COMPOSER_INPUT)
+                    .aria_label("Message the agent")
                     .capture_key_down(cx.listener(|this, event, window, cx| {
                         this.handle_root_key(event, window, cx)
                     }))
                     .child(
                         Textarea::new(&self.input)
+                            .aria_label("Message the agent")
                             .appearance(false)
                             .bordered(false)
                             .text_base(),
@@ -206,6 +225,7 @@ impl DesktopApp {
                             .gap_1()
                             .child(
                                 Button::new(if hero { "hero-commands" } else { "commands" })
+                                    .accessibility_id(ids::COMPOSER_COMMANDS)
                                     .icon(IconName::Plus)
                                     .ghost()
                                     .compact()
@@ -224,6 +244,7 @@ impl DesktopApp {
                                 } else {
                                     "access-settings"
                                 })
+                                .accessibility_id(ids::COMPOSER_PERMISSION)
                                 .icon(
                                     if self.selected_runtime.read(cx).snapshot().allow_all_tools {
                                         IconName::CircleCheck
@@ -268,6 +289,7 @@ impl DesktopApp {
                                 } else {
                                     "model-settings"
                                 })
+                                .accessibility_id(ids::COMPOSER_MODEL)
                                 .label(model)
                                 .ghost()
                                 .compact()
@@ -302,6 +324,7 @@ impl DesktopApp {
                             }))
                             .child(if running {
                                 Button::new("stop")
+                                    .accessibility_id(ids::COMPOSER_STOP)
                                     .icon(IconName::Close)
                                     .rounded(px(999.0))
                                     .tooltip("Stop")
@@ -309,6 +332,8 @@ impl DesktopApp {
                                     .into_any_element()
                             } else {
                                 Button::new("send")
+                                    .accessibility_id(ids::COMPOSER_SEND)
+                                    .role(Role::DefaultButton)
                                     .icon(IconName::ArrowUp)
                                     .primary()
                                     .loading(preparing)
@@ -542,6 +567,10 @@ impl DesktopApp {
         };
         Some(
             div()
+                .id("composer-menu")
+                .role(Role::Menu)
+                .accessibility_id(ids::COMPOSER_MENU)
+                .aria_label("Composer menu")
                 .absolute()
                 .track_focus(&self.composer_menu_focus)
                 .capture_key_down(
@@ -594,6 +623,10 @@ impl DesktopApp {
                 .pb_2()
                 .child(
                     div()
+                        .id("approval-card")
+                        .role(Role::AlertDialog)
+                        .accessibility_id(ids::APPROVAL)
+                        .aria_label(format!("Allow {}?", approval.name))
                         .flex()
                         .items_center()
                         .justify_between()
@@ -630,17 +663,22 @@ impl DesktopApp {
                                 .flex()
                                 .flex_none()
                                 .gap_2()
-                                .child(Button::new("deny-tool").label("Deny").on_click(
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.decide(deny_id.clone(), false, cx)
-                                    }),
-                                ))
                                 .child(
-                                    Button::new("allow-tool").label("Allow").primary().on_click(
-                                        cx.listener(move |this, _, _, cx| {
+                                    Button::new("deny-tool")
+                                        .accessibility_id(ids::APPROVAL_DENY)
+                                        .label("Deny")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.decide(deny_id.clone(), false, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("allow-tool")
+                                        .accessibility_id(ids::APPROVAL_ALLOW)
+                                        .label("Allow")
+                                        .primary()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
                                             this.decide(allow_id.clone(), true, cx)
-                                        }),
-                                    ),
+                                        })),
                                 ),
                         ),
                 )
@@ -663,6 +701,7 @@ fn menu_title(title: &'static str, cx: &mut Context<DesktopApp>) -> impl IntoEle
         .child(title)
         .child(
             Button::new("close-composer-menu")
+                .accessibility_id(ids::COMPOSER_MENU_CLOSE)
                 .icon(IconName::Close)
                 .ghost()
                 .compact()
@@ -681,6 +720,8 @@ fn menu_item(
 ) -> impl IntoElement {
     div()
         .id(id)
+        .role(Role::MenuItem)
+        .aria_label(title)
         .flex()
         .items_center()
         .gap_3()
@@ -717,6 +758,9 @@ fn menu_choice(
 ) -> gpui::AnyElement {
     div()
         .id(id)
+        .role(Role::MenuItem)
+        .aria_label(title.to_owned())
+        .aria_selected(selected)
         .flex()
         .items_center()
         .justify_between()

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
 use gpui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, linear_color_stop,
-    linear_gradient, prelude::FluentBuilder, px,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role, div,
+    linear_color_stop, linear_gradient, prelude::FluentBuilder, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::input::Input;
@@ -16,6 +16,7 @@ use gpui_component::{Icon, IconName, Sizable};
 use crate::assets::DesktopIconName;
 use crate::domain::{Action, INITIAL_SESSION_LIMIT};
 use crate::layout::SidebarMode;
+use crate::ui_automation::{self, ids};
 use crate::ui_theme::{UiPalette, metrics, palette};
 
 impl DesktopApp {
@@ -30,6 +31,10 @@ impl DesktopApp {
             return self.sidebar_rail(toggle_leading, cx).into_any_element();
         }
         let panel = div()
+            .id("sidebar")
+            .role(Role::Navigation)
+            .accessibility_id(ids::SIDEBAR)
+            .aria_label("Sessions and workspaces")
             .flex()
             .flex_col()
             .relative()
@@ -58,7 +63,7 @@ impl DesktopApp {
                     .p_3()
                     .child(
                         Button::new("settings")
-                            .accessibility_id("settings")
+                            .accessibility_id(ids::SETTINGS_OPEN)
                             .tooltip("Settings")
                             .ghost()
                             .flex_1()
@@ -93,6 +98,10 @@ impl DesktopApp {
     fn sidebar_rail(&self, toggle_leading: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
         let colors = palette(cx);
         let panel = div()
+            .id("sidebar-rail")
+            .role(Role::Navigation)
+            .accessibility_id(ids::SIDEBAR)
+            .aria_label("Collapsed sidebar")
             .absolute()
             .top_0()
             .left_0()
@@ -103,6 +112,7 @@ impl DesktopApp {
             .pl(px(toggle_leading))
             .child(
                 Button::new("open-sidebar")
+                    .accessibility_id(ids::SIDEBAR_TOGGLE)
                     .icon(IconName::PanelLeftOpen)
                     .ghost()
                     .compact()
@@ -111,6 +121,7 @@ impl DesktopApp {
             )
             .child(
                 Button::new("collapsed-new-chat")
+                    .accessibility_id(ids::NEW_SESSION)
                     .icon(DesktopIconName::SquarePen)
                     .ghost()
                     .compact()
@@ -136,6 +147,7 @@ impl DesktopApp {
             .pr_3()
             .child(
                 Button::new("hide-sidebar")
+                    .accessibility_id(ids::SIDEBAR_TOGGLE)
                     .icon(IconName::PanelLeftClose)
                     .ghost()
                     .compact()
@@ -167,6 +179,7 @@ impl DesktopApp {
                     .child(crate::APP_NAME)
                     .child(
                         Button::new("search-sessions")
+                            .accessibility_id(ids::SESSION_SEARCH_TOGGLE)
                             .icon(if self.core.sidebar.search_sessions {
                                 IconName::Close
                             } else {
@@ -186,6 +199,7 @@ impl DesktopApp {
             )
             .child(
                 Button::new("new-chat")
+                    .accessibility_id(ids::NEW_SESSION)
                     .custom(
                         ButtonCustomVariant::new(cx)
                             .foreground(colors.text)
@@ -242,6 +256,7 @@ impl DesktopApp {
                             )
                             .child(
                                 Button::new("add-project")
+                                    .accessibility_id(ids::WORKSPACE_ADD)
                                     .icon(IconName::FolderOpen)
                                     .ghost()
                                     .compact()
@@ -261,7 +276,11 @@ impl DesktopApp {
                             .gap_1()
                             .child(
                                 div().flex_1().min_w(px(0.0)).child(
-                                    Input::new(&self.session_search).small().cleanable(true),
+                                    Input::new(&self.session_search)
+                                        .accessibility_id(ids::SESSION_SEARCH_INPUT)
+                                        .aria_label("Search sessions")
+                                        .small()
+                                        .cleanable(true),
                                 ),
                             )
                             .child(
@@ -360,6 +379,10 @@ impl DesktopApp {
             return self.flat_session_tree(&query, colors, cx);
         }
         div()
+            .id("workspace-tree")
+            .role(Role::Tree)
+            .accessibility_id(ids::WORKSPACE_LIST)
+            .aria_label("Workspaces and sessions")
             .flex()
             .flex_col()
             .flex_1()
@@ -367,6 +390,9 @@ impl DesktopApp {
             .px_3()
             .overflow_y_scrollbar()
             .children(self.project_store.projects().iter().enumerate().map(|(index, project)| {
+                let project_id = project.id.as_str().to_owned();
+                let project_automation_id = ui_automation::workspace(&project_id);
+                let project_accessibility_label = project.name.clone();
                 let active = index == self.core.workspace.active_project;
                 let expanded = self
                     .core
@@ -409,6 +435,11 @@ impl DesktopApp {
                     .child(
                         div()
                             .id(("workspace", index))
+                            .role(Role::TreeItem)
+                            .accessibility_id(project_automation_id)
+                            .aria_label(project_accessibility_label)
+                            .aria_expanded(expanded)
+                            .aria_selected(active)
                             .flex()
                             .items_center()
                             .justify_between()
@@ -563,11 +594,13 @@ impl DesktopApp {
                                     )
                                 });
                                 let open_path = path.clone();
+                                let automation_id = ui_automation::session(&project_id, &path);
                                 Some(
                                     session_row(
                                         group.clone(),
                                         group.clone(),
                                         SessionRowData {
+                                            automation_id,
                                             title: display_title,
                                             trailing: SessionRowTrailing {
                                                 age: age.clone(),
@@ -580,6 +613,7 @@ impl DesktopApp {
                                                 project_name: preview_project_name.clone(),
                                             },
                                         },
+                                        Role::TreeItem,
                                         selected,
                                         colors,
                                         action,
@@ -607,7 +641,7 @@ impl DesktopApp {
                                             .h(px(metrics::SESSION_ROW_HEIGHT))
                                             .cursor_pointer()
                                             .tab_index(0)
-                                            .role(gpui::accesskit::Role::Button)
+                                            .role(Role::TreeItem)
                                             .aria_label("Show more")
                                             .text_sm()
                                             .text_color(colors.muted_text)
@@ -647,14 +681,22 @@ impl DesktopApp {
             .iter()
             .enumerate()
             .flat_map(|(project_index, project)| {
+                let project_id = project.id.as_str().to_owned();
                 self.project_sessions
                     .get(&project.sessions_dir)
                     .cloned()
                     .unwrap_or_default()
                     .into_iter()
-                    .map(move |session| (project_index, project.name.clone(), session))
+                    .map(move |session| {
+                        (
+                            project_index,
+                            project_id.clone(),
+                            project.name.clone(),
+                            session,
+                        )
+                    })
             })
-            .filter_map(|(project_index, project_name, session)| {
+            .filter_map(|(project_index, project_id, project_name, session)| {
                 let selected = project_index == self.core.workspace.active_project
                     && same_path(&session.path, &self.core.session.current);
                 let title = if selected && self.core.session_view.conversation.title != "New chat" {
@@ -672,6 +714,7 @@ impl DesktopApp {
                 }
                 Some((
                     project_index,
+                    project_id,
                     project_name,
                     self.session_modified_at(&session),
                     session.path,
@@ -680,11 +723,15 @@ impl DesktopApp {
                 ))
             })
             .collect::<Vec<_>>();
-        sessions.sort_by_key(|(_, _, modified, _, _, _)| *modified);
+        sessions.sort_by_key(|(_, _, _, modified, _, _, _)| *modified);
         if self.core.sidebar.sort_by_recent {
             sessions.reverse();
         }
         div()
+            .id("flat-session-list")
+            .role(Role::List)
+            .accessibility_id(ids::WORKSPACE_LIST)
+            .aria_label("All sessions")
             .flex()
             .flex_col()
             .flex_1()
@@ -692,8 +739,12 @@ impl DesktopApp {
             .px_3()
             .overflow_y_scrollbar()
             .children(sessions.into_iter().enumerate().map(
-                |(row_index, (project_index, project_name, modified, path, title, selected))| {
+                |(
+                    row_index,
+                    (project_index, project_id, project_name, modified, path, title, selected),
+                )| {
                     let keyboard_path = path.clone();
+                    let automation_id = ui_automation::session(&project_id, &path);
                     let target_active = self.session_is_active(project_index, &path, cx);
                     let age = session_age(modified);
                     let status = self.session_status_indicator(project_index, &path, cx);
@@ -711,6 +762,7 @@ impl DesktopApp {
                         ("flat-session", row_index),
                         SharedString::from(format!("flat-session-{row_index}")),
                         SessionRowData {
+                            automation_id,
                             title: format!("{title} · {project_name}"),
                             trailing: SessionRowTrailing {
                                 age: age.clone(),
@@ -723,6 +775,7 @@ impl DesktopApp {
                                 project_name: project_name.clone(),
                             },
                         },
+                        Role::ListItem,
                         selected,
                         colors,
                         action,
@@ -784,6 +837,7 @@ struct SessionPreview {
 }
 
 struct SessionRowData {
+    automation_id: String,
     title: String,
     trailing: SessionRowTrailing,
     preview: SessionPreview,
@@ -793,6 +847,7 @@ fn session_row(
     id: impl Into<gpui::ElementId>,
     group: impl Into<SharedString>,
     data: SessionRowData,
+    role: Role,
     selected: bool,
     colors: UiPalette,
     action: Option<gpui::AnyElement>,
@@ -806,7 +861,10 @@ fn session_row(
         colors.sidebar
     };
     let SessionRowData {
-        trailing, preview, ..
+        automation_id,
+        trailing,
+        preview,
+        ..
     } = data;
     let SessionRowTrailing {
         age,
@@ -815,6 +873,10 @@ fn session_row(
     } = trailing;
     div()
         .id(id)
+        .role(role)
+        .accessibility_id(automation_id)
+        .aria_label(title.clone())
+        .aria_selected(selected)
         .group(group.clone())
         .relative()
         .flex()

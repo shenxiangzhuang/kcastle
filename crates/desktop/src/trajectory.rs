@@ -31,6 +31,7 @@ use crate::domain::{
 use crate::dsh_markdown;
 use crate::layout::TrajectoryMode;
 use crate::streaming_markdown::StreamingMarkdownState;
+use crate::ui_automation::ids;
 use crate::ui_theme::{TrajectoryPalette, metrics, trajectory_palette};
 
 const TIMELINE_INPUT_TOP: f32 = 6.0;
@@ -2178,6 +2179,10 @@ impl DesktopApp {
         });
 
         div()
+            .id("trajectory-panel")
+            .role(Role::TabPanel)
+            .accessibility_id(ids::TRAJECTORY_PANEL)
+            .aria_label("Trajectory")
             .relative()
             .flex()
             .flex_col()
@@ -2604,6 +2609,8 @@ impl DesktopApp {
                     .flex_shrink(1.0)
                     .child(
                         Input::new(&self.trajectory_search)
+                            .accessibility_id(ids::TRAJECTORY_SEARCH_INPUT)
+                            .aria_label("Search trajectory")
                             .with_size(px(22.0))
                             .text_size(px(12.0))
                             .prefix(IconName::Search)
