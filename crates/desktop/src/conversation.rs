@@ -66,16 +66,6 @@ impl DesktopApp {
                                     .child(div().size(px(6.0)).rounded_full().bg(colors.primary))
                                     .child("Running")
                             })),
-                    )
-                    .child(
-                        Button::new("session-log")
-                            .icon(IconName::ArrowDown)
-                            .label("Session log")
-                            .outline()
-                            .compact()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.export_session_log(window, cx)
-                            })),
                     ),
             )
             .child(
