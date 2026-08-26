@@ -28,11 +28,7 @@ are defaults for new sessions.
 Each project persists session metadata and append-only transactions in its own SQLite WAL database
 at `~/.kcastle/projects/<project-id>/sessions/sessions.sqlite3`. The built-in Default project follows
 the same layout at `~/.kcastle/projects/default/sessions/sessions.sqlite3`; there is no separate
-top-level Default session store. JSONL is export-only. On the first launch after upgrading, the
-desktop imports `settings.json` and `projects.json`, moves the complete Default session directory,
-and preserves the old app files under `~/.kcastle/backups/pre-app-sqlite/`. The unused legacy
-`config.yaml` is backed up but not imported. The migration is restart-safe and stops without
-overwriting either directory if a destination conflict is detected.
+top-level Default session store. JSONL is export-only.
 
 Development and isolated acceptance runs can set `KCASTLE_DATA_DIR` to put the app database and
 every project session store under a separate data root. An absolute path is

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::domain::conversation::refresh_message_search_text;
 use crate::domain::{Action, AppState, Effect, ScrollIntent, Surface};
 use crate::layout::resolve_layout;
 
@@ -180,7 +179,6 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
                     message.request_id.clone_from(&previous.request_id);
                 }
             }
-            refresh_message_search_text(&mut message);
             const MAX_TRANSIENT_NOTICES: usize = 8;
             if state.transient_messages.len() == MAX_TRANSIENT_NOTICES {
                 state.transient_messages.pop_front();
@@ -357,7 +355,6 @@ mod tests {
                     turn: 0,
                     step: 0,
                     request_id: None,
-                    search_text: String::new(),
                 })),
             );
         }

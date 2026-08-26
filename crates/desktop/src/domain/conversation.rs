@@ -30,7 +30,6 @@ pub(crate) struct Message {
     pub(crate) turn: usize,
     pub(crate) step: usize,
     pub(crate) request_id: Option<String>,
-    pub(crate) search_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -50,13 +49,6 @@ impl Default for ConversationState {
             tool_calls: 0,
         }
     }
-}
-
-pub(crate) fn refresh_message_search_text(message: &mut Message) {
-    // Conversation search has no consumer; trajectory search owns its own allocation-free
-    // selectors. Keep the compatibility field empty instead of duplicating a growing streamed
-    // response (and a temporary `join`) on every publication.
-    message.search_text.clear();
 }
 
 #[cfg(test)]
@@ -88,7 +80,6 @@ fn reindex_messages(messages: &mut [Message]) {
                 format!("turn-{turn}")
             });
         }
-        refresh_message_search_text(message);
     }
 }
 
@@ -114,7 +105,6 @@ mod tests {
             turn: 0,
             step: 0,
             request_id: None,
-            search_text: String::new(),
         }
     }
 

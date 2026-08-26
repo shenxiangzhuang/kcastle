@@ -2249,7 +2249,7 @@ mod tests {
                 .request_for_record(&boundary)
                 .map(|request| request.number),
             Some(2),
-            "the legacy single-value selector retains last-request behavior"
+            "the single-value selector retains last-request behavior"
         );
     }
 

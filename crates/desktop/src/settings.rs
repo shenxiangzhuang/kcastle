@@ -1,22 +1,16 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 
 use kcastle_agent::{Model, ReasoningEffort};
 use rusqlite::{OptionalExtension, params};
-use serde::{Deserialize, Serialize};
 
-use crate::agent_config::DEEPSEEK_PROVIDER_ID;
 use crate::app_store::AppStore;
 
-const LEGACY_SETTINGS_MIGRATION: &str = "settings-json-v1";
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProviderModel {
     pub(crate) model_id: String,
     pub(crate) display_name: String,
     pub(crate) context_window: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) max_output_tokens: Option<u32>,
 }
 
@@ -36,19 +30,13 @@ impl ProviderModel {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProviderProfile {
     pub(crate) provider_id: String,
     pub(crate) display_name: String,
     pub(crate) api_base: String,
-    #[serde(default)]
     pub(crate) models: Vec<ProviderModel>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
-    #[serde(default, rename = "model_id", skip_serializing)]
-    legacy_model_id: Option<String>,
-    #[serde(default, rename = "context_window", skip_serializing)]
-    legacy_context_window: Option<usize>,
 }
 
 impl ProviderProfile {
@@ -64,8 +52,6 @@ impl ProviderProfile {
             api_base: api_base.into(),
             models,
             api_key: None,
-            legacy_model_id: None,
-            legacy_context_window: None,
         }
     }
 
@@ -74,8 +60,7 @@ impl ProviderProfile {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Appearance {
     #[default]
     System,
@@ -83,33 +68,22 @@ pub(crate) enum Appearance {
     Dark,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum EnterBehavior {
     #[default]
     Steer,
     Queue,
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default)]
 struct StoredSettings {
-    /// Kept for migration from the first desktop settings format.
-    reasoning_effort: Option<String>,
-    #[serde(default)]
     reasoning_efforts: HashMap<String, String>,
     selected_model: Option<String>,
-    #[serde(default)]
     allow_all_tools: bool,
-    #[serde(default)]
     appearance: Appearance,
-    #[serde(default)]
     enter_behavior: EnterBehavior,
-    #[serde(default)]
     reduce_motion: bool,
-    #[serde(default)]
     trajectory_actual_duration: bool,
-    #[serde(default)]
-    #[serde(alias = "model_profiles")]
     providers: Vec<ProviderProfile>,
 }
 
@@ -121,77 +95,12 @@ pub(crate) struct SettingsStore {
 impl SettingsStore {
     pub(crate) fn load(source: impl AppStoreSource) -> Result<Self, Box<dyn Error>> {
         let store = source.into_app_store()?;
-        migrate_legacy_settings(&store)?;
         let stored = load_settings(&store)?;
         Ok(Self { store, stored })
     }
 
-    fn normalize(mut stored: StoredSettings) -> StoredSettings {
-        let mut providers: Vec<ProviderProfile> = Vec::new();
-        for mut provider in std::mem::take(&mut stored.providers) {
-            if provider.provider_id == "deepseek" {
-                provider.provider_id = DEEPSEEK_PROVIDER_ID.into();
-            }
-            if provider.models.is_empty()
-                && let Some(model_id) = provider.legacy_model_id.take()
-            {
-                provider.models.push(ProviderModel::new(
-                    model_id.clone(),
-                    model_id,
-                    provider.legacy_context_window.take().unwrap_or(128_000),
-                    None,
-                ));
-            }
-            if let Some(existing) = providers
-                .iter_mut()
-                .find(|existing| existing.provider_id == provider.provider_id)
-            {
-                for model in provider.models {
-                    if !existing
-                        .models
-                        .iter()
-                        .any(|existing| existing.model_id == model.model_id)
-                    {
-                        existing.models.push(model);
-                    }
-                }
-                if existing.api_key.is_none() {
-                    existing.api_key = provider.api_key;
-                }
-            } else {
-                providers.push(provider);
-            }
-        }
-        stored.providers = providers;
-        if let Some(selected) = &mut stored.selected_model
-            && let Some(model_id) = selected.strip_prefix("deepseek/")
-        {
-            *selected = format!("{DEEPSEEK_PROVIDER_ID}/{model_id}");
-        }
-        let legacy_reasoning = std::mem::take(&mut stored.reasoning_efforts);
-        for (model_id, effort) in legacy_reasoning {
-            let model_id = model_id
-                .strip_prefix("deepseek/")
-                .map(|model| format!("{DEEPSEEK_PROVIDER_ID}/{model}"))
-                .unwrap_or(model_id);
-            stored.reasoning_efforts.entry(model_id).or_insert(effort);
-        }
-        stored
-    }
-
     pub(crate) fn apply(&self, model_id: &str, model: &mut Model) {
-        let selected = self
-            .stored
-            .reasoning_efforts
-            .get(model_id)
-            .or_else(|| {
-                self.stored
-                    .reasoning_efforts
-                    .get(&format!("{}/{}", model.name(), model.model()))
-            })
-            .map(String::as_str)
-            .or(self.stored.reasoning_effort.as_deref());
-        let Some(selected) = selected else {
+        let Some(selected) = self.stored.reasoning_efforts.get(model_id) else {
             return;
         };
         if let Some(effort) = model
@@ -221,7 +130,6 @@ impl SettingsStore {
         self.stored
             .reasoning_efforts
             .insert(model_id.into(), reasoning_key(effort).into());
-        self.stored.reasoning_effort = None;
         self.save()
     }
 
@@ -321,44 +229,23 @@ impl AppStoreSource for std::path::PathBuf {
     }
 }
 
-fn migrate_legacy_settings(store: &AppStore) -> Result<(), Box<dyn Error>> {
-    if !store.migration_complete(LEGACY_SETTINGS_MIGRATION)? {
-        let legacy_path = store.root().join("settings.json");
-        let stored = match fs::read(&legacy_path) {
-            Ok(bytes) => SettingsStore::normalize(serde_json::from_slice(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredSettings::default(),
-            Err(error) => return Err(error.into()),
-        };
-        store.write(|transaction| {
-            save_settings_with_transaction(transaction, &stored)?;
-            AppStore::mark_migration_complete(transaction, LEGACY_SETTINGS_MIGRATION)
-        })?;
-    }
-    store.backup_legacy_file("settings.json")?;
-    // `config.yaml` belonged to a pre-desktop configuration path and has no reader in the current
-    // application. Preserve it for rollback, but do not import stale defaults into the new store.
-    store.backup_legacy_file("config.yaml")?;
-    Ok(())
-}
-
 fn load_settings(store: &AppStore) -> Result<StoredSettings, Box<dyn Error>> {
     let connection = store.connection()?;
     let mut stored = connection
         .query_row(
-            "SELECT legacy_reasoning_effort, selected_model, allow_all_tools, appearance,
+            "SELECT selected_model, allow_all_tools, appearance,
                     enter_behavior, reduce_motion, trajectory_actual_duration
              FROM app_preferences WHERE singleton = 1",
             [],
             |row| {
                 Ok(StoredSettings {
-                    reasoning_effort: row.get(0)?,
                     reasoning_efforts: HashMap::new(),
-                    selected_model: row.get(1)?,
-                    allow_all_tools: row.get::<_, i64>(2)? != 0,
-                    appearance: appearance_from_sql(row.get::<_, String>(3)?, 3)?,
-                    enter_behavior: enter_behavior_from_sql(row.get::<_, String>(4)?, 4)?,
-                    reduce_motion: row.get::<_, i64>(5)? != 0,
-                    trajectory_actual_duration: row.get::<_, i64>(6)? != 0,
+                    selected_model: row.get(0)?,
+                    allow_all_tools: row.get::<_, i64>(1)? != 0,
+                    appearance: appearance_from_sql(row.get::<_, String>(2)?, 2)?,
+                    enter_behavior: enter_behavior_from_sql(row.get::<_, String>(3)?, 3)?,
+                    reduce_motion: row.get::<_, i64>(4)? != 0,
+                    trajectory_actual_duration: row.get::<_, i64>(5)? != 0,
                     providers: Vec::new(),
                 })
             },
@@ -387,8 +274,6 @@ fn load_settings(store: &AppStore) -> Result<StoredSettings, Box<dyn Error>> {
             api_base: row.get(2)?,
             models: Vec::new(),
             api_key: row.get(3)?,
-            legacy_model_id: None,
-            legacy_context_window: None,
         })
     })?;
     for provider in providers {
@@ -427,7 +312,7 @@ fn load_settings(store: &AppStore) -> Result<StoredSettings, Box<dyn Error>> {
         })?;
         provider.models = models.collect::<Result<Vec<_>, _>>()?;
     }
-    Ok(SettingsStore::normalize(stored))
+    Ok(stored)
 }
 
 fn save_settings(store: &AppStore, stored: &StoredSettings) -> Result<(), Box<dyn Error>> {
@@ -440,11 +325,10 @@ fn save_settings_with_transaction(
 ) -> Result<(), Box<dyn Error>> {
     transaction.execute(
         "INSERT INTO app_preferences (
-            singleton, legacy_reasoning_effort, selected_model, allow_all_tools, appearance,
+            singleton, selected_model, allow_all_tools, appearance,
             enter_behavior, reduce_motion, trajectory_actual_duration
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(singleton) DO UPDATE SET
-            legacy_reasoning_effort = excluded.legacy_reasoning_effort,
             selected_model = excluded.selected_model,
             allow_all_tools = excluded.allow_all_tools,
             appearance = excluded.appearance,
@@ -452,7 +336,6 @@ fn save_settings_with_transaction(
             reduce_motion = excluded.reduce_motion,
             trajectory_actual_duration = excluded.trajectory_actual_duration",
         params![
-            stored.reasoning_effort,
             stored.selected_model,
             i64::from(stored.allow_all_tools),
             appearance_to_sql(stored.appearance),
@@ -558,10 +441,13 @@ fn reasoning_key(effort: &ReasoningEffort) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    use crate::agent_config::DEEPSEEK_PROVIDER_ID;
 
     use super::*;
 
@@ -665,127 +551,6 @@ mod tests {
     }
 
     #[test]
-    fn master_provider_catalog_api_key_is_imported_before_legacy_backup() {
-        let root = test_root();
-        let original = serde_json::json!({
-            "reasoning_effort": null,
-            "reasoning_efforts": {},
-            "selected_model": "deepseek-official/deepseek-v4-flash",
-            "allow_all_tools": false,
-            "appearance": "system",
-            "enter_behavior": "steer",
-            "reduce_motion": false,
-            "providers": [
-                {
-                    "provider_id": "deepseek-official",
-                    "display_name": "DeepSeek",
-                    "api_base": "https://api.deepseek.com",
-                    "models": [
-                        {
-                            "model_id": "deepseek-v4-flash",
-                            "display_name": "DeepSeek-V4-Flash",
-                            "context_window": 1_000_000
-                        }
-                    ],
-                    "api_key": "master-secret"
-                }
-            ]
-        });
-        let path = root.join("settings.json");
-        fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
-        fs::write(root.join("config.yaml"), b"unused: true\n").unwrap();
-
-        let store = SettingsStore::load(root.clone()).unwrap();
-
-        assert_eq!(
-            store.selected_model(),
-            Some("deepseek-official/deepseek-v4-flash")
-        );
-        assert_eq!(
-            store.provider_profiles()[0].api_key(),
-            Some("master-secret")
-        );
-        assert!(!path.exists());
-        let backup = root.join("backups/pre-app-sqlite/settings.json");
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&fs::read(backup).unwrap()).unwrap(),
-            original
-        );
-        assert_eq!(
-            fs::read(root.join("backups/pre-app-sqlite/config.yaml")).unwrap(),
-            b"unused: true\n"
-        );
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn legacy_single_model_profiles_are_migrated_to_provider_catalogs() {
-        let root = test_root();
-        fs::write(
-            root.join("settings.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "model_profiles": [
-                    {
-                        "provider_id": "deepseek",
-                        "display_name": "DeepSeek",
-                        "api_base": "https://api.deepseek.test",
-                        "model_id": "deepseek-test",
-                        "context_window": 131072,
-                        "api_key": "secret"
-                    },
-                    {
-                        "provider_id": "deepseek",
-                        "display_name": "DeepSeek",
-                        "api_base": "https://api.deepseek.test",
-                        "model_id": "deepseek-second",
-                        "context_window": 256000
-                    }
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let store = SettingsStore::load(root.clone()).unwrap();
-        let provider = &store.provider_profiles()[0];
-        assert_eq!(provider.provider_id, DEEPSEEK_PROVIDER_ID);
-        assert_eq!(provider.models.len(), 2);
-        assert_eq!(provider.models[0].model_id, "deepseek-test");
-        assert_eq!(provider.models[0].context_window, 131_072);
-        assert_eq!(provider.models[1].model_id, "deepseek-second");
-        assert_eq!(provider.api_key(), Some("secret"));
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn provider_ids_keep_legacy_display_name_reasoning_preferences() {
-        let root = test_root();
-        let mut store = SettingsStore::load(root.clone()).unwrap();
-        store
-            .set_effort("DeepSeek/deepseek-test", &ReasoningEffort::Low)
-            .unwrap();
-        let mut model = Model::new(
-            "DeepSeek",
-            "key",
-            "https://api.deepseek.test",
-            "deepseek-test",
-            10_000,
-        )
-        .with_reasoning(
-            &[ReasoningEffort::None, ReasoningEffort::Low],
-            ReasoningEffort::None,
-        );
-
-        store.apply("deepseek/deepseek-test", &mut model);
-
-        assert_eq!(model.reasoning_effort(), Some(&ReasoningEffort::Low));
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn first_setting_write_creates_a_missing_root_directory() {
         let root = test_root();
         fs::remove_dir_all(&root).unwrap();
@@ -796,29 +561,6 @@ mod tests {
         let reloaded = SettingsStore::load(root.clone()).unwrap();
         assert_eq!(reloaded.selected_model(), Some("test/model"));
         drop(reloaded);
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn invalid_legacy_settings_remain_in_place_until_a_retry_succeeds() {
-        let root = test_root();
-        let settings = root.join("settings.json");
-        fs::write(&settings, b"not json").unwrap();
-
-        assert!(SettingsStore::load(root.clone()).is_err());
-        assert_eq!(fs::read(&settings).unwrap(), b"not json");
-        assert!(!root.join("backups/pre-app-sqlite/settings.json").exists());
-
-        fs::write(
-            &settings,
-            serde_json::to_vec(&serde_json::json!({"appearance": "dark"})).unwrap(),
-        )
-        .unwrap();
-        let store = SettingsStore::load(root.clone()).unwrap();
-        assert_eq!(store.appearance(), Appearance::Dark);
-        assert!(!settings.exists());
-        assert!(root.join("backups/pre-app-sqlite/settings.json").is_file());
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
