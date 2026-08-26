@@ -1,13 +1,13 @@
 use gpui::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, WindowControlArea, div, prelude::FluentBuilder, px,
-    rgba,
+    StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role as AxRole, div,
+    prelude::FluentBuilder, px, rgba,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName, Selectable, Sizable};
 
 use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
@@ -16,6 +16,7 @@ use crate::dsh_markdown;
 use crate::layout::SidebarMode;
 use crate::platform::gpui::MessagePresentation;
 use crate::platform::gpui::measured_container;
+use crate::ui_automation::ids;
 use crate::ui_theme::{UiPalette, metrics, palette, trajectory_palette};
 
 impl DesktopApp {
@@ -70,6 +71,10 @@ impl DesktopApp {
             )
             .child(
                 div()
+                    .id("conversation-tabs")
+                    .role(AxRole::TabList)
+                    .accessibility_id(ids::CONVERSATION_TABS)
+                    .aria_label("Conversation views")
                     .flex()
                     .items_end()
                     .h(px(34.0))
@@ -77,6 +82,7 @@ impl DesktopApp {
                     .gap_7()
                     .child(tab(
                         "chat-tab",
+                        ids::CHAT_TAB,
                         "Chat",
                         self.core.surface == Surface::Chat,
                         trajectory_colors.primary,
@@ -85,6 +91,7 @@ impl DesktopApp {
                     ))
                     .child(tab(
                         "trajectory-tab",
+                        ids::TRAJECTORY_TAB,
                         "Trajectory",
                         self.core.surface == Surface::Trajectory,
                         trajectory_colors.primary,
@@ -114,6 +121,10 @@ impl DesktopApp {
         // independently. Revisit this with a layout-aware tail anchor and shared table tracks.
         let transcript_owner = cx.entity().downgrade();
         div()
+            .id("chat-panel")
+            .role(AxRole::TabPanel)
+            .accessibility_id(ids::CHAT_PANEL)
+            .aria_label("Chat")
             .relative()
             .flex()
             .flex_col()
@@ -122,6 +133,9 @@ impl DesktopApp {
             .child(
                 div()
                     .id("transcript")
+                    .role(AxRole::Log)
+                    .accessibility_id(ids::TRANSCRIPT)
+                    .aria_label("Conversation transcript")
                     .relative()
                     .flex()
                     .flex_col()
@@ -173,6 +187,7 @@ impl DesktopApp {
                     .justify_center()
                     .child(
                         Button::new("back-to-bottom")
+                            .accessibility_id(ids::BACK_TO_BOTTOM)
                             .icon(IconName::ArrowDown)
                             .when(self.core.unread_stream_updates > 0, |button| {
                                 button.label(format!("{} new", self.core.unread_stream_updates))
@@ -629,6 +644,7 @@ fn assistant_body(
 
 fn tab(
     id: &'static str,
+    automation_id: &'static str,
     label: &'static str,
     active: bool,
     active_color: gpui::Hsla,
@@ -646,14 +662,35 @@ fn tab(
         } else {
             rgba(0x00000000).into()
         })
-        .child(
-            Button::new(id)
-                .label(label)
-                .ghost()
-                .compact()
-                .text_color(if active { active_color } else { inactive_color })
-                .on_click(on_click),
-        )
+        .child(conversation_tab_button(
+            id,
+            automation_id,
+            label,
+            active,
+            active_color,
+            inactive_color,
+            on_click,
+        ))
+}
+
+fn conversation_tab_button(
+    id: &'static str,
+    automation_id: &'static str,
+    label: &'static str,
+    active: bool,
+    active_color: gpui::Hsla,
+    inactive_color: gpui::Hsla,
+    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> Button {
+    Button::new(id)
+        .role(AxRole::Tab)
+        .accessibility_id(automation_id)
+        .selected(active)
+        .label(label)
+        .ghost()
+        .compact()
+        .text_color(if active { active_color } else { inactive_color })
+        .on_click(on_click)
 }
 
 fn tool_description(payload: &str) -> Option<String> {

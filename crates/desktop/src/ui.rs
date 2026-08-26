@@ -1,6 +1,6 @@
 use gpui::{
-    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, Styled, Window,
-    div, prelude::FluentBuilder, px,
+    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
 };
 use gpui_component::resizable::{h_resizable, resizable_panel};
 
@@ -8,6 +8,7 @@ use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
 use crate::layout::{SidebarMode, sidebar_max_width};
 use crate::platform::gpui::measured_container;
+use crate::ui_automation::ids;
 use crate::ui_theme::palette;
 
 impl Render for DesktopApp {
@@ -57,6 +58,10 @@ impl Render for DesktopApp {
             SidebarMode::Rail => main.into_any_element(),
         };
         div()
+            .id("app-main")
+            .role(Role::Main)
+            .accessibility_id(ids::APP_MAIN)
+            .aria_label("Kcastle")
             .relative()
             .flex()
             .size_full()

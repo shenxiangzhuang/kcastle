@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::FluentBuilder, px, rgb,
+    StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
+    rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
@@ -19,6 +20,7 @@ use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
 use crate::assets::DesktopIconName;
 use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
+use crate::ui_automation::ids;
 use crate::ui_theme::{UiPalette, palette};
 
 pub(crate) enum Modal {
@@ -233,6 +235,7 @@ fn settings_page(title: &'static str, icon: IconName, view: Entity<DesktopApp>) 
 
 fn settings_close_button(view: Entity<DesktopApp>) -> Button {
     Button::new("close-settings")
+        .accessibility_id(ids::DIALOG_CLOSE)
         .icon(IconName::Close)
         .ghost()
         .compact()
@@ -1373,6 +1376,13 @@ impl DesktopApp {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let colors = palette(cx);
+        let dialog_label = match &self.modal {
+            Some(Modal::RenameSession { .. }) => "Rename session",
+            Some(Modal::DeleteArchivedSession { .. }) => "Delete session",
+            Some(Modal::RemoveProject(_)) => "Remove project",
+            Some(Modal::Settings(_)) => "Settings",
+            None => return None,
+        };
         let content = match &self.modal {
             Some(Modal::RenameSession { input, .. }) => modal_card("Rename session", colors)
                 .child(
@@ -1381,7 +1391,12 @@ impl DesktopApp {
                         .text_color(colors.muted_text)
                         .child("Use a short title that will be easy to find later."),
                 )
-                .child(Input::new(input).large())
+                .child(
+                    Input::new(input)
+                        .accessibility_id(ids::DIALOG_PRIMARY_INPUT)
+                        .aria_label("Session title")
+                        .large(),
+                )
                 .child(
                     modal_actions()
                         .child(Button::new("cancel-rename").label("Cancel").on_click(
@@ -1508,6 +1523,9 @@ impl DesktopApp {
                 .child(
                     div()
                         .id("modal-content")
+                        .role(Role::Dialog)
+                        .accessibility_id(ids::DIALOG)
+                        .aria_label(dialog_label)
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(content),
                 )
