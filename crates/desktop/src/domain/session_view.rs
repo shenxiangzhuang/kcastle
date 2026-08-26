@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use im::{HashMap as PersistentHashMap, HashSet as PersistentHashSet, Vector};
 
-use crate::domain::conversation::{ConversationState, Message, Role, refresh_message_search_text};
+use crate::domain::conversation::{ConversationState, Message, Role};
 use crate::domain::ids::MessageId;
 use crate::domain::session_document::{
     ConversationItemId, ConversationItemView, ConversationRole, DisplayOrdinals, ItemStatus,
@@ -353,9 +353,7 @@ fn materialize_message(
         turn,
         step,
         request_id,
-        search_text: String::new(),
     };
-    refresh_message_search_text(&mut message);
 
     if let Some(previous) = previous {
         if previous.as_ref() == &message {
@@ -375,7 +373,6 @@ fn projected_message_owned_text_bytes(message: &Message) -> usize {
         .saturating_add(message.text.len())
         .saturating_add(message.payload.as_deref().map_or(0, str::len))
         .saturating_add(message.schema.as_deref().map_or(0, str::len))
-        .saturating_add(message.search_text.len())
 }
 
 #[cfg(test)]
@@ -836,7 +833,6 @@ mod tests {
         assert_eq!(message.text.len(), BODY_BYTES);
         assert!(record.matches("0123456789"));
         assert!(record.search_text.len() < 128);
-        assert!(message.search_text.is_empty());
         assert!(
             copied_projection_text <= BODY_BYTES.saturating_mul(2).saturating_add(512),
             "one publication may own only the conversation and trajectory body copies; copied {copied_projection_text} bytes for a {BODY_BYTES}-byte response"

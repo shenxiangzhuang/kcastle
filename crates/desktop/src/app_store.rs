@@ -10,14 +10,8 @@ const APP_DATABASE_FILE: &str = "app.sqlite3";
 const APP_DATABASE_SCHEMA_VERSION: u32 = 1;
 
 const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS legacy_migrations (
-    name TEXT PRIMARY KEY,
-    completed_at_ms INTEGER NOT NULL
-) STRICT;
-
 CREATE TABLE IF NOT EXISTS app_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    legacy_reasoning_effort TEXT,
     selected_model TEXT,
     allow_all_tools INTEGER NOT NULL CHECK (allow_all_tools IN (0, 1)),
     appearance TEXT NOT NULL CHECK (appearance IN ('system', 'light', 'dark')),
@@ -85,10 +79,6 @@ impl AppStore {
         })
     }
 
-    pub(crate) fn root(&self) -> &Path {
-        &self.root
-    }
-
     pub(crate) fn project_root(&self, project_id: &str) -> PathBuf {
         self.root.join("projects").join(project_id)
     }
@@ -112,56 +102,6 @@ impl AppStore {
         let value = operation(&transaction)?;
         transaction.commit()?;
         Ok(value)
-    }
-
-    pub(crate) fn migration_complete(&self, name: &str) -> Result<bool, Box<dyn Error>> {
-        let connection = self.connection()?;
-        Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM legacy_migrations WHERE name = ?1)",
-            [name],
-            |row| row.get(0),
-        )?)
-    }
-
-    pub(crate) fn mark_migration_complete(
-        transaction: &Transaction<'_>,
-        name: &str,
-    ) -> Result<(), Box<dyn Error>> {
-        transaction.execute(
-            "INSERT OR IGNORE INTO legacy_migrations (name, completed_at_ms)
-             VALUES (?1, unixepoch('subsec') * 1000)",
-            [name],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn backup_legacy_file(&self, name: &str) -> Result<(), Box<dyn Error>> {
-        let source = self.root.join(name);
-        if !source.is_file() {
-            return Ok(());
-        }
-        let backup_directory = self.root.join("backups").join("pre-app-sqlite");
-        fs::create_dir_all(&backup_directory)?;
-        let mut destination = backup_directory.join(name);
-        if destination.exists() {
-            if fs::read(&source)? == fs::read(&destination)? {
-                fs::remove_file(source)?;
-                return Ok(());
-            }
-            let mut suffix = 1_u64;
-            loop {
-                let candidate = backup_directory.join(format!("{name}.{suffix}"));
-                if !candidate.exists() {
-                    destination = candidate;
-                    break;
-                }
-                suffix = suffix
-                    .checked_add(1)
-                    .ok_or("legacy backup suffix overflowed")?;
-            }
-        }
-        fs::rename(source, destination)?;
-        Ok(())
     }
 }
 
@@ -324,8 +264,6 @@ mod tests {
                 .any(|project| project.name == "workspace")
         );
         assert!(root.join(APP_DATABASE_FILE).is_file());
-        assert!(!root.join("settings.json").exists());
-        assert!(!root.join("projects.json").exists());
         drop(projects);
         drop(settings);
         fs::remove_dir_all(root).unwrap();

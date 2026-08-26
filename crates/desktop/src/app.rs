@@ -2836,7 +2836,6 @@ fn message(role: Role, text: String) -> Message {
         turn: 0,
         step: 0,
         request_id: None,
-        search_text: String::new(),
     }
 }
 
