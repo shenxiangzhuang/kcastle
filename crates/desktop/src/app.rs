@@ -3354,6 +3354,7 @@ mod tests {
             }
         }
 
+        drop(project_store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
 
 use kcastle_agent::{Model, ReasoningEffort};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_config::DEEPSEEK_PROVIDER_ID;
+use crate::app_store::AppStore;
+
+const LEGACY_SETTINGS_MIGRATION: &str = "settings-json-v1";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ProviderModel {
@@ -111,19 +114,19 @@ struct StoredSettings {
 }
 
 pub(crate) struct SettingsStore {
-    path: PathBuf,
+    store: AppStore,
     stored: StoredSettings,
 }
 
 impl SettingsStore {
-    pub(crate) fn load(root: PathBuf) -> Result<Self, Box<dyn Error>> {
-        fs::create_dir_all(&root)?;
-        let path = root.join("settings.json");
-        let mut stored = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredSettings::default(),
-            Err(error) => return Err(error.into()),
-        };
+    pub(crate) fn load(source: impl AppStoreSource) -> Result<Self, Box<dyn Error>> {
+        let store = source.into_app_store()?;
+        migrate_legacy_settings(&store)?;
+        let stored = load_settings(&store)?;
+        Ok(Self { store, stored })
+    }
+
+    fn normalize(mut stored: StoredSettings) -> StoredSettings {
         let mut providers: Vec<ProviderProfile> = Vec::new();
         for mut provider in std::mem::take(&mut stored.providers) {
             if provider.provider_id == "deepseek" {
@@ -173,7 +176,7 @@ impl SettingsStore {
                 .unwrap_or(model_id);
             stored.reasoning_efforts.entry(model_id).or_insert(effort);
         }
-        Ok(Self { path, stored })
+        stored
     }
 
     pub(crate) fn apply(&self, model_id: &str, model: &mut Model) {
@@ -298,16 +301,247 @@ impl SettingsStore {
     }
 
     fn save(&self) -> Result<(), Box<dyn Error>> {
-        let temporary = self.path.with_extension("json.tmp");
-        fs::write(&temporary, serde_json::to_vec_pretty(&self.stored)?)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
-        }
-        fs::rename(temporary, &self.path)?;
-        Ok(())
+        save_settings(&self.store, &self.stored)
     }
+}
+
+pub(crate) trait AppStoreSource {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>>;
+}
+
+impl AppStoreSource for AppStore {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>> {
+        Ok(self)
+    }
+}
+
+impl AppStoreSource for std::path::PathBuf {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>> {
+        AppStore::open(self)
+    }
+}
+
+fn migrate_legacy_settings(store: &AppStore) -> Result<(), Box<dyn Error>> {
+    if !store.migration_complete(LEGACY_SETTINGS_MIGRATION)? {
+        let legacy_path = store.root().join("settings.json");
+        let stored = match fs::read(&legacy_path) {
+            Ok(bytes) => SettingsStore::normalize(serde_json::from_slice(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => StoredSettings::default(),
+            Err(error) => return Err(error.into()),
+        };
+        store.write(|transaction| {
+            save_settings_with_transaction(transaction, &stored)?;
+            AppStore::mark_migration_complete(transaction, LEGACY_SETTINGS_MIGRATION)
+        })?;
+    }
+    store.backup_legacy_file("settings.json")?;
+    // `config.yaml` belonged to a pre-desktop configuration path and has no reader in the current
+    // application. Preserve it for rollback, but do not import stale defaults into the new store.
+    store.backup_legacy_file("config.yaml")?;
+    Ok(())
+}
+
+fn load_settings(store: &AppStore) -> Result<StoredSettings, Box<dyn Error>> {
+    let connection = store.connection()?;
+    let mut stored = connection
+        .query_row(
+            "SELECT legacy_reasoning_effort, selected_model, allow_all_tools, appearance,
+                    enter_behavior, reduce_motion, trajectory_actual_duration
+             FROM app_preferences WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(StoredSettings {
+                    reasoning_effort: row.get(0)?,
+                    reasoning_efforts: HashMap::new(),
+                    selected_model: row.get(1)?,
+                    allow_all_tools: row.get::<_, i64>(2)? != 0,
+                    appearance: appearance_from_sql(row.get::<_, String>(3)?, 3)?,
+                    enter_behavior: enter_behavior_from_sql(row.get::<_, String>(4)?, 4)?,
+                    reduce_motion: row.get::<_, i64>(5)? != 0,
+                    trajectory_actual_duration: row.get::<_, i64>(6)? != 0,
+                    providers: Vec::new(),
+                })
+            },
+        )
+        .optional()?
+        .unwrap_or_default();
+
+    let mut effort_statement = connection
+        .prepare("SELECT model_id, effort FROM model_reasoning_efforts ORDER BY model_id")?;
+    let efforts = effort_statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for effort in efforts {
+        let (model_id, effort) = effort?;
+        stored.reasoning_efforts.insert(model_id, effort);
+    }
+    drop(effort_statement);
+
+    let mut provider_statement = connection.prepare(
+        "SELECT provider_id, display_name, api_base, api_key FROM providers ORDER BY ordinal",
+    )?;
+    let providers = provider_statement.query_map([], |row| {
+        Ok(ProviderProfile {
+            provider_id: row.get(0)?,
+            display_name: row.get(1)?,
+            api_base: row.get(2)?,
+            models: Vec::new(),
+            api_key: row.get(3)?,
+            legacy_model_id: None,
+            legacy_context_window: None,
+        })
+    })?;
+    for provider in providers {
+        stored.providers.push(provider?);
+    }
+    drop(provider_statement);
+
+    let mut model_statement = connection.prepare(
+        "SELECT model_id, display_name, context_window, max_output_tokens
+         FROM provider_models WHERE provider_id = ?1 ORDER BY ordinal",
+    )?;
+    for provider in &mut stored.providers {
+        let models = model_statement.query_map([provider.provider_id.as_str()], |row| {
+            let context_window = row.get::<_, i64>(2)?;
+            let max_output_tokens = row.get::<_, Option<i64>>(3)?;
+            Ok(ProviderModel {
+                model_id: row.get(0)?,
+                display_name: row.get(1)?,
+                context_window: usize::try_from(context_window).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+                max_output_tokens: max_output_tokens.map(u32::try_from).transpose().map_err(
+                    |error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    },
+                )?,
+            })
+        })?;
+        provider.models = models.collect::<Result<Vec<_>, _>>()?;
+    }
+    Ok(SettingsStore::normalize(stored))
+}
+
+fn save_settings(store: &AppStore, stored: &StoredSettings) -> Result<(), Box<dyn Error>> {
+    store.write(|transaction| save_settings_with_transaction(transaction, stored))
+}
+
+fn save_settings_with_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    stored: &StoredSettings,
+) -> Result<(), Box<dyn Error>> {
+    transaction.execute(
+        "INSERT INTO app_preferences (
+            singleton, legacy_reasoning_effort, selected_model, allow_all_tools, appearance,
+            enter_behavior, reduce_motion, trajectory_actual_duration
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(singleton) DO UPDATE SET
+            legacy_reasoning_effort = excluded.legacy_reasoning_effort,
+            selected_model = excluded.selected_model,
+            allow_all_tools = excluded.allow_all_tools,
+            appearance = excluded.appearance,
+            enter_behavior = excluded.enter_behavior,
+            reduce_motion = excluded.reduce_motion,
+            trajectory_actual_duration = excluded.trajectory_actual_duration",
+        params![
+            stored.reasoning_effort,
+            stored.selected_model,
+            i64::from(stored.allow_all_tools),
+            appearance_to_sql(stored.appearance),
+            enter_behavior_to_sql(stored.enter_behavior),
+            i64::from(stored.reduce_motion),
+            i64::from(stored.trajectory_actual_duration),
+        ],
+    )?;
+    transaction.execute("DELETE FROM model_reasoning_efforts", [])?;
+    for (model_id, effort) in &stored.reasoning_efforts {
+        transaction.execute(
+            "INSERT INTO model_reasoning_efforts (model_id, effort) VALUES (?1, ?2)",
+            params![model_id, effort],
+        )?;
+    }
+    transaction.execute("DELETE FROM providers", [])?;
+    for (provider_ordinal, provider) in stored.providers.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO providers (provider_id, ordinal, display_name, api_base, api_key)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                provider.provider_id,
+                i64::try_from(provider_ordinal)?,
+                provider.display_name,
+                provider.api_base,
+                provider.api_key,
+            ],
+        )?;
+        for (ordinal, model) in provider.models.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO provider_models (
+                    provider_id, ordinal, model_id, display_name, context_window,
+                    max_output_tokens
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    provider.provider_id,
+                    ordinal as i64,
+                    model.model_id,
+                    model.display_name,
+                    i64::try_from(model.context_window)?,
+                    model.max_output_tokens.map(i64::from),
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn appearance_to_sql(value: Appearance) -> &'static str {
+    match value {
+        Appearance::System => "system",
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
+    }
+}
+
+fn appearance_from_sql(value: String, column: usize) -> rusqlite::Result<Appearance> {
+    match value.as_str() {
+        "system" => Ok(Appearance::System),
+        "light" => Ok(Appearance::Light),
+        "dark" => Ok(Appearance::Dark),
+        _ => Err(invalid_text_value(column, "appearance", value)),
+    }
+}
+
+fn enter_behavior_to_sql(value: EnterBehavior) -> &'static str {
+    match value {
+        EnterBehavior::Steer => "steer",
+        EnterBehavior::Queue => "queue",
+    }
+}
+
+fn enter_behavior_from_sql(value: String, column: usize) -> rusqlite::Result<EnterBehavior> {
+    match value.as_str() {
+        "steer" => Ok(EnterBehavior::Steer),
+        "queue" => Ok(EnterBehavior::Queue),
+        _ => Err(invalid_text_value(column, "enter behavior", value)),
+    }
+}
+
+fn invalid_text_value(column: usize, label: &str, value: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid {label}: {value:?}"),
+        )),
+    )
 }
 
 fn reasoning_key(effort: &ReasoningEffort) -> &'static str {
@@ -324,6 +558,7 @@ fn reasoning_key(effort: &ReasoningEffort) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::{
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -388,6 +623,7 @@ mod tests {
                 &[ReasoningEffort::None, ReasoningEffort::Low],
                 ReasoningEffort::None,
             );
+        drop(store);
         let store = SettingsStore::load(root.clone()).unwrap();
         store.apply("test/model", &mut model);
         assert_eq!(model.reasoning_effort(), Some(&ReasoningEffort::Low));
@@ -402,6 +638,7 @@ mod tests {
             store.provider_profiles()[0].models[1].max_output_tokens,
             Some(256_000)
         );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -420,13 +657,15 @@ mod tests {
             .unwrap();
         store.save_provider_profile(profile, None).unwrap();
 
+        drop(store);
         let store = SettingsStore::load(root.clone()).unwrap();
         assert_eq!(store.provider_profiles()[0].api_key(), Some("secret"));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn master_provider_catalog_api_key_loads_without_rewrite() {
+    fn master_provider_catalog_api_key_is_imported_before_legacy_backup() {
         let root = test_root();
         let original = serde_json::json!({
             "reasoning_effort": null,
@@ -454,6 +693,7 @@ mod tests {
         });
         let path = root.join("settings.json");
         fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        fs::write(root.join("config.yaml"), b"unused: true\n").unwrap();
 
         let store = SettingsStore::load(root.clone()).unwrap();
 
@@ -465,10 +705,17 @@ mod tests {
             store.provider_profiles()[0].api_key(),
             Some("master-secret")
         );
+        assert!(!path.exists());
+        let backup = root.join("backups/pre-app-sqlite/settings.json");
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&fs::read(backup).unwrap()).unwrap(),
             original
         );
+        assert_eq!(
+            fs::read(root.join("backups/pre-app-sqlite/config.yaml")).unwrap(),
+            b"unused: true\n"
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -508,6 +755,7 @@ mod tests {
         assert_eq!(provider.models[0].context_window, 131_072);
         assert_eq!(provider.models[1].model_id, "deepseek-second");
         assert_eq!(provider.api_key(), Some("secret"));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -533,6 +781,7 @@ mod tests {
         store.apply("deepseek/deepseek-test", &mut model);
 
         assert_eq!(model.reasoning_effort(), Some(&ReasoningEffort::Low));
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -544,10 +793,33 @@ mod tests {
         let mut store = SettingsStore::load(root.clone()).unwrap();
         store.set_selected_model("test/model").unwrap();
 
-        assert_eq!(
-            SettingsStore::load(root.clone()).unwrap().selected_model(),
-            Some("test/model")
-        );
+        let reloaded = SettingsStore::load(root.clone()).unwrap();
+        assert_eq!(reloaded.selected_model(), Some("test/model"));
+        drop(reloaded);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_legacy_settings_remain_in_place_until_a_retry_succeeds() {
+        let root = test_root();
+        let settings = root.join("settings.json");
+        fs::write(&settings, b"not json").unwrap();
+
+        assert!(SettingsStore::load(root.clone()).is_err());
+        assert_eq!(fs::read(&settings).unwrap(), b"not json");
+        assert!(!root.join("backups/pre-app-sqlite/settings.json").exists());
+
+        fs::write(
+            &settings,
+            serde_json::to_vec(&serde_json::json!({"appearance": "dark"})).unwrap(),
+        )
+        .unwrap();
+        let store = SettingsStore::load(root.clone()).unwrap();
+        assert_eq!(store.appearance(), Appearance::Dark);
+        assert!(!settings.exists());
+        assert!(root.join("backups/pre-app-sqlite/settings.json").is_file());
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 }

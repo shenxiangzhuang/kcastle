@@ -12,6 +12,7 @@ use kcastle_agent::{Agent, Session};
 
 mod agent_config;
 mod app;
+mod app_store;
 mod application;
 #[cfg(test)]
 mod architecture_tests;
@@ -36,6 +37,7 @@ use agent_config::{
     DEEPSEEK_PROVIDER_ID, INSTRUCTIONS, OPENAI_PROVIDER_ID, build_model, default_provider_profile,
 };
 use app::{ConfiguredModel, DesktopApp, DesktopStartup, active_model_index};
+use app_store::AppStore;
 use assets::DesktopAssets;
 use project::ProjectStore;
 use settings::{Appearance, ProviderProfile, SettingsStore};
@@ -73,7 +75,8 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 }
 
 fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dyn Error>> {
-    let mut settings = SettingsStore::load(root.clone())?;
+    let app_store = AppStore::open(root)?;
+    let mut settings = SettingsStore::load(app_store.clone())?;
     let mut models = models_from_profiles(settings.provider_profiles());
     for configured in &mut models {
         settings.apply(&configured.id, &mut configured.model);
@@ -95,7 +98,7 @@ fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dy
     }
     let model = models[selected_model].model.clone();
     let appearance = settings.appearance();
-    let (projects, active_project) = ProjectStore::load(root, None)?;
+    let (projects, active_project) = ProjectStore::load(app_store, None)?;
     let project = projects
         .project(active_project)
         .expect("active project should exist");

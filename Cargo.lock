@@ -3709,6 +3709,7 @@ dependencies = [
  "ratex-svg",
  "ratex-types",
  "raw-window-handle",
+ "rusqlite",
  "serde",
  "serde_json",
  "time",
