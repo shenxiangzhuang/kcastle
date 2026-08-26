@@ -1,13 +1,17 @@
+use std::collections::HashSet;
 use std::error::Error;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
+
+use crate::app_store::AppStore;
 
 const REGISTRY_FILE: &str = "projects.json";
 const REGISTRY_VERSION: u32 = 2;
 const DEFAULT_PROJECT_ID: &str = "default";
+const LEGACY_PROJECTS_MIGRATION: &str = "projects-json-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -67,45 +71,19 @@ enum StoredRegistry {
 }
 
 pub(crate) struct ProjectStore {
-    root: PathBuf,
+    store: AppStore,
     projects: Vec<Project>,
     archived: Vec<ProjectRecord>,
 }
 
 impl ProjectStore {
     pub(crate) fn load(
-        root: PathBuf,
+        source: impl ProjectAppStoreSource,
         initial_project: Option<PathBuf>,
     ) -> Result<(Self, usize), Box<dyn Error>> {
-        fs::create_dir_all(root.join("sessions"))?;
-        let registry_path = root.join(REGISTRY_FILE);
-        let stored = match fs::read(&registry_path) {
-            Ok(bytes) => Some(serde_json::from_slice::<StoredRegistry>(&bytes)?),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
-
-        let (records, migrated) = match stored {
-            Some(StoredRegistry::V2(registry)) => {
-                if registry.version != REGISTRY_VERSION {
-                    return Err(format!(
-                        "unsupported project registry version: {}",
-                        registry.version
-                    )
-                    .into());
-                }
-                (registry.projects, false)
-            }
-            Some(StoredRegistry::Legacy(registry)) => (
-                registry
-                    .projects
-                    .into_iter()
-                    .map(|path| ProjectRecord::from_legacy(path, &root))
-                    .collect(),
-                true,
-            ),
-            None => (Vec::new(), true),
-        };
+        let store = source.into_app_store()?;
+        migrate_legacy_projects(&store)?;
+        let records = load_project_records(&store)?;
 
         let mut projects = Vec::new();
         let mut archived = Vec::new();
@@ -113,11 +91,11 @@ impl ProjectStore {
             if record.archived {
                 archived.push(record);
             } else {
-                projects.push(Project::from_record(record));
+                projects.push(Project::from_record(record, &store));
             }
         }
 
-        let default = Project::default_project(&root);
+        let default = Project::default_project(&store);
         fs::create_dir_all(&default.sessions_dir)?;
         if let Some(index) = projects.iter().position(Project::is_default) {
             projects[index] = default;
@@ -126,7 +104,7 @@ impl ProjectStore {
         }
 
         let mut store = Self {
-            root,
+            store,
             projects,
             archived,
         };
@@ -138,9 +116,6 @@ impl ProjectStore {
                 .position(Project::is_default)
                 .expect("default project must exist"),
         };
-        if migrated {
-            store.save()?;
-        }
         Ok((store, active))
     }
 
@@ -171,14 +146,14 @@ impl ProjectStore {
         {
             let mut record = self.archived.remove(index);
             record.archived = false;
-            let project = Project::from_record(record);
+            let project = Project::from_record(record, &self.store);
             fs::create_dir_all(&project.sessions_dir)?;
             self.projects.push(project);
             self.save()?;
             return Ok(self.projects.len() - 1);
         }
 
-        let project = Project::new(path, &self.root);
+        let project = Project::new(path, &self.store);
         fs::create_dir_all(&project.sessions_dir)?;
         self.projects.push(project);
         self.save()?;
@@ -236,61 +211,68 @@ impl ProjectStore {
     }
 
     fn save(&self) -> Result<(), Box<dyn Error>> {
-        let mut projects = self
-            .projects
-            .iter()
-            .cloned()
-            .map(Project::into_record)
-            .collect::<Vec<_>>();
-        projects.extend(self.archived.iter().cloned());
-        let registry = RegistryV2 {
-            version: REGISTRY_VERSION,
-            projects,
-        };
-        let path = self.root.join(REGISTRY_FILE);
-        let temporary = self.root.join(format!("{REGISTRY_FILE}.tmp"));
-        let mut file = File::create(&temporary)?;
-        file.write_all(&serde_json::to_vec_pretty(&registry)?)?;
-        file.sync_all()?;
-        fs::rename(&temporary, &path)?;
-        if let Ok(directory) = File::open(&self.root) {
-            let _ = directory.sync_all();
-        }
-        Ok(())
+        self.store.write(|transaction| {
+            transaction.execute("DELETE FROM projects", [])?;
+            let mut ordinal = 0_i64;
+            for project in &self.projects {
+                insert_project(
+                    transaction,
+                    project.id.as_str(),
+                    ordinal,
+                    &project.name,
+                    &project.path,
+                    false,
+                )?;
+                ordinal += 1;
+            }
+            for project in &self.archived {
+                insert_project(
+                    transaction,
+                    project.id.as_str(),
+                    ordinal,
+                    &project.name,
+                    &project.path,
+                    true,
+                )?;
+                ordinal += 1;
+            }
+            Ok(())
+        })
     }
 }
 
 impl Project {
-    fn default_project(root: &Path) -> Self {
-        let path = root.join("sessions").join(DEFAULT_PROJECT_ID);
+    fn default_project(store: &AppStore) -> Self {
+        let path = store.project_root(DEFAULT_PROJECT_ID);
         Self {
             id: ProjectId::default_project(),
-            name: display_name(&path),
-            path: path.clone(),
-            sessions_dir: path,
+            name: "Default".into(),
+            path,
+            sessions_dir: store.sessions_dir(DEFAULT_PROJECT_ID),
             missing: false,
         }
     }
 
-    fn new(path: PathBuf, root: &Path) -> Self {
+    fn new(path: PathBuf, store: &AppStore) -> Self {
         let name = display_name(&path);
         let storage_key = legacy_storage_key(&name, &path);
         Self {
             id: ProjectId(storage_key.clone()),
             name,
             path,
-            sessions_dir: root.join("sessions").join(storage_key),
+            sessions_dir: store.sessions_dir(&storage_key),
             missing: false,
         }
     }
 
-    fn from_record(record: ProjectRecord) -> Self {
+    fn from_record(record: ProjectRecord, store: &AppStore) -> Self {
         let missing = !record.path.is_dir();
+        let sessions_dir = store.sessions_dir(record.id.as_str());
         Self {
             id: record.id,
             name: record.name,
             path: record.path,
-            sessions_dir: record.sessions_dir,
+            sessions_dir,
             missing,
         }
     }
@@ -303,6 +285,191 @@ impl Project {
             sessions_dir: self.sessions_dir,
             archived: false,
         }
+    }
+}
+
+pub(crate) trait ProjectAppStoreSource {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>>;
+}
+
+impl ProjectAppStoreSource for AppStore {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>> {
+        Ok(self)
+    }
+}
+
+impl ProjectAppStoreSource for PathBuf {
+    fn into_app_store(self) -> Result<AppStore, Box<dyn Error>> {
+        AppStore::open(self)
+    }
+}
+
+fn migrate_legacy_projects(store: &AppStore) -> Result<(), Box<dyn Error>> {
+    if !store.migration_complete(LEGACY_PROJECTS_MIGRATION)? {
+        let registry_path = store.root().join(REGISTRY_FILE);
+        let stored = match fs::read(&registry_path) {
+            Ok(bytes) => Some(serde_json::from_slice::<StoredRegistry>(&bytes)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut records = match stored {
+            Some(StoredRegistry::V2(registry)) => {
+                if registry.version != REGISTRY_VERSION {
+                    return Err(format!(
+                        "unsupported project registry version: {}",
+                        registry.version
+                    )
+                    .into());
+                }
+                registry.projects
+            }
+            Some(StoredRegistry::Legacy(registry)) => registry
+                .projects
+                .into_iter()
+                .map(|path| ProjectRecord::from_legacy(path, store.root()))
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let legacy_default = store.root().join("sessions").join(DEFAULT_PROJECT_ID);
+        records.retain(|record| record.id.as_str() != DEFAULT_PROJECT_ID);
+        records.insert(
+            0,
+            ProjectRecord {
+                id: ProjectId::default_project(),
+                name: "Default".into(),
+                path: store.project_root(DEFAULT_PROJECT_ID),
+                sessions_dir: legacy_default,
+                archived: false,
+            },
+        );
+        let mut ids = HashSet::new();
+        for record in &records {
+            validate_project_id(record.id.as_str())?;
+            if !ids.insert(record.id.as_str()) {
+                return Err(format!("duplicate project ID: {}", record.id.as_str()).into());
+            }
+        }
+        for record in &records {
+            let destination = store.sessions_dir(record.id.as_str());
+            migrate_sessions_directory(&record.sessions_dir, &destination)?;
+        }
+
+        store.write(|transaction| {
+            transaction.execute("DELETE FROM projects", [])?;
+            for (ordinal, record) in records.iter().enumerate() {
+                insert_project(
+                    transaction,
+                    record.id.as_str(),
+                    ordinal as i64,
+                    &record.name,
+                    &record.path,
+                    record.archived,
+                )?;
+            }
+            AppStore::mark_migration_complete(transaction, LEGACY_PROJECTS_MIGRATION)
+        })?;
+    }
+    store.backup_legacy_file(REGISTRY_FILE)?;
+    Ok(())
+}
+
+fn migrate_sessions_directory(source: &Path, destination: &Path) -> Result<(), Box<dyn Error>> {
+    if source == destination {
+        fs::create_dir_all(destination)?;
+        return Ok(());
+    }
+    if !source.exists() {
+        fs::create_dir_all(destination)?;
+        return Ok(());
+    }
+    if destination.exists() {
+        return Err(format!(
+            "cannot migrate {} because destination already exists: {}",
+            source.display(),
+            destination.display()
+        )
+        .into());
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "session destination has no parent: {}",
+            destination.display()
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+fn load_project_records(store: &AppStore) -> Result<Vec<ProjectRecord>, Box<dyn Error>> {
+    let connection = store.connection()?;
+    let mut statement = connection.prepare(
+        "SELECT project_id, name, workspace_path_json, archived FROM projects ORDER BY ordinal",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let id = ProjectId(row.get(0)?);
+        validate_project_id(id.as_str()).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        Ok(ProjectRecord {
+            sessions_dir: store.sessions_dir(id.as_str()),
+            id,
+            name: row.get(1)?,
+            path: serde_json::from_slice(&row.get::<_, Vec<u8>>(2)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Blob,
+                    Box::new(error),
+                )
+            })?,
+            archived: row.get::<_, i64>(3)? != 0,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn insert_project(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+    ordinal: i64,
+    name: &str,
+    path: &Path,
+    archived: bool,
+) -> Result<(), Box<dyn Error>> {
+    validate_project_id(project_id)?;
+    let workspace_path_json = serde_json::to_vec(path)?;
+    transaction.execute(
+        "INSERT INTO projects (project_id, ordinal, name, workspace_path_json, archived)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            project_id,
+            ordinal,
+            name,
+            workspace_path_json,
+            i64::from(archived),
+        ],
+    )?;
+    Ok(())
+}
+
+fn validate_project_id(project_id: &str) -> Result<(), std::io::Error> {
+    if !project_id.is_empty()
+        && project_id.len() <= 128
+        && project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid project ID: {project_id:?}"),
+        ))
     }
 }
 
@@ -366,11 +533,12 @@ mod tests {
         let project = store.project(active).unwrap();
 
         assert!(project.is_default());
-        assert_eq!(project.name, "default");
-        assert_eq!(project.path, root.join("sessions/default"));
-        assert_eq!(project.sessions_dir, root.join("sessions/default"));
+        assert_eq!(project.name, "Default");
+        assert_eq!(project.path, root.join("projects/default"));
+        assert_eq!(project.sessions_dir, root.join("projects/default/sessions"));
         assert!(project.sessions_dir.is_dir());
 
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -405,6 +573,8 @@ mod tests {
         assert_eq!(reloaded.projects().len(), 3);
         assert_eq!(reloaded.project(active).unwrap().name, "second");
 
+        drop(reloaded);
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -434,6 +604,7 @@ mod tests {
         assert!(reloaded.project(missing).unwrap().missing);
         reloaded.remove(missing).unwrap();
 
+        drop(reloaded);
         let (reloaded, _) = ProjectStore::load(root.clone(), None).unwrap();
         assert!(
             reloaded
@@ -443,6 +614,7 @@ mod tests {
         );
         assert!(reloaded.projects().iter().any(Project::is_default));
 
+        drop(reloaded);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -472,10 +644,125 @@ mod tests {
             .unwrap();
         assert_eq!(project.sessions_dir, legacy_sessions);
 
-        let persisted: RegistryV2 =
-            serde_json::from_slice(&fs::read(root.join(REGISTRY_FILE)).unwrap()).unwrap();
-        assert_eq!(persisted.version, REGISTRY_VERSION);
+        assert!(!root.join(REGISTRY_FILE).exists());
+        assert!(
+            root.join("backups/pre-app-sqlite")
+                .join(REGISTRY_FILE)
+                .is_file()
+        );
 
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn default_sqlite_bundle_moves_under_projects_and_migration_is_idempotent() {
+        let root = test_root("default-migration");
+        let legacy = root.join("sessions/default");
+        fs::create_dir_all(&legacy).unwrap();
+        for (name, bytes) in [
+            ("sessions.sqlite3", b"database".as_slice()),
+            ("sessions.sqlite3-wal", b"wal".as_slice()),
+            ("sessions.sqlite3-shm", b"shm".as_slice()),
+            ("export.jsonl", b"export".as_slice()),
+        ] {
+            fs::write(legacy.join(name), bytes).unwrap();
+        }
+
+        let (store, active) = ProjectStore::load(root.clone(), None).unwrap();
+        let sessions = store.project(active).unwrap().sessions_dir.clone();
+        assert_eq!(sessions, root.join("projects/default/sessions"));
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read(sessions.join("sessions.sqlite3")).unwrap(),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(sessions.join("sessions.sqlite3-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            fs::read(sessions.join("sessions.sqlite3-shm")).unwrap(),
+            b"shm"
+        );
+        assert_eq!(fs::read(sessions.join("export.jsonl")).unwrap(), b"export");
+        drop(store);
+
+        let (reopened, active) = ProjectStore::load(root.clone(), None).unwrap();
+        assert_eq!(reopened.project(active).unwrap().sessions_dir, sessions);
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn conflicting_default_destination_preserves_both_directories_for_retry() {
+        let root = test_root("migration-conflict");
+        let legacy = root.join("sessions/default");
+        let destination = root.join("projects/default/sessions");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(legacy.join("sessions.sqlite3"), b"legacy").unwrap();
+        fs::write(destination.join("sessions.sqlite3"), b"destination").unwrap();
+
+        assert!(ProjectStore::load(root.clone(), None).is_err());
+        assert_eq!(
+            fs::read(legacy.join("sessions.sqlite3")).unwrap(),
+            b"legacy"
+        );
+        assert_eq!(
+            fs::read(destination.join("sessions.sqlite3")).unwrap(),
+            b"destination"
+        );
+
+        fs::remove_dir_all(&destination).unwrap();
+        let (store, active) = ProjectStore::load(root.clone(), None).unwrap();
+        assert_eq!(
+            fs::read(
+                store
+                    .project(active)
+                    .unwrap()
+                    .sessions_dir
+                    .join("sessions.sqlite3")
+            )
+            .unwrap(),
+            b"legacy"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_legacy_project_id_cannot_escape_the_project_storage_root() {
+        let root = test_root("invalid-id");
+        let legacy_default = root.join("sessions/default");
+        fs::create_dir_all(&legacy_default).unwrap();
+        fs::write(legacy_default.join("sessions.sqlite3"), b"default").unwrap();
+        fs::write(
+            root.join(REGISTRY_FILE),
+            serde_json::to_vec(&RegistryV2 {
+                version: REGISTRY_VERSION,
+                projects: vec![ProjectRecord {
+                    id: ProjectId("../escape".into()),
+                    name: "Escape".into(),
+                    path: root.join("workspace"),
+                    sessions_dir: root.join("legacy-escape"),
+                    archived: false,
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = match ProjectStore::load(root.clone(), None) {
+            Ok(_) => panic!("invalid project ID unexpectedly migrated"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("invalid project ID"));
+        assert_eq!(
+            fs::read(legacy_default.join("sessions.sqlite3")).unwrap(),
+            b"default"
+        );
+        assert!(!root.join("escape").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

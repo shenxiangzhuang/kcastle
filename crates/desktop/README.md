@@ -17,17 +17,25 @@ Use `just macos-run-debug` for a debug build. These recipes create and sign
 unbundled executable and does not reproduce all AppKit behavior, especially fullscreen titlebar
 reveal. Configure at least one provider in **Settings → Models** before starting a session.
 
-Desktop preferences are stored in `~/.kcastle/settings.json`. The Models tab follows the DSH
-provider-card flow: configured providers stay editable, while Add provider lets you choose OpenAI
-or DeepSeek before entering its API key and editing its model catalog. The composer only lists
-models from providers with configured credentials. API keys saved there are never rendered
-back into the form, and the settings file is written with user-only permissions on Unix. Global
-model and permission choices are defaults for new sessions. Each project persists session metadata
-and append-only transactions in a SQLite WAL database in its configured sessions directory; the
-built-in Default project uses `~/.kcastle/sessions/default/sessions.sqlite3`. JSONL is export-only.
+Desktop preferences, provider catalogs, credentials, and the project registry are stored in the
+app-level SQLite WAL database `~/.kcastle/app.sqlite3`. The Models tab follows the DSH provider-card
+flow: configured providers stay editable, while Add provider lets you choose OpenAI or DeepSeek
+before entering its API key and editing its model catalog. The composer only lists models from
+providers with configured credentials. API keys are never rendered back into the form, and the app
+database and its WAL sidecars use user-only permissions on Unix. Global model and permission choices
+are defaults for new sessions.
 
-Development and isolated acceptance runs can set `KCASTLE_DATA_DIR` to put settings, the project
-registry, and every project session store under a separate data root. An absolute path is
+Each project persists session metadata and append-only transactions in its own SQLite WAL database
+at `~/.kcastle/projects/<project-id>/sessions/sessions.sqlite3`. The built-in Default project follows
+the same layout at `~/.kcastle/projects/default/sessions/sessions.sqlite3`; there is no separate
+top-level Default session store. JSONL is export-only. On the first launch after upgrading, the
+desktop imports `settings.json` and `projects.json`, moves the complete Default session directory,
+and preserves the old app files under `~/.kcastle/backups/pre-app-sqlite/`. The unused legacy
+`config.yaml` is backed up but not imported. The migration is restart-safe and stops without
+overwriting either directory if a destination conflict is detected.
+
+Development and isolated acceptance runs can set `KCASTLE_DATA_DIR` to put the app database and
+every project session store under a separate data root. An absolute path is
 recommended; a relative path is resolved from the process working directory. The variable must not
 be empty. Normal launches leave it unset and continue to use `~/.kcastle`.
 

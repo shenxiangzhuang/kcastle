@@ -24,6 +24,7 @@ ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true
 ratex-types.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
