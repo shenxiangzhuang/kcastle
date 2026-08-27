@@ -3,7 +3,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role as AxRole, div,
     prelude::FluentBuilder, px, rgba,
 };
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::spinner::Spinner;
 use gpui_component::text::TextView;
@@ -17,7 +17,7 @@ use crate::layout::SidebarMode;
 use crate::platform::gpui::MessagePresentation;
 use crate::platform::gpui::measured_container;
 use crate::ui_automation::ids;
-use crate::ui_theme::{UiPalette, metrics, palette, trajectory_palette};
+use crate::ui_theme::{TrajectoryPalette, UiPalette, metrics, palette, trajectory_palette};
 
 impl DesktopApp {
     pub(crate) fn conversation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -28,6 +28,9 @@ impl DesktopApp {
         } else {
             px(20.0)
         };
+        let show_chat = cx.listener(|this, _, window, cx| this.set_trajectory(false, window, cx));
+        let show_trajectory =
+            cx.listener(|this, _, window, cx| this.set_trajectory(true, window, cx));
         div()
             .flex()
             .flex_col()
@@ -77,26 +80,26 @@ impl DesktopApp {
                     .aria_label("Conversation views")
                     .flex()
                     .items_end()
-                    .h(px(34.0))
+                    .h(px(32.0))
                     .px_5()
-                    .gap_7()
+                    .gap_3()
                     .child(tab(
                         "chat-tab",
                         ids::CHAT_TAB,
                         "Chat",
                         self.core.surface == Surface::Chat,
-                        trajectory_colors.primary,
-                        trajectory_colors.label_tertiary,
-                        cx.listener(|this, _, window, cx| this.set_trajectory(false, window, cx)),
+                        trajectory_colors,
+                        cx,
+                        show_chat,
                     ))
                     .child(tab(
                         "trajectory-tab",
                         ids::TRAJECTORY_TAB,
                         "Trajectory",
                         self.core.surface == Surface::Trajectory,
-                        trajectory_colors.primary,
-                        trajectory_colors.label_tertiary,
-                        cx.listener(|this, _, window, cx| this.set_trajectory(true, window, cx)),
+                        trajectory_colors,
+                        cx,
+                        show_trajectory,
                     )),
             )
     }
@@ -647,8 +650,8 @@ fn tab(
     automation_id: &'static str,
     label: &'static str,
     active: bool,
-    active_color: gpui::Hsla,
-    inactive_color: gpui::Hsla,
+    colors: TrajectoryPalette,
+    cx: &gpui::App,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     div()
@@ -658,7 +661,7 @@ fn tab(
         .px_1()
         .border_b_2()
         .border_color(if active {
-            active_color
+            colors.primary
         } else {
             rgba(0x00000000).into()
         })
@@ -667,8 +670,8 @@ fn tab(
             automation_id,
             label,
             active,
-            active_color,
-            inactive_color,
+            colors,
+            cx,
             on_click,
         ))
 }
@@ -678,8 +681,8 @@ fn conversation_tab_button(
     automation_id: &'static str,
     label: &'static str,
     active: bool,
-    active_color: gpui::Hsla,
-    inactive_color: gpui::Hsla,
+    colors: TrajectoryPalette,
+    cx: &gpui::App,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> Button {
     Button::new(id)
@@ -687,9 +690,16 @@ fn conversation_tab_button(
         .accessibility_id(automation_id)
         .selected(active)
         .label(label)
-        .ghost()
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(if active {
+                    colors.label_primary
+                } else {
+                    colors.label_secondary
+                })
+                .hover(colors.hover),
+        )
         .compact()
-        .text_color(if active { active_color } else { inactive_color })
         .on_click(on_click)
 }
 
