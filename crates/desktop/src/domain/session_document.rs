@@ -868,6 +868,10 @@ impl SessionDocument {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "canonical committed events establish referenced projection nodes first"
+    )]
     fn apply_event(&mut self, recorded: &RecordedEvent, changes: &mut EventChanges) {
         let seq = recorded.seq;
         let time = &recorded.time;
@@ -2140,6 +2144,10 @@ fn append_response_text(
     (segment.ordinal, created)
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "committed provider tool schemas already passed serde serialization"
+)]
 fn materialize_prompt_snapshot<T: serde::Serialize>(
     instructions: Option<&str>,
     tools: &[T],

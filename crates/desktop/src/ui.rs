@@ -3,9 +3,11 @@ use gpui::{
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
 };
 use gpui_component::resizable::{h_resizable, resizable_panel};
+use gpui_component::{Icon, IconName};
 
 use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
+use crate::domain::RunState;
 use crate::layout::{SidebarMode, sidebar_max_width};
 use crate::platform::gpui::measured_container;
 use crate::ui_automation::ids;
@@ -19,6 +21,43 @@ impl Render for DesktopApp {
         let colors = palette(cx);
         let measurement_owner = cx.entity().downgrade();
         let sidebar_max_width = sidebar_max_width(f32::from(window.viewport_size().width));
+        let failure_banner = match &self.core.run {
+            RunState::Failed { failure } => Some(
+                div()
+                    .id("run-failure")
+                    .role(Role::Alert)
+                    .mx_4()
+                    .mt_2()
+                    .p_3()
+                    .flex()
+                    .gap_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(colors.danger)
+                    .bg(colors.surface)
+                    .text_sm()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size_4()
+                            .text_color(colors.danger),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .child(failure.message().to_owned())
+                            .children(
+                                failure.retryable().then_some(
+                                    div()
+                                        .mt_1()
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child("You can send another message to retry."),
+                                ),
+                            ),
+                    ),
+            ),
+            _ => None,
+        };
         let main = div()
             .relative()
             .flex()
@@ -35,6 +74,7 @@ impl Render for DesktopApp {
                     }
                 },
             ))
+            .children(failure_banner)
             .when(empty, |main| main.child(self.empty_conversation(cx)))
             .when(!empty, |main| {
                 main.child(self.conversation_header(cx))

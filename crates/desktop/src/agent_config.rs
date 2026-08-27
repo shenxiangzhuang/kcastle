@@ -29,6 +29,10 @@ const OPENAI_MODELS: &[(&str, &str, usize)] = &[
     ("gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000),
 ];
 
+#[allow(
+    clippy::unreachable,
+    reason = "callers use the closed built-in provider ids"
+)]
 pub(crate) fn default_provider_profile(provider_id: &str) -> ProviderProfile {
     let (display_name, api_base, models) = match provider_id {
         DEEPSEEK_PROVIDER_ID => ("DeepSeek", "https://api.deepseek.com", DEEPSEEK_MODELS),

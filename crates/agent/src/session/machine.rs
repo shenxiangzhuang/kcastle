@@ -381,6 +381,10 @@ impl SessionMachine {
         Ok(())
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "unresolved tool ids are derived from the tool index"
+    )]
     pub fn plan_recovery(
         &self,
         tx_id: TxId,
@@ -504,6 +508,10 @@ impl SessionMachine {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::expect_used,
+        reason = "event preconditions validate indexes before mutation"
+    )]
     fn apply_event(&mut self, recorded: &RecordedEvent) -> Result<(), SessionMachineError> {
         match &recorded.event {
             SessionEvent::RunStarted { run_id } => {
@@ -1232,6 +1240,10 @@ impl SessionMachine {
             .and_then(|step| step.current_request.as_ref())
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "active run ids are inserted before activation"
+    )]
     fn validate_transaction_boundary(&self) -> Result<(), SessionMachineError> {
         if let Some((request_id, _)) = &self.pending_tool_registration {
             return invalid(format!(

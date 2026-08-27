@@ -63,6 +63,7 @@ pub struct Agent {
 }
 
 impl Agent {
+    #[allow(clippy::expect_used, reason = "DEFAULT_MAX_TURNS is nonzero")]
     pub fn new(
         model: Model,
         instructions: impl Into<String>,

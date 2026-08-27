@@ -445,6 +445,10 @@ impl LaneIndex {
             .is_none_or(|entry| entry.start <= range.start)
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "non-monotonic lanes always build their aggregate tree"
+    )]
     fn summarize_range(&self, range: Range<usize>, work: &mut RenderWork) -> IntervalAggregate {
         debug_assert!(range.start < range.end);
         work.aggregate_queries = work.aggregate_queries.saturating_add(1);
@@ -496,6 +500,10 @@ pub(crate) struct TimedGeometryUpdate {
 }
 
 impl TimelineGeometry {
+    #[allow(
+        clippy::expect_used,
+        reason = "duration axes initialize a busy timeline in the same constructor"
+    )]
     pub(crate) fn build(axis: AxisId, spans: impl IntoIterator<Item = TimelineSpan>) -> Self {
         let mut spans = spans.into_iter().collect::<Vec<_>>();
         spans.sort_by_key(|span| span.sequence);
@@ -794,6 +802,11 @@ impl TimelineGeometry {
     /// Incrementally applies the common timed-axis delta: the current tail gains timing, and/or
     /// new source records form a contiguous suffix. Any edit that could shift an earlier busy-time
     /// coordinate is rejected, allowing the caller to fall back to `build` without risking drift.
+    #[allow(
+        clippy::expect_used,
+        clippy::unreachable,
+        reason = "entry guard restricts this update to initialized timed axes"
+    )]
     pub(crate) fn update_timed(
         &mut self,
         axis: AxisId,
@@ -1228,6 +1241,10 @@ impl TimelineGeometry {
     /// Resolves a stable record id to its rendered primitive without materializing a per-record
     /// lookup. Exact projections are source-ordered; LOD projections are lane/bin ordered, so both
     /// paths use binary search and retain O(P) projection memory for P primitives.
+    #[allow(
+        clippy::expect_used,
+        reason = "LOD search is entered only when the first cell has a cluster key"
+    )]
     pub(crate) fn render_cell_for_record(&self, cells: &[RenderCell], id: usize) -> Option<usize> {
         let geometry_index = self.cell_indices.get(id).and_then(|index| *index)?;
         let geometry_cell = self.cells.get(geometry_index)?;

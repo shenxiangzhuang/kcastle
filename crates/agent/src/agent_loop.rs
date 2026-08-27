@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 mod control;
@@ -8,7 +8,7 @@ use async_openai::types::responses::{
     CreateResponseArgs, EasyInputMessage, FunctionCallOutputItemParam, FunctionToolCall, InputItem,
     Item, OutputItem, Reasoning, Response, ResponseStreamEvent,
 };
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,7 @@ use crate::session::event::{
 use crate::session::machine::{PlannedBatch, SessionMachine};
 use crate::session::store::{AppendTx, CommitReceipt, SessionStoreError};
 use crate::tools::ToolResult;
-pub use control::{ActiveAgent, AgentError, AgentEvent, RunControl, RunSummary};
+pub use control::{ActiveAgent, AgentError, AgentEvent, RunControl, RunFailure, RunSummary};
 use control::{ApprovalCommand, InputCommand, RunChannels};
 
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(32);
@@ -47,24 +47,21 @@ impl AgentLoop {
 }
 
 pub(crate) fn start(agent: Agent, input: String) -> ActiveAgent {
-    spawn(agent, move |agent, channels, events| async move {
-        agent.run(input, channels, events).await
-    })
+    spawn(agent, Operation::Run(input))
 }
 
 pub(crate) fn start_compaction(agent: Agent, instructions: Option<String>) -> ActiveAgent {
-    spawn(agent, move |agent, channels, events| async move {
-        agent
-            .run_manual_compaction(instructions.as_deref(), channels, events)
-            .await
-    })
+    spawn(agent, Operation::Compact(instructions))
 }
 
-fn spawn<F, Fut>(agent: Agent, operation: F) -> ActiveAgent
-where
-    F: FnOnce(AgentLoop, RunChannels, EventSink) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<AgentLoop, Box<(AgentLoop, AgentError)>>> + Send + 'static,
-{
+enum Operation {
+    Run(String),
+    Compact(Option<String>),
+    #[cfg(test)]
+    Panic,
+}
+
+fn spawn(agent: Agent, operation: Operation) -> ActiveAgent {
     let (commands_tx, commands_rx) = mpsc::unbounded_channel();
     let (approvals_tx, approvals_rx) = mpsc::unbounded_channel();
     let (events_tx, events_rx) = mpsc::unbounded_channel();
@@ -81,14 +78,36 @@ where
     };
     let task = tokio::spawn(async move {
         let mut agent_loop = AgentLoop::new(agent);
-        if let Err(error) = agent_loop.acquire_writer_and_reload(&events_tx).await {
-            publish(&events_tx, AgentEvent::RunFailed(error.to_string()));
-            return agent_loop.into_agent();
-        }
-        let mut agent_loop = match operation(agent_loop, channels, events_tx.clone()).await {
-            Ok(agent_loop) => agent_loop,
-            Err(error) => {
-                let (mut agent_loop, error) = *error;
+        let outcome = AssertUnwindSafe(async {
+            if let Err(error) = agent_loop.acquire_writer_and_reload(&events_tx).await {
+                publish(
+                    &events_tx,
+                    AgentEvent::RunFailed(RunFailure::from_error(&error)),
+                );
+                return;
+            }
+            let result = match operation {
+                Operation::Run(input) => agent_loop.run(input, channels, &events_tx).await,
+                Operation::Compact(instructions) => {
+                    agent_loop
+                        .run_manual_compaction(instructions.as_deref(), channels, &events_tx)
+                        .await
+                }
+                #[cfg(test)]
+                Operation::Panic => {
+                    agent_loop
+                        .commit_now(
+                            vec![SessionEvent::RunStarted {
+                                run_id: RunId::random(),
+                            }],
+                            &events_tx,
+                        )
+                        .await
+                        .expect("panic fixture commits a started run");
+                    panic!("injected agent task panic");
+                }
+            };
+            if let Err(error) = result {
                 let aborted = matches!(error, AgentError::Aborted);
                 let cleanup = agent_loop
                     .terminate_after_error(aborted, &error, &events_tx)
@@ -96,19 +115,46 @@ where
                 match (aborted, cleanup) {
                     (true, Ok(())) => publish(&events_tx, AgentEvent::RunAborted),
                     (false, Ok(())) => {
-                        publish(&events_tx, AgentEvent::RunFailed(error.to_string()));
+                        publish(
+                            &events_tx,
+                            AgentEvent::RunFailed(RunFailure::from_error(&error)),
+                        );
                     }
                     (_, Err(cleanup)) => publish(
                         &events_tx,
-                        AgentEvent::RunFailed(format!(
-                            "{}; terminal commit failed: {cleanup}",
-                            error
+                        AgentEvent::RunFailed(RunFailure::new(
+                            format!("{}; terminal commit failed: {cleanup}", error),
+                            false,
                         )),
                     ),
                 }
-                agent_loop
             }
-        };
+        })
+        .catch_unwind()
+        .await;
+        if let Err(payload) = outcome {
+            let panic = panic_message(payload.as_ref());
+            // The durable replay replaces every possibly-partial in-memory mutation, then closes
+            // the interrupted lifecycle before ownership returns to the host.
+            let recovery = async {
+                agent_loop.acquire_writer_and_reload(&events_tx).await?;
+                agent_loop.recover_interrupted(&events_tx).await
+            }
+            .await;
+            let failure = match recovery {
+                Ok(()) => RunFailure::new(
+                    format!("agent task panicked and was recovered from storage: {panic}"),
+                    false,
+                ),
+                Err(error) => RunFailure::new(
+                    format!(
+                        "agent task panicked: {panic}; could not reload durable session: {error}"
+                    ),
+                    false,
+                ),
+            };
+            publish(&events_tx, AgentEvent::RunFailed(failure));
+        }
         // Returning an idle Agent drops the last run-scoped writer capability. Readers and a
         // future run may now acquire the session; OS ownership is also released on crash.
         agent_loop.agent.writer = None;
@@ -121,19 +167,25 @@ where
     }
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown panic")
+}
+
 impl AgentLoop {
     async fn run(
-        mut self,
+        &mut self,
         input: String,
         mut channels: RunChannels,
-        events: EventSink,
-    ) -> Result<Self, Box<(Self, AgentError)>> {
+        events: &EventSink,
+    ) -> Result<(), AgentError> {
         if input.trim().is_empty() {
-            return Err(Box::new((self, AgentError::EmptyInput)));
+            return Err(AgentError::EmptyInput);
         }
-        if let Err(error) = self.recover_interrupted(&events).await {
-            return Err(Box::new((self, error)));
-        }
+        self.recover_interrupted(events).await?;
 
         let run_id = RunId::random();
         let turn_id = TurnId::random();
@@ -163,18 +215,16 @@ impl AgentLoop {
                 items,
             },
         ];
-        if let Err(error) = self.commit_now(initial, &events).await {
-            return Err(Box::new((self, error)));
-        }
+        self.commit_now(initial, events).await?;
         let result = self
-            .run_loop(run_id, turn_id, step_id, &mut channels, &events)
+            .run_loop(run_id, turn_id, step_id, &mut channels, events)
             .await;
         match result {
             Ok(summary) => {
-                publish(&events, AgentEvent::RunFinished(summary));
-                Ok(self)
+                publish(events, AgentEvent::RunFinished(summary));
+                Ok(())
             }
-            Err(error) => Err(Box::new((self, error))),
+            Err(error) => Err(error),
         }
     }
 
@@ -627,6 +677,10 @@ impl AgentLoop {
         Ok(())
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "authorization loop resolves every indexed tool before dispatch"
+    )]
     async fn execute_tools(
         &mut self,
         calls: &[FunctionToolCall],
@@ -1413,16 +1467,14 @@ impl AgentLoop {
     }
 
     async fn run_manual_compaction(
-        mut self,
+        &mut self,
         instructions: Option<&str>,
         mut channels: RunChannels,
-        events: EventSink,
-    ) -> Result<Self, Box<(Self, AgentError)>> {
-        if let Err(error) = self.recover_interrupted(&events).await {
-            return Err(Box::new((self, error)));
-        }
+        events: &EventSink,
+    ) -> Result<(), AgentError> {
+        self.recover_interrupted(events).await?;
         let Some(config) = self.agent.compaction else {
-            return Err(Box::new((self, AgentError::NothingToCompact)));
+            return Err(AgentError::NothingToCompact);
         };
         let tools = self.agent.tool_schemas();
         let tokens = context_tokens(self.agent.machine.state(), &self.agent.instructions, &tools);
@@ -1433,48 +1485,36 @@ impl AgentLoop {
         )
         .is_none()
         {
-            return Err(Box::new((self, AgentError::NothingToCompact)));
+            return Err(AgentError::NothingToCompact);
         }
         let run_id = RunId::random();
-        if let Err(error) = self
-            .commit_now(
-                vec![SessionEvent::RunStarted {
-                    run_id: run_id.clone(),
-                }],
-                &events,
-            )
-            .await
-        {
-            return Err(Box::new((self, error)));
-        }
-        if let Err(error) = self
-            .compact_once(true, instructions, &mut channels, &events)
-            .await
-        {
-            return Err(Box::new((self, error)));
-        }
-        if let Err(error) = self
-            .commit_now(
-                vec![SessionEvent::RunTerminated {
-                    run_id,
-                    outcome: RunOutcome::Completed,
-                    error: None,
-                }],
-                &events,
-            )
-            .await
-        {
-            return Err(Box::new((self, error)));
-        }
+        self.commit_now(
+            vec![SessionEvent::RunStarted {
+                run_id: run_id.clone(),
+            }],
+            events,
+        )
+        .await?;
+        self.compact_once(true, instructions, &mut channels, events)
+            .await?;
+        self.commit_now(
+            vec![SessionEvent::RunTerminated {
+                run_id,
+                outcome: RunOutcome::Completed,
+                error: None,
+            }],
+            events,
+        )
+        .await?;
         publish(
-            &events,
+            events,
             AgentEvent::RunFinished(RunSummary {
                 output: format!("Compacted {tokens} tokens"),
                 response_id: String::new(),
                 usage: None,
             }),
         );
-        Ok(self)
+        Ok(())
     }
 }
 
@@ -1631,6 +1671,58 @@ mod tests {
         );
         agent.writer = Some(agent.store.acquire_writer(&agent.info.id).unwrap());
         AgentLoop::new(agent)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn agent_task_panic_is_reported_and_returns_a_reloaded_agent() {
+        let agent = Agent::new(
+            Model::new("test", "key", "http://127.0.0.1", "test-model", 128_000),
+            "test instructions",
+            Session::memory(),
+            ".",
+        );
+        let session_id = agent.session_info().id.clone();
+        let mut active = spawn(agent, Operation::Panic);
+
+        let mut receipts = Vec::new();
+        let failure = loop {
+            match active
+                .next_event()
+                .await
+                .expect("panic recovery keeps the event stream open")
+            {
+                AgentEvent::SessionCommitted(receipt) => receipts.push(receipt),
+                AgentEvent::RunFailed(failure) => break failure,
+                _ => {}
+            }
+        };
+        assert!(failure.message().contains("injected agent task panic"));
+        assert!(failure.message().contains("recovered from storage"));
+        assert!(!failure.retryable());
+        assert!(
+            receipts
+                .iter()
+                .flat_map(|receipt| &receipt.events)
+                .any(|recorded| matches!(
+                    &recorded.event,
+                    SessionEvent::RunTerminated {
+                        outcome: RunOutcome::Aborted,
+                        ..
+                    }
+                ))
+        );
+        let agent = active
+            .finish()
+            .await
+            .expect("panic remains inside the task");
+        assert_eq!(agent.session_info().id, session_id);
+        assert!(
+            agent
+                .machine
+                .plan_recovery(TxId::random(), agent.clock.now())
+                .expect("recovered machine remains valid")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2735,7 +2827,7 @@ mod tests {
             .expect("contending agent must fail promptly")
             .expect("contending agent must publish its failure");
         assert!(
-            matches!(failure, AgentEvent::RunFailed(message) if message.contains("active writer"))
+            matches!(failure, AgentEvent::RunFailed(failure) if failure.message().contains("active writer"))
         );
         let mut agent_b = active_b.finish().await.unwrap();
 
@@ -2787,7 +2879,9 @@ mod tests {
             match event {
                 AgentEvent::SessionCommitted(receipt) => receipts.push(receipt),
                 AgentEvent::RunFinished(_) => break,
-                AgentEvent::RunFailed(error) => panic!("second agent unexpectedly failed: {error}"),
+                AgentEvent::RunFailed(error) => {
+                    panic!("second agent unexpectedly failed: {}", error.message())
+                }
                 _ => {}
             }
         }
@@ -2933,8 +3027,9 @@ mod tests {
             .expect("stale agent must publish its failure");
         assert!(matches!(
             failure,
-            AgentEvent::RunFailed(message)
-                if message.contains("configuration changed") && message.contains("reopen")
+            AgentEvent::RunFailed(failure)
+                if failure.message().contains("configuration changed")
+                    && failure.message().contains("reopen")
         ));
         let agent_b = active_b.finish().await.unwrap();
 

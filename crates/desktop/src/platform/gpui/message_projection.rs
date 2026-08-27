@@ -115,6 +115,10 @@ impl MessagePresentationStore {
         }
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "rendering activates its presentation namespace before syncing messages"
+    )]
     pub(crate) fn sync_message(
         &mut self,
         id: MessageId,

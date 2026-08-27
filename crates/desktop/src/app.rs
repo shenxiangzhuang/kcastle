@@ -306,6 +306,10 @@ pub(crate) struct DesktopApp {
 }
 
 impl DesktopApp {
+    #[allow(
+        clippy::expect_used,
+        reason = "DesktopStartup contains the ProjectStore-validated active project"
+    )]
     pub(crate) fn new(
         startup: DesktopStartup,
         window: &mut Window,
@@ -696,7 +700,7 @@ impl DesktopApp {
             SessionRuntimeStatus::Settling => RunState::Running {
                 run: snapshot.active_run.unwrap_or_default(),
             },
-            SessionRuntimeStatus::Failed(message) => RunState::Failed { message },
+            SessionRuntimeStatus::Failed(failure) => RunState::Failed { failure },
         };
         if previous_path != snapshot.session.path {
             if let Some(project) = self

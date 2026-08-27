@@ -208,6 +208,10 @@ impl DesktopApp {
             }))
     }
 
+    #[allow(
+        clippy::unreachable,
+        reason = "notice messages return before presentation rendering"
+    )]
     fn message_view(
         &self,
         index: usize,

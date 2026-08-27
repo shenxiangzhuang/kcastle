@@ -26,7 +26,7 @@ pub(crate) fn register_generated_asset(bytes: Vec<u8>) -> SharedString {
     GENERATED_ASSETS
         .get_or_init(Default::default)
         .lock()
-        .expect("generated asset cache poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(path.clone())
         .or_insert(bytes);
     path.into()
@@ -39,7 +39,7 @@ impl AssetSource for DesktopAssets {
         if let Some(bytes) = GENERATED_ASSETS
             .get_or_init(Default::default)
             .lock()
-            .expect("generated asset cache poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(path)
         {
             return Ok(Some(Cow::Owned(bytes.clone())));

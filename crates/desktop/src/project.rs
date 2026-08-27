@@ -89,7 +89,7 @@ impl ProjectStore {
                 .projects
                 .iter()
                 .position(Project::is_default)
-                .expect("default project must exist"),
+                .unwrap_or_default(),
         };
         Ok((store, active))
     }

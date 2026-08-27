@@ -8,6 +8,7 @@ use crate::domain::{
 };
 use crate::layout::{LayoutInput, LayoutPlan, resolve_layout};
 use im::Vector;
+use kcastle_agent::RunFailure;
 
 pub(crate) const INITIAL_SESSION_LIMIT: usize = 5;
 pub(crate) const SESSION_PAGE_SIZE: usize = 10;
@@ -155,7 +156,7 @@ pub(crate) enum RunState {
         run: RunId,
     },
     Failed {
-        message: String,
+        failure: RunFailure,
     },
 }
 

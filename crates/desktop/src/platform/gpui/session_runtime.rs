@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use gpui::{Context, Window};
 use kcastle_agent::{
-    Agent, AgentEvent, CommitReceipt, Model, ReasoningEffort, RunControl, Session, SessionConfig,
-    SessionInfo,
+    Agent, AgentEvent, CommitReceipt, Model, ReasoningEffort, RunControl, RunFailure, Session,
+    SessionConfig, SessionInfo,
 };
 
 use crate::agent_config::initial_session_title;
@@ -21,7 +21,7 @@ pub(crate) enum SessionRuntimeStatus {
     Configuring,
     Running,
     Settling,
-    Failed(String),
+    Failed(RunFailure),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +37,7 @@ enum RuntimeOperation {
 enum RunTerminal {
     Finished,
     Aborted,
-    Failed(String),
+    Failed(RunFailure),
 }
 
 /// The only authority for runtime lifecycle transitions.
@@ -137,13 +137,13 @@ impl RuntimeLifecycle {
         self.status = status;
     }
 
-    fn fail(&mut self, error: impl Into<String>) {
-        let error = error.into();
+    fn fail(&mut self, failure: impl Into<RunFailure>) {
+        let failure = failure.into();
         match self.status {
             SessionRuntimeStatus::Running | SessionRuntimeStatus::Settling => {
-                self.observe_terminal(RunTerminal::Failed(error));
+                self.observe_terminal(RunTerminal::Failed(failure));
             }
-            _ => self.status = SessionRuntimeStatus::Failed(error),
+            _ => self.status = SessionRuntimeStatus::Failed(failure),
         }
     }
 
@@ -188,7 +188,7 @@ impl RuntimeLifecycle {
         self.status = status;
     }
 
-    fn join_failed(&mut self, error: impl Into<String>) {
+    fn join_failed(&mut self, error: impl Into<RunFailure>) {
         self.terminal = None;
         self.status = SessionRuntimeStatus::Failed(error.into());
     }
@@ -385,7 +385,7 @@ impl SessionRuntime {
     #[cfg(test)]
     pub(crate) fn mark_failed_for_test(&mut self, message: impl Into<String>) {
         debug_assert!(!self.lifecycle.is_active());
-        self.lifecycle.fail(message);
+        self.lifecycle.fail(message.into());
     }
 
     pub(crate) fn set_allow_all_tools(&mut self, allow: bool, cx: &mut Context<Self>) -> bool {
@@ -510,7 +510,9 @@ impl SessionRuntime {
                         }
                         runtime
                             .lifecycle
-                            .complete_config(SessionRuntimeStatus::Failed(error.to_string()));
+                            .complete_config(SessionRuntimeStatus::Failed(
+                                error.to_string().into(),
+                            ));
                     }
                 }
                 runtime.agent = Some(agent);
@@ -564,7 +566,7 @@ impl SessionRuntime {
                     }
                     Err(error) => runtime
                         .lifecycle
-                        .complete_config(SessionRuntimeStatus::Failed(error.to_string())),
+                        .complete_config(SessionRuntimeStatus::Failed(error.to_string().into())),
                 }
                 runtime.agent = Some(agent);
                 cx.notify();
@@ -780,10 +782,11 @@ impl SessionRuntime {
             cx.notify();
             return;
         };
-        let approval = self
-            .approvals
-            .pop_front()
-            .expect("front approval was checked");
+        let Some(approval) = self.approvals.pop_front() else {
+            self.fail_runtime("approval queue changed before the decision was applied");
+            cx.notify();
+            return;
+        };
         cx.spawn(async move |this, cx| {
             if let Err(error) = control.approve(call_id, allow).await {
                 let _ = this.update(cx, |runtime, cx| {
@@ -868,7 +871,7 @@ impl SessionRuntime {
         }
     }
 
-    fn fail_runtime(&mut self, error: impl Into<String>) {
+    fn fail_runtime(&mut self, error: impl Into<RunFailure>) {
         self.lifecycle.fail(error);
         if matches!(self.lifecycle.status(), SessionRuntimeStatus::Settling) {
             self.approvals.clear();
@@ -935,11 +938,14 @@ fn settlement_config_failure(
 ) -> SessionRuntimeStatus {
     let message = match settled_status {
         SessionRuntimeStatus::Failed(run_error) => {
-            format!("{run_error}; could not save permission setting: {persistence_error}")
+            format!(
+                "{}; could not save permission setting: {persistence_error}",
+                run_error.message()
+            )
         }
         _ => format!("could not save permission setting: {persistence_error}"),
     };
-    SessionRuntimeStatus::Failed(message)
+    SessionRuntimeStatus::Failed(RunFailure::new(message, false))
 }
 
 fn millis_to_seconds(millis: i64) -> u64 {

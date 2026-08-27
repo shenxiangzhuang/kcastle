@@ -183,6 +183,10 @@ pub(crate) struct SessionParts {
 }
 
 impl Session {
+    #[allow(
+        clippy::expect_used,
+        reason = "fresh in-memory SQLite and empty replay are infallible constructors"
+    )]
     pub fn memory() -> Self {
         let store = SessionStore::open_in_memory().expect("in-memory SQLite must open");
         let id = SessionId::new();

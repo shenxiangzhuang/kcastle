@@ -66,7 +66,9 @@ impl StreamingMarkdownState {
                 .all(|node| node.position().is_some())
         {
             for node in &root.children[..first_unstable] {
-                let position = node.position().expect("positions checked above");
+                let Some(position) = node.position() else {
+                    continue;
+                };
                 let start = base + position.start.offset;
                 let end = base + position.end.offset;
                 self.frozen.push(MarkdownBlock {
@@ -145,8 +147,7 @@ fn normalize_latex_math_delimiters(source: &str) -> String {
     let mut protected = protected.into_iter().peekable();
     let mut replacements = replacements.into_iter().peekable();
     while index < source.len() {
-        if protected.peek().is_some_and(|range| range.start == index) {
-            let range = protected.next().expect("peeked protected range");
+        if let Some(range) = protected.next_if(|range| range.start == index) {
             output.push_str(&source[range.clone()]);
             index = range.end;
             continue;
@@ -160,7 +161,9 @@ fn normalize_latex_math_delimiters(source: &str) -> String {
         }
 
         let rest = &source[index..];
-        let character = rest.chars().next().expect("index is in bounds");
+        let Some(character) = rest.chars().next() else {
+            break;
+        };
         output.push(character);
         index += character.len_utf8();
     }
@@ -173,8 +176,8 @@ fn paired_latex_math_delimiters(source: &str, protected: &[std::ops::Range<usize
     let mut index = 0;
     let mut protected = protected.iter().peekable();
     while index < source.len() {
-        if protected.peek().is_some_and(|range| range.start == index) {
-            index = protected.next().expect("peeked protected range").end;
+        if let Some(range) = protected.next_if(|range| range.start == index) {
+            index = range.end;
             continue;
         }
 
@@ -195,7 +198,10 @@ fn paired_latex_math_delimiters(source: &str, protected: &[std::ops::Range<usize
         if delimiter.is_some() {
             index += 2;
         } else {
-            index += rest.chars().next().expect("index is in bounds").len_utf8();
+            let Some(character) = rest.chars().next() else {
+                break;
+            };
+            index += character.len_utf8();
         }
     }
     replacements.sort_unstable();
@@ -632,5 +638,21 @@ mod tests {
         assert!(state.tail_blocks().iter().any(|block| {
             matches!(&block.node, Node::Code(code) if code.lang.as_deref() == Some("rust") && code.value == "fn main() {")
         }));
+    }
+
+    #[test]
+    fn malformed_streaming_markdown_never_panics() {
+        let mut state = StreamingMarkdownState::default();
+        for source in [
+            "\\(",
+            "\\[\\frac{",
+            "```rust\nfn main() {",
+            "| incomplete | table\n| ---",
+            "- [x",
+            "中文 **unfinished",
+        ] {
+            state.update(source);
+            assert!(!state.tail_blocks().is_empty());
+        }
     }
 }
