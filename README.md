@@ -30,6 +30,8 @@ Source builds require Rust 1.97 or newer.
 just qa
 ```
 
+Project architecture and development workflows live in [docs/README.md](docs/README.md).
+
 ## License
 
 [Apache-2.0](LICENSE)

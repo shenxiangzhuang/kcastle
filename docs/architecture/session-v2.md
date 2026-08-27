@@ -62,6 +62,19 @@ placement.
   compactions, steps, turns, and runs in one terminal transaction.
 - A request is built from the full canonical request snapshot that was committed immediately before
   dispatch, never from a second mutable configuration path.
+- Compaction commits a summary boundary and retains recent input batches in the canonical replayed
+  surface; it never rewrites prior journal transactions.
+
+## Runtime ownership and control
+
+- An idle `Agent` owns one replayable `SessionMachine` and one concrete transactional
+  `SessionStore`; there is no second validator or mutable persistence mirror.
+- `Agent::start(self, input)` transfers the agent to one background task. `ActiveAgent::finish()`
+  returns ownership after the operation settles.
+- `RunControl` sends steering, queued input, approvals, and cancellation without shared mutable
+  agent state.
+- Steering runs after the current response and its tools. Queued input runs after the agent would
+  otherwise settle.
 
 ## DSH desktop semantics
 
