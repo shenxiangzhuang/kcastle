@@ -445,22 +445,28 @@ impl DesktopApp {
         let trajectory_scroll_owner = cx.entity().downgrade();
         trajectory_scroll.set_scroll_handler({
             move |event, _, cx| {
-                let _ = trajectory_scroll_owner.update(cx, |this, _| {
-                    let follows = if !event.is_scrolled {
-                        true
-                    } else if event.count > 0 && event.visible_range.end == event.count {
-                        this.trajectory_scroll
-                            .bounds_for_item(event.count - 1)
-                            .is_some_and(|last| {
-                                let remaining = (last.bottom()
-                                    - this.trajectory_scroll.viewport_bounds().bottom())
-                                .max(px(0.0));
-                                remaining <= px(2.0)
-                            })
-                    } else {
-                        false
-                    };
-                    this.trajectory_follow_tail.set(follows);
+                let owner = trajectory_scroll_owner.clone();
+                let (is_scrolled, visible_end, count) =
+                    (event.is_scrolled, event.visible_range.end, event.count);
+                // GPUI holds ListState's mutable borrow throughout this callback.
+                cx.defer(move |cx| {
+                    let _ = owner.update(cx, |this, _| {
+                        let follows = if !is_scrolled {
+                            true
+                        } else if count > 0 && visible_end == count {
+                            this.trajectory_scroll
+                                .bounds_for_item(count - 1)
+                                .is_some_and(|last| {
+                                    let remaining = (last.bottom()
+                                        - this.trajectory_scroll.viewport_bounds().bottom())
+                                    .max(px(0.0));
+                                    remaining <= px(2.0)
+                                })
+                        } else {
+                            false
+                        };
+                        this.trajectory_follow_tail.set(follows);
+                    });
                 });
             }
         });
@@ -2980,6 +2986,60 @@ mod tests {
             weak_view.upgrade().is_none(),
             "closing the test window must release its app and session database handles"
         );
+    }
+
+    #[gpui::test]
+    fn trajectory_scroll_callback_can_leave_and_rejoin_tail(cx: &mut gpui::TestAppContext) {
+        use gpui::{IntoElement, ScrollDelta, Styled, div, list, size};
+
+        struct TestList(ListState);
+        impl gpui::Render for TestList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                list(self.0.clone(), |_, _, _| {
+                    div().h(px(20.0)).w_full().into_any_element()
+                })
+                .size_full()
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-trajectory-scroll-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(startup, window, cx);
+            window.blur();
+            app
+        });
+        let state = cx.read_entity(&view, |app, _| app.trajectory_scroll.clone());
+        state.reset_with_uniform_height(5, px(20.0));
+        state.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(0.0),
+        });
+
+        for (delta, follows) in [(10.0, false), (-10.0, true)] {
+            cx.draw(
+                point(px(0.0), px(0.0)),
+                size(px(100.0), px(60.0)),
+                |_, cx| cx.new(|_| TestList(state.clone())).into_any_element(),
+            );
+            // Exercise GPUI's real callback while its ListState is mutably borrowed.
+            cx.simulate_event(ScrollWheelEvent {
+                position: point(px(50.0), px(30.0)),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(delta))),
+                ..Default::default()
+            });
+            cx.read_entity(&view, |app, _| {
+                assert_eq!(app.trajectory_follow_tail.get(), follows);
+            });
+        }
+
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn create_v2_session(
