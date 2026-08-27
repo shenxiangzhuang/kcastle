@@ -1304,6 +1304,10 @@ fn change_state_after_full_rebuild(
     advance_change_state(previous, Vector::new(), Vector::new(), false, false)
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "search-only change is appended immediately before it is extended"
+)]
 fn advance_change_state(
     previous: &TrajectoryProjection,
     search_indices: Vector<usize>,

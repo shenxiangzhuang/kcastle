@@ -1101,6 +1101,10 @@ impl TimelineModelCache {
         resolved_axis_range(viewport, geometry).map_or(geometry.domain, |range| range.range)
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "request row cache is initialized by the preceding branch"
+    )]
     fn request_rows(
         &mut self,
         projection: &crate::domain::TrajectoryProjection,
@@ -1126,6 +1130,10 @@ impl TimelineModelCache {
             .clone()
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "search and fold caches are checked or initialized before access"
+    )]
     fn search_snapshot(
         &mut self,
         projection: &crate::domain::TrajectoryProjection,
@@ -1712,6 +1720,10 @@ fn request_boundary_placements(
     boundaries
 }
 
+#[allow(
+    clippy::expect_used,
+    reason = "folded groups are emitted only after collecting hidden rows"
+)]
 fn project_ledger_rows(
     records: &Vector<Arc<TrajectoryRecord>>,
     matching: &TimelineMatches,
@@ -1881,6 +1893,10 @@ fn append_tool_summary_preview(
 /// owns exactly the hidden content interval; system rows remain explicit, and call summaries own
 /// only the contiguous tool run after an assistant. This keeps append work independent of the
 /// already-materialized session length.
+#[allow(
+    clippy::unreachable,
+    reason = "located appended rows cannot be existing turn summaries"
+)]
 fn append_projected_record(
     records: &Vector<Arc<TrajectoryRecord>>,
     index: usize,
@@ -2895,6 +2911,10 @@ impl DesktopApp {
             )
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "timeline cache presence is checked before mutable access"
+    )]
     fn ensure_timeline_model_cache(&self) {
         let projection = &self.core.session_view.trajectory;
         let revision = projection.revision();
@@ -3221,6 +3241,10 @@ impl DesktopApp {
         );
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "ledger list state is synchronized with the same projected rows"
+    )]
     fn trajectory_ledger(
         &self,
         rows: &TimelineRows,

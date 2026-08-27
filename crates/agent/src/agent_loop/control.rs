@@ -37,6 +37,96 @@ pub enum AgentError {
     Task(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFailure {
+    message: String,
+    retryable: bool,
+}
+
+impl RunFailure {
+    pub fn new(message: impl Into<String>, retryable: bool) -> Self {
+        Self {
+            message: message.into(),
+            retryable,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn from_error(error: &AgentError) -> Self {
+        use crate::session::store::SessionErrorClass;
+
+        let retryable = match error {
+            AgentError::MissingResponse | AgentError::ModelResponse(_) | AgentError::Task(_) => {
+                true
+            }
+            AgentError::OpenAI(error) => openai_error_is_retryable(error),
+            AgentError::Session(error) => error.classification() == SessionErrorClass::Transient,
+            AgentError::Store(error) => error.classification() == SessionErrorClass::Transient,
+            AgentError::EmptyInput
+            | AgentError::MaxTurns(_)
+            | AgentError::NothingToCompact
+            | AgentError::Aborted
+            | AgentError::Machine(_) => false,
+        };
+        Self::new(error.to_string(), retryable)
+    }
+}
+
+fn openai_error_is_retryable(error: &OpenAIError) -> bool {
+    match error {
+        OpenAIError::Reqwest(error) => {
+            error.is_connect()
+                || error.is_timeout()
+                || error.status().is_some_and(|status| {
+                    status.as_u16() == 408 || status.as_u16() == 429 || status.is_server_error()
+                })
+        }
+        OpenAIError::ApiError(error) => {
+            error.status_code.as_u16() == 408
+                || error.status_code.as_u16() == 429
+                || error.status_code.is_server_error()
+        }
+        OpenAIError::StreamError(_) => true,
+        _ => false,
+    }
+}
+
+impl From<String> for RunFailure {
+    fn from(message: String) -> Self {
+        Self::new(message, false)
+    }
+}
+
+impl From<&str> for RunFailure {
+    fn from(message: &str) -> Self {
+        Self::new(message, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_failure_marks_only_recoverable_agent_errors_as_retryable() {
+        assert!(RunFailure::from_error(&AgentError::MissingResponse).retryable());
+        assert!(!RunFailure::from_error(&AgentError::EmptyInput).retryable());
+        assert!(
+            !RunFailure::from_error(&AgentError::OpenAI(OpenAIError::InvalidArgument(
+                "bad model".into()
+            )))
+            .retryable()
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunSummary {
     pub output: String,
@@ -52,7 +142,7 @@ pub enum AgentEvent {
     ApprovalRequired(FunctionToolCall),
     RunFinished(RunSummary),
     RunAborted,
-    RunFailed(String),
+    RunFailed(RunFailure),
 }
 
 pub(super) struct InputCommand {

@@ -1,11 +1,22 @@
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use gpui::{
-    App, AppContext, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
+    StatefulInteractiveElement, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, accesskit::Role, div, px, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
 use kcastle_agent::{Agent, Session};
@@ -19,6 +30,7 @@ mod architecture_tests;
 mod assets;
 mod composer;
 mod conversation;
+mod crash;
 mod dialogs;
 mod domain;
 mod dsh_markdown;
@@ -55,21 +67,40 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .enable_all()
         .build()?;
     let _runtime = runtime.enter();
-    let root = data_root()?;
-    let (startup, appearance) = desktop_startup(root.clone())?;
+    let root = data_root().map_err(|error| error.to_string());
+    if let Ok(root) = &root {
+        crash::install(root);
+    }
+    let startup = root
+        .as_ref()
+        .map_err(Clone::clone)
+        .and_then(|root| desktop_startup(root.clone()).map_err(|error| error.to_string()));
     let application = gpui_platform::application().with_assets(DesktopAssets);
     application.on_reopen(move |cx| {
-        if cx.windows().is_empty()
-            && let Err(error) = desktop_startup(root.clone())
-                .and_then(|(startup, appearance)| open_desktop_window(startup, appearance, cx))
-        {
-            eprintln!("failed to reopen desktop window: {error}");
+        if cx.windows().is_empty() {
+            let startup = root
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|root| desktop_startup(root.clone()).map_err(|error| error.to_string()));
+            let result = match startup {
+                Ok((startup, appearance)) => open_desktop_window(startup, appearance, cx),
+                Err(error) => open_startup_error_window(error, cx),
+            };
+            if let Err(error) = result {
+                eprintln!("failed to reopen desktop window: {error}");
+            }
         }
         cx.activate(true);
     });
     application.run(move |cx| {
         init_ui(cx);
-        open_desktop_window(startup, appearance, cx).expect("failed to open desktop window");
+        let result = match startup {
+            Ok((startup, appearance)) => open_desktop_window(startup, appearance, cx),
+            Err(error) => open_startup_error_window(error, cx),
+        };
+        if let Err(error) = result {
+            eprintln!("failed to open desktop window: {error}");
+        }
         cx.activate(true);
     });
     Ok(())
@@ -102,7 +133,7 @@ fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dy
     let (projects, active_project) = ProjectStore::load(app_store, None)?;
     let project = projects
         .project(active_project)
-        .expect("active project should exist");
+        .ok_or("project store has no active project")?;
     let agent = Agent::new(model, INSTRUCTIONS, Session::memory(), project.path.clone());
     Ok((
         DesktopStartup {
@@ -127,26 +158,80 @@ fn open_desktop_window(
         Appearance::Light => Theme::change(ThemeMode::Light, None, cx),
         Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
-    let bounds = Bounds::centered(None, size(px(1180.0), px(720.0)), cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(720.0), px(620.0))),
-            titlebar: Some(TitlebarOptions {
-                title: Some(APP_NAME.into()),
-                appears_transparent: true,
-                traffic_light_position: None,
-            }),
-            window_background: WindowBackgroundAppearance::Blurred,
-            app_id: Some("dev.kcastle.desktop".into()),
-            ..Default::default()
-        },
-        move |window, cx| {
-            let view = cx.new(|cx| DesktopApp::new(startup, window, cx));
-            cx.new(|cx| Root::new(view, window, cx))
-        },
-    )?;
+    cx.open_window(desktop_window_options(cx), move |window, cx| {
+        let view = cx.new(|cx| DesktopApp::new(startup, window, cx));
+        cx.new(|cx| Root::new(view, window, cx))
+    })?;
     Ok(())
+}
+
+fn open_startup_error_window(message: String, cx: &mut App) -> Result<(), Box<dyn Error>> {
+    Theme::sync_system_appearance(None, cx);
+    cx.open_window(desktop_window_options(cx), move |window, cx| {
+        let view = cx.new(|_| StartupErrorView { message });
+        cx.new(|cx| Root::new(view, window, cx))
+    })?;
+    Ok(())
+}
+
+fn desktop_window_options(cx: &App) -> WindowOptions {
+    let bounds = Bounds::centered(None, size(px(1180.0), px(720.0)), cx);
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        window_min_size: Some(size(px(720.0), px(620.0))),
+        titlebar: Some(TitlebarOptions {
+            title: Some(APP_NAME.into()),
+            appears_transparent: true,
+            traffic_light_position: None,
+        }),
+        window_background: WindowBackgroundAppearance::Blurred,
+        app_id: Some("dev.kcastle.desktop".into()),
+        ..Default::default()
+    }
+}
+
+struct StartupErrorView {
+    message: String,
+}
+
+impl Render for StartupErrorView {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = ui_theme::palette(cx);
+        div()
+            .id("startup-error")
+            .role(Role::Alert)
+            .aria_label("Kcastle startup error")
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(colors.canvas)
+            .text_color(colors.text)
+            .child(
+                div()
+                    .max_w(px(560.0))
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface)
+                    .child(div().text_xl().child("Kcastle couldn't start"))
+                    .child(
+                        div()
+                            .mt_3()
+                            .text_sm()
+                            .text_color(colors.danger)
+                            .child(self.message.clone()),
+                    )
+                    .child(
+                        div()
+                            .mt_3()
+                            .text_sm()
+                            .text_color(colors.muted_text)
+                            .child("Close Kcastle and reopen it after fixing the problem."),
+                    ),
+            )
+    }
 }
 
 fn models_from_profiles(profiles: &[ProviderProfile]) -> Vec<ConfiguredModel> {

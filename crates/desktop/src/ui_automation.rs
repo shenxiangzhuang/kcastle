@@ -102,6 +102,7 @@ fn dynamic_id(kind: &str, value: &str) -> String {
     format!("kcastle.{kind}.{}", segment(value))
 }
 
+#[allow(clippy::expect_used, reason = "fmt::Write for String is infallible")]
 fn segment(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {

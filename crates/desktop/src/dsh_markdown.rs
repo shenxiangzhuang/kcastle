@@ -648,7 +648,7 @@ fn cached_math(source: &str, display: bool, font_size: f32) -> Result<RenderedMa
     let cache = MATH_CACHE.get_or_init(Default::default);
     if let Some(rendered) = cache
         .lock()
-        .expect("math cache poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&key)
         .cloned()
     {
@@ -659,7 +659,7 @@ fn cached_math(source: &str, display: bool, font_size: f32) -> Result<RenderedMa
     // ponytail: process-wide cache; add eviction only if long sessions show material growth.
     cache
         .lock()
-        .expect("math cache poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(key, rendered.clone());
     rendered
 }
@@ -849,10 +849,9 @@ fn append_inline_pieces(
                 if !matches!(pieces.last(), Some(InlinePiece::Text(_))) {
                     pieces.push(InlinePiece::Text(InlineOutput::default()));
                 }
-                let Some(InlinePiece::Text(output)) = pieces.last_mut() else {
-                    unreachable!();
-                };
-                append_inlines(std::slice::from_ref(node), style, colors, output);
+                if let Some(InlinePiece::Text(output)) = pieces.last_mut() {
+                    append_inlines(std::slice::from_ref(node), style, colors, output);
+                }
             }
         }
     }

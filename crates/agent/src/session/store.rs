@@ -735,6 +735,10 @@ impl SessionStore {
         Ok(())
     }
 
+    #[allow(
+        clippy::expect_used,
+        reason = "branch checks the pending catalog row before taking it"
+    )]
     pub fn catalog(
         &self,
         project_id: &str,
@@ -2215,6 +2219,10 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(readonly.load(&session.id).unwrap().metadata.id, session.id);
+        assert!(matches!(
+            readonly.acquire_writer(&session.id),
+            Err(SessionStoreError::ReadonlyStore)
+        ));
         drop(readonly);
 
         let missing_path = directory.join("missing.sqlite3");

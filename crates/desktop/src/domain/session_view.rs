@@ -29,6 +29,10 @@ pub(crate) struct SessionView {
 }
 
 impl SessionView {
+    #[allow(
+        clippy::expect_used,
+        reason = "conversation ids come from the same canonical document snapshot"
+    )]
     pub(crate) fn from_document(
         document: &SessionDocument,
         title: &str,
