@@ -86,16 +86,6 @@ to the desktop crate. It uses `async-openai` directly instead of maintaining a p
 - Tokio, async-openai Responses API, Serde, rusqlite/SQLite WAL for session transactions, and GPUI
   for the desktop UI.
 - `cargo fmt`; Clippy with warnings denied; built-in Rust test harness.
-- Desktop launches for development, manual UI testing, and acceptance checks must set
-  `KCASTLE_DATA_DIR` to a non-empty absolute path dedicated to that task. Never point development
-  or test builds at the installed app's live data directory (normally `~/.kcastle`). Use separate
-  data roots for builds with incompatible storage schemas; reproduce user-data issues only on
-  disposable copies, leaving the original data untouched.
-- Ensure `KCASTLE_DATA_DIR` reaches the desktop process, not just its launcher. On macOS, package
-  the app first, then launch its executable directly, for example
-  `KCASTLE_DATA_DIR="$(mktemp -d /tmp/kcastle-dev.XXXXXX)" target/Kcastle.app/Contents/MacOS/kcastle`.
-  Do not assume setting the variable before `just macos-run`, `just macos-run-debug`, or `open`
-  passes it to the app launched through Launch Services.
 - For bug fixes, reproduce the failure before implementing the fix.
 - Tests protect non-trivial behavior and trust boundaries; avoid tests for trivial configuration.
 - Session storage changes require transaction/fault tests; session semantics require replay-prefix
