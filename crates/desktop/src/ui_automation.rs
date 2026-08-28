@@ -31,7 +31,6 @@ pub(crate) mod ids {
     pub(crate) const COMPOSER_SEND: &str = "kcastle.composer.send";
     pub(crate) const COMPOSER_STOP: &str = "kcastle.composer.stop";
     pub(crate) const COMPOSER_MENU: &str = "kcastle.composer.menu";
-    pub(crate) const COMPOSER_MENU_CLOSE: &str = "kcastle.composer.menu.close";
 
     pub(crate) const APPROVAL: &str = "kcastle.approval";
     pub(crate) const APPROVAL_DENY: &str = "kcastle.approval.deny";
@@ -69,7 +68,6 @@ pub(crate) mod ids {
         COMPOSER_SEND,
         COMPOSER_STOP,
         COMPOSER_MENU,
-        COMPOSER_MENU_CLOSE,
         APPROVAL,
         APPROVAL_DENY,
         APPROVAL_ALLOW,

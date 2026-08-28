@@ -692,21 +692,12 @@ fn menu_title(title: &'static str, cx: &mut Context<DesktopApp>) -> impl IntoEle
     div()
         .flex()
         .items_center()
-        .justify_between()
         .h(px(metrics::TAB_HEIGHT))
         .px_3()
         .border_b_1()
         .border_color(colors.border)
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(title)
-        .child(
-            Button::new("close-composer-menu")
-                .accessibility_id(ids::COMPOSER_MENU_CLOSE)
-                .icon(IconName::Close)
-                .ghost()
-                .compact()
-                .on_click(cx.listener(|this, _, _, cx| this.set_composer_menu(None, cx))),
-        )
 }
 
 fn menu_item(
