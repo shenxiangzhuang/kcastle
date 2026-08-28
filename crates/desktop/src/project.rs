@@ -221,7 +221,7 @@ impl Project {
         let path = store.project_root(DEFAULT_PROJECT_ID);
         Self {
             id: ProjectId::default_project(),
-            name: "Default".into(),
+            name: display_name(&path),
             path,
             sessions_dir: store.sessions_dir(DEFAULT_PROJECT_ID),
             missing: false,
@@ -388,7 +388,10 @@ mod tests {
         let project = store.project(active).unwrap();
 
         assert!(project.is_default());
-        assert_eq!(project.name, "Default");
+        assert_eq!(
+            project.name,
+            project.path.file_name().unwrap().to_str().unwrap()
+        );
         assert_eq!(project.path, root.join("projects/default"));
         assert_eq!(project.sessions_dir, root.join("projects/default/sessions"));
         assert!(project.sessions_dir.is_dir());
