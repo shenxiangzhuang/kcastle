@@ -105,6 +105,7 @@ pub(crate) fn active_model_index(
 
 #[derive(Clone, Debug)]
 struct SessionViewState {
+    surface: Surface,
     chat_anchor: ScrollAnchor,
     trajectory_offset: Option<ListOffset>,
     trajectory_follow_tail: bool,
@@ -159,6 +160,7 @@ impl SavedTimelineRange {
 impl Default for SessionViewState {
     fn default() -> Self {
         Self {
+            surface: Surface::Chat,
             chat_anchor: ScrollAnchor::Tail,
             trajectory_offset: None,
             trajectory_follow_tail: true,
@@ -977,7 +979,8 @@ impl DesktopApp {
     }
 
     fn select_runtime(&mut self, runtime: Entity<SessionRuntime>, cx: &mut Context<Self>) {
-        if runtime.entity_id() != self.selected_runtime.entity_id() {
+        let changing_session = runtime.entity_id() != self.selected_runtime.entity_id();
+        if changing_session {
             // A session load is asynchronous, so the user may keep changing search, tabs, tail
             // following, or scroll positions after the click that started it. Capture once more
             // at the atomic handoff; the earlier eager capture remains useful for a failed load,
@@ -1010,6 +1013,17 @@ impl DesktopApp {
             previous.transcript_updates = observation.transcript_updates;
             previous.metadata_generation = observation.metadata_generation;
             self.touch_runtime(key);
+        }
+        if changing_session {
+            let surface = location
+                .as_ref()
+                .and_then(|key| self.view_states.get(key))
+                .map(|state| state.surface)
+                .unwrap_or_default();
+            let _ = self.transition(match surface {
+                Surface::Chat => Action::ShowChat,
+                Surface::Trajectory => Action::ShowTrajectory,
+            });
         }
         self.restore_current_view_state(cx);
         self.evict_terminal_runtimes(cx);
@@ -1475,6 +1489,7 @@ impl DesktopApp {
             return;
         };
         let state = self.view_states.entry(key).or_default();
+        state.surface = self.core.surface;
         if self.core.surface == Surface::Trajectory {
             state.trajectory_follow_tail = self.trajectory_follow_tail.get();
             state.trajectory_offset = (!state.trajectory_follow_tail).then(|| {
@@ -4122,18 +4137,19 @@ mod tests {
 
         let loaded_target =
             Session::open_writable_in_project(&target.path, project.id.as_str()).unwrap();
-        cx.update(|_, app| {
+        cx.update(|window, app| {
             view.update(app, |this, cx| {
                 let source_key = this
                     .runtime_location(&this.selected_runtime)
                     .expect("the source draft is registered");
-                this.core.surface = Surface::Trajectory;
+                let source = this.selected_runtime.clone();
                 let generation = this.begin_runtime_selection_intent();
                 let target_key = (project.id.clone(), target.path.clone());
                 assert!(this.start_session_open_request(&target_key, generation));
 
                 // These changes happen after the eager capture performed by the click handler.
                 // The successful handoff must capture them once more before replacing the runtime.
+                this.set_trajectory(true, window, cx);
                 this.trajectory_query_value = "edited while loading".into();
                 this.trajectory_follow_tail.set(false);
                 let offset = ListOffset {
@@ -4191,6 +4207,13 @@ mod tests {
                     Some(SavedTimelineRange::capture(viewport))
                 );
                 assert_eq!(this.core.session.current, target.path);
+                assert_eq!(this.core.surface, Surface::Chat);
+                assert!(!this.core.layout_input.trajectory_visible);
+
+                this.select_runtime(source, cx);
+                assert_eq!(this.core.surface, Surface::Trajectory);
+                assert!(this.core.layout_input.trajectory_visible);
+                assert_eq!(this.trajectory_query_value, "edited while loading");
             });
         });
 
@@ -4724,7 +4747,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn evicted_runtime_restores_ranges_on_the_fresh_projection_lineage(
+    fn evicted_runtime_restores_surface_and_ranges_on_the_fresh_projection_lineage(
         cx: &mut gpui::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
@@ -4769,7 +4792,7 @@ mod tests {
 
         let first_session =
             Session::open_writable_in_project(&session_info.path, project.id.as_str()).unwrap();
-        let (old_lineage, evicted_runtime) = cx.update(|_, app| {
+        let (old_lineage, evicted_runtime) = cx.update(|window, app| {
             view.update(app, |this, cx| {
                 let draft = this.selected_runtime.clone();
                 let runtime = this
@@ -4777,7 +4800,21 @@ mod tests {
                     .unwrap();
                 let key = (project.id.clone(), session_info.id.clone());
                 this.select_runtime(runtime.clone(), cx);
-                this.core.surface = Surface::Trajectory;
+                this.set_trajectory(true, window, cx);
+                assert_eq!(this.core.surface, Surface::Trajectory);
+                this.select_runtime(draft.clone(), cx);
+                assert_eq!(this.core.surface, Surface::Chat);
+                this.select_runtime(runtime.clone(), cx);
+                assert_eq!(this.core.surface, Surface::Trajectory);
+
+                this.set_trajectory(false, window, cx);
+                assert_eq!(this.core.surface, Surface::Chat);
+                this.select_runtime(draft.clone(), cx);
+                this.select_runtime(runtime.clone(), cx);
+                assert_eq!(this.core.surface, Surface::Chat);
+                this.set_trajectory(true, window, cx);
+                this.select_runtime(runtime.clone(), cx);
+                assert_eq!(this.core.surface, Surface::Trajectory);
 
                 let projection = &this.core.session_view.trajectory;
                 let old_lineage = projection.projection_lineage();
@@ -4798,6 +4835,7 @@ mod tests {
                 // Switching away captures the semantic ranges. Removing the terminal runtime then
                 // drops the document and its projection identity exactly like LRU eviction.
                 this.select_runtime(draft, cx);
+                assert_eq!(this.core.surface, Surface::Chat);
                 this.remove_cached_runtime(&key);
                 (old_lineage, runtime.downgrade())
             })
@@ -4824,6 +4862,8 @@ mod tests {
                 assert_ne!(new_lineage, old_lineage);
 
                 this.select_runtime(runtime, cx);
+                assert_eq!(this.core.surface, Surface::Trajectory);
+                assert!(this.core.layout_input.trajectory_visible);
                 let selection = this
                     .core
                     .trajectory

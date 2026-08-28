@@ -77,8 +77,9 @@ tool wall time, average TTFT, decode throughput, cache hit rate, and token usage
 entries that fail validation are ignored by the desktop UI. Request boundary markers open an
 independent Request inspector whose Options, Usage, and Timing tabs use only canonical recorded
 data; System Prompt, Tools, and Tool Schema views share the same immutable request snapshot.
-Trajectory search, folds, selection, details history, focus, viewport, tail-follow state, and scroll
-position are retained independently for each session; Duration mode is a persisted desktop
+The Chat / Trajectory choice, trajectory search, folds, selection, details history, focus, viewport,
+tail-follow state, and scroll position are retained in memory independently for each session;
+new sessions and app restarts default to Chat. Duration mode is a persisted desktop
 preference shared by sessions. Timeline statistics update
 incrementally, while geometry is cached by session, event revision, and mode and then cheaply
 reprojected for the current viewport; Duration coordinates use a merged busy-time index rather
