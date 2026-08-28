@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
-    rgb,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, accesskit::Role, div,
+    prelude::FluentBuilder, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputState};
@@ -149,16 +149,9 @@ fn settings_dialog_view(
         })
         .keywords(["API", "provider", "model", "DeepSeek", "OpenAI"]),
     );
-    let general_page =
-        settings_page("General", IconName::Settings2, view.clone()).group(general_group);
-    let models_page = settings_page("Models", IconName::Bot, view.clone()).group(models_group);
-    let archived_page = SettingPage::new("Archived Sessions")
-        .icon(Icon::new(DesktopIconName::Archive))
-        .resettable(false)
-        .title_suffix({
-            let view = view.clone();
-            move |_, _| settings_close_button(view.clone())
-        })
+    let general_page = settings_page("General", IconName::Settings2).group(general_group);
+    let models_page = settings_page("Models", IconName::Bot).group(models_group);
+    let archived_page = settings_page("Archived Sessions", Icon::new(DesktopIconName::Archive))
         .group(
             SettingGroup::new().item(
                 SettingItem::render({
@@ -168,7 +161,7 @@ fn settings_dialog_view(
                 .keywords(["archive", "session", "restore", "delete"]),
             ),
         );
-    let about_page = settings_page("About", IconName::Info, view.clone()).group(
+    let about_page = settings_page("About", IconName::Info).group(
         SettingGroup::new()
             .item(SettingItem::new(
                 "Version",
@@ -211,6 +204,7 @@ fn settings_dialog_view(
     );
     div()
         .flex()
+        .relative()
         .w(px(800.0))
         .h(px(570.0))
         .rounded(px(24.0))
@@ -220,29 +214,30 @@ fn settings_dialog_view(
         .child(
             Settings::new(("settings", dialog.id))
                 .sidebar_width(px(188.0))
+                .sidebar_style(&StyleRefinement::default().rounded_l(px(24.0)))
                 .default_selected_index(dialog.initial_page.select_index())
                 .pages([general_page, models_page, archived_page, about_page]),
+        )
+        .child(
+            Button::new("close-settings")
+                .accessibility_id(ids::DIALOG_CLOSE)
+                .absolute()
+                .top_3()
+                .right_3()
+                .label("Done")
+                .ghost()
+                .text_color(colors.muted_text)
+                .tooltip("Close settings (Esc)")
+                .on_click(cx.listener(|app, _, window, cx| app.close_modal(window, cx))),
         )
         .into_any_element()
 }
 
-fn settings_page(title: &'static str, icon: IconName, view: Entity<DesktopApp>) -> SettingPage {
+fn settings_page(title: &'static str, icon: impl Into<Icon>) -> SettingPage {
     SettingPage::new(title)
-        .icon(Icon::new(icon))
+        .icon(icon)
         .resettable(false)
-        .title_suffix(move |_, _| settings_close_button(view.clone()))
-}
-
-fn settings_close_button(view: Entity<DesktopApp>) -> Button {
-    Button::new("close-settings")
-        .accessibility_id(ids::DIALOG_CLOSE)
-        .icon(IconName::Close)
-        .ghost()
-        .compact()
-        .tooltip("Close")
-        .on_click(move |_, window, cx| {
-            view.update(cx, |app, cx| app.close_modal(window, cx));
-        })
+        .header_style(&StyleRefinement::default().pr(px(88.0)))
 }
 
 fn archived_sessions_view(
