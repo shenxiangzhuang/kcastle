@@ -26,6 +26,10 @@ pub(crate) struct StreamingMarkdownState {
 }
 
 impl StreamingMarkdownState {
+    pub(crate) fn source(&self) -> &str {
+        &self.previous_text
+    }
+
     pub(crate) fn update(&mut self, text: &str) {
         if text == self.previous_text {
             return;

@@ -4,19 +4,17 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
+use crate::platform::gpui::{SelectionFragment, SelectionFrame};
 use gpui::{
-    AnyElement, App, Bounds, Context, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
+    AnyElement, App, Bounds, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
     HighlightStyle, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
-    ParentElement, Pixels, SharedString, StrikethroughStyle, StyleRefinement, Styled, StyledText,
-    Window, div, fill, point, prelude::FluentBuilder, px, rems, size, svg,
+    ParentElement, Pixels, SharedString, StrikethroughStyle, Styled, StyledText, Window, div, fill,
+    point, prelude::FluentBuilder, px, size, svg,
 };
-use gpui_component::ActiveTheme;
 use gpui_component::clipboard::Clipboard;
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::text::{TextView, TextViewStyle};
 use markdown::mdast::Node;
 
-use crate::app::DesktopApp;
 use crate::assets::register_generated_asset;
 use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
@@ -26,10 +24,10 @@ pub(crate) fn render_markdown(
     message_key: u64,
     state: &StreamingMarkdownState,
     streaming: bool,
-    fallback: &SharedString,
     available_width: f32,
+    selection: &SelectionFrame,
     window: &mut Window,
-    cx: &mut Context<DesktopApp>,
+    cx: &mut App,
 ) -> AnyElement {
     let colors = palette(cx);
     let blocks = state
@@ -50,7 +48,10 @@ pub(crate) fn render_markdown(
             .text_color(colors.markdown_text)
             .text_size(px(16.0))
             .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
-            .child(fallback.clone())
+            .child(plain_text(
+                state.source().to_owned().into(),
+                Some(selection),
+            ))
             .into_any_element();
     }
 
@@ -76,7 +77,9 @@ pub(crate) fn render_markdown(
             streaming,
             colors,
             available_width,
+            selection: Some(selection),
         };
+        selection.separate("\n\n");
         root = root.child(
             div()
                 .w_full()
@@ -97,6 +100,7 @@ struct BlockContext<'a> {
     streaming: bool,
     colors: UiPalette,
     available_width: f32,
+    selection: Option<&'a SelectionFrame>,
 }
 
 fn render_node(
@@ -104,7 +108,7 @@ fn render_node(
     context: &BlockContext<'_>,
     path: &str,
     window: &mut Window,
-    cx: &mut Context<DesktopApp>,
+    cx: &mut App,
 ) -> AnyElement {
     match node {
         Node::Paragraph(paragraph) => inline_block(
@@ -137,6 +141,9 @@ fn render_node(
                 .border_color(context.colors.markdown_quote)
                 .pl(px(14.0));
             for (index, child) in quote.children.iter().enumerate() {
+                if let Some(selection) = context.selection {
+                    selection.separate("\n\n");
+                }
                 body = body.child(
                     div()
                         .w_full()
@@ -172,11 +179,14 @@ fn render_node(
         Node::Html(html) => div()
             .w_full()
             .text_color(context.colors.muted_text)
-            .child(html.value.clone())
+            .child(plain_text(html.value.clone().into(), context.selection))
             .into_any_element(),
         Node::Root(root) => {
             let mut body = div().flex().flex_col().w_full().min_w(px(0.0));
             for (index, child) in root.children.iter().enumerate() {
+                if let Some(selection) = context.selection {
+                    selection.separate("\n\n");
+                }
                 body = body.child(
                     div()
                         .w_full()
@@ -210,7 +220,7 @@ fn render_list(
     context: &BlockContext<'_>,
     path: &str,
     window: &mut Window,
-    cx: &mut Context<DesktopApp>,
+    cx: &mut App,
 ) -> AnyElement {
     let start = list.start.unwrap_or(1);
     let mut body = div().flex().flex_col().w_full().min_w(px(0.0));
@@ -229,9 +239,18 @@ fn render_list(
         } else {
             "•".to_owned()
         };
+        if let Some(selection) = context.selection {
+            selection.separate("\n");
+        }
+        let marker = plain_text(format!("{marker} ").into(), context.selection);
         let marker_width = list_marker_width(list.ordered, start, list.children.len());
         let mut item_body = div().flex().flex_col().flex_1().min_w(px(0.0));
         for (child_index, child) in item.children.iter().enumerate() {
+            if child_index > 0
+                && let Some(selection) = context.selection
+            {
+                selection.separate("\n");
+            }
             let child_gap = if matches!(child, Node::List(_)) {
                 4.0
             } else {
@@ -279,7 +298,7 @@ fn render_table(
     context: &BlockContext<'_>,
     _path: &str,
     window: &mut Window,
-    _cx: &mut Context<DesktopApp>,
+    _cx: &mut App,
 ) -> AnyElement {
     let columns = table
         .children
@@ -328,6 +347,9 @@ fn render_table(
                 .get(cell_index)
                 .copied()
                 .unwrap_or(100.0);
+            if let Some(selection) = context.selection {
+                selection.separate(if cell_index == 0 { "\n" } else { "\t" });
+            }
             row_view = row_view.child(
                 div()
                     .flex_none()
@@ -374,7 +396,7 @@ fn render_code_block(
     code: &str,
     context: &BlockContext<'_>,
     path: &str,
-    cx: &mut Context<DesktopApp>,
+    cx: &mut App,
 ) -> AnyElement {
     let clipboard_id = SharedString::from(format!(
         "dsh-md-copy-{}-{}-{path}",
@@ -408,39 +430,33 @@ fn render_code_block(
                 .child(Clipboard::new(clipboard_id).value(code.to_owned())),
         );
 
-    if context.streaming {
-        body = body.child(
-            div().w_full().overflow_x_scrollbar().child(
-                div()
-                    .min_w_full()
-                    .p_4()
-                    .whitespace_nowrap()
-                    .font_family("SF Mono")
-                    .text_size(px(13.0))
-                    .line_height(px(22.0))
-                    .child(SharedString::from(code.to_owned())),
-            ),
-        );
+    let highlights = if !context.streaming {
+        context
+            .selection
+            .map(|selection| selection.code_styles(&render_id(context, path), language, code, cx))
+            .unwrap_or_default()
     } else {
-        let fence = if code.contains("```") { "````" } else { "```" };
-        let markdown = format!("{fence}{language}\n{code}\n{fence}");
-        let mut style = TextViewStyle::default().paragraph_gap(rems(0.0));
-        style.highlight_theme = cx.theme().highlight_theme.clone();
-        style.is_dark = cx.theme().is_dark();
-        style.code_block = StyleRefinement::default()
-            .w_full()
-            .p_4()
-            .rounded(px(0.0))
-            .bg(context.colors.markdown_code_block)
-            .font_family("SF Mono")
-            .text_size(px(13.0))
-            .line_height(px(22.0));
-        body = body.child(
-            TextView::markdown(render_id(context, path), markdown)
-                .style(style)
-                .selectable(true),
-        );
-    }
+        Vec::new()
+    };
+    body = body.child(
+        div().w_full().overflow_x_scrollbar().child(
+            div()
+                .min_w_full()
+                .p_4()
+                .whitespace_nowrap()
+                .font_family("SF Mono")
+                .text_size(px(13.0))
+                .line_height(px(22.0))
+                .child(
+                    InlineText::new(InlineOutput {
+                        text: code.to_owned(),
+                        highlights,
+                        ..InlineOutput::default()
+                    })
+                    .selectable(context.selection),
+                ),
+        ),
+    );
     body.into_any_element()
 }
 
@@ -503,7 +519,7 @@ fn inline_block(
             .text_size(px(size))
             .line_height(px(line_height))
             .font_weight(weight)
-            .child(inline_text(nodes, context.colors))
+            .child(inline_text(nodes, context.colors).selectable(context.selection))
             .into_any_element();
     }
 
@@ -524,14 +540,16 @@ fn inline_block(
     for piece in inline_pieces(nodes, context.colors) {
         match piece {
             InlinePiece::Text(output) => {
-                for element in inline_flow_text(output) {
+                for element in inline_flow_text(output, context.selection) {
                     body = body.child(element);
                 }
             }
             InlinePiece::Math { source, style } => {
                 body = body.child(
                     render_math(&source, Some((text_baseline, line_height, size)), context)
-                        .unwrap_or_else(|| inline_math_fallback(&source, style, context.colors)),
+                        .unwrap_or_else(|| {
+                            inline_math_fallback(&source, style, context.colors, context.selection)
+                        }),
                 );
             }
         }
@@ -593,6 +611,12 @@ fn render_math(
             let source = source.to_owned();
             element.debug_selector(move || format!("math:{source}"))
         });
+    let formula = if let Some(selection) = context.selection {
+        let delimiters = if display { "$$" } else { "$" };
+        selection.atom(format!("{delimiters}{source}{delimiters}"), formula)
+    } else {
+        formula.into_any_element()
+    };
     if display {
         Some(
             div()
@@ -716,6 +740,17 @@ fn build_math_at_size(source: &str, display: bool, font_size: f32) -> Result<Ren
     })
 }
 
+pub(crate) fn plain_text(
+    text: SharedString,
+    selection: Option<&SelectionFrame>,
+) -> impl IntoElement {
+    InlineText::new(InlineOutput {
+        text: text.to_string(),
+        ..InlineOutput::default()
+    })
+    .selectable(selection)
+}
+
 fn inline_text(nodes: &[Node], colors: UiPalette) -> InlineText {
     let mut output = InlineOutput::default();
     append_inlines(nodes, InlineStyle::default(), colors, &mut output);
@@ -733,7 +768,7 @@ fn inline_wrap_ranges(text: &str) -> Vec<Range<usize>> {
         .collect()
 }
 
-fn inline_flow_text(output: InlineOutput) -> Vec<AnyElement> {
+fn inline_flow_text(output: InlineOutput, selection: Option<&SelectionFrame>) -> Vec<AnyElement> {
     inline_wrap_ranges(&output.text)
         .into_iter()
         .flat_map(|range| {
@@ -759,11 +794,14 @@ fn inline_flow_text(output: InlineOutput) -> Vec<AnyElement> {
                         .when(cfg!(test), |element| {
                             element.debug_selector(move || format!("inline-text:{selector}"))
                         })
-                        .child(InlineText::new(chunk))
+                        .child(InlineText::new(chunk).selectable(selection))
                         .into_any_element(),
                 );
             }
             if explicit_break {
+                if let Some(selection) = selection {
+                    selection.separate("\n");
+                }
                 elements.push(div().w_full().h(px(0.0)).into_any_element());
             }
             elements
@@ -857,7 +895,12 @@ fn append_inline_pieces(
     }
 }
 
-fn inline_math_fallback(source: &str, style: InlineStyle, colors: UiPalette) -> AnyElement {
+fn inline_math_fallback(
+    source: &str,
+    style: InlineStyle,
+    colors: UiPalette,
+    selection: Option<&SelectionFrame>,
+) -> AnyElement {
     let mut output = InlineOutput::default();
     append_inline_text(
         &format!("\u{a0}{source}\u{a0}"),
@@ -868,13 +911,17 @@ fn inline_math_fallback(source: &str, style: InlineStyle, colors: UiPalette) -> 
         colors,
         &mut output,
     );
-    div()
+    let fallback = div()
         .when(cfg!(test), |element| {
             let source = source.to_owned();
             element.debug_selector(move || format!("math-fallback:{source}"))
         })
-        .child(InlineText::new(output))
-        .into_any_element()
+        .child(InlineText::new(output));
+    if let Some(selection) = selection {
+        selection.atom(format!("${source}$"), fallback)
+    } else {
+        fallback.into_any_element()
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -891,6 +938,7 @@ struct InlineOutput {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     backgrounds: Vec<(Range<usize>, Hsla)>,
+    omitted: Vec<Range<usize>>,
 }
 
 impl InlineOutput {
@@ -903,6 +951,7 @@ impl InlineOutput {
 
         Self {
             text: self.text[range.clone()].to_owned(),
+            omitted: self.omitted.iter().filter_map(adjust).collect(),
             highlights: self
                 .highlights
                 .iter()
@@ -924,6 +973,8 @@ struct InlineText {
     text: SharedString,
     styled: StyledText,
     backgrounds: Vec<(Range<usize>, Hsla)>,
+    omitted: Vec<Range<usize>>,
+    selection: Option<SelectionFragment>,
 }
 
 impl InlineText {
@@ -936,7 +987,18 @@ impl InlineText {
             styled: StyledText::new(text.clone()).with_highlights(output.highlights),
             text,
             backgrounds: output.backgrounds,
+            omitted: output.omitted,
+            selection: None,
         }
+    }
+
+    fn selectable(mut self, selection: Option<&SelectionFrame>) -> Self {
+        self.selection = selection.map(|selection| {
+            let fragment = selection.text(self.text.clone());
+            fragment.omit(&self.omitted);
+            fragment
+        });
+        self
     }
 
     fn paint_backgrounds(&self, window: &mut Window) {
@@ -1063,6 +1125,9 @@ impl Element for InlineText {
     ) {
         self.styled
             .prepaint(id, inspector_id, bounds, state, window, cx);
+        if let Some(selection) = &self.selection {
+            selection.layout(self.styled.layout().clone(), bounds);
+        }
     }
 
     fn paint(
@@ -1076,6 +1141,9 @@ impl Element for InlineText {
         cx: &mut App,
     ) {
         self.paint_backgrounds(window);
+        if let Some(selection) = &self.selection {
+            selection.paint(gpui::hsla(0.58, 0.8, 0.6, 0.3), window);
+        }
         self.styled
             .paint(id, inspector_id, bounds, state, prepaint, window, cx);
     }
@@ -1101,12 +1169,16 @@ fn append_inlines(
             Node::InlineCode(code) => {
                 let mut code_style = style;
                 code_style.code = true;
+                let start = output.text.len();
                 append_inline_text(
                     &format!("\u{a0}{}\u{a0}", code.value),
                     code_style,
                     colors,
                     output,
                 );
+                output
+                    .omitted
+                    .extend([start..start + 2, output.text.len() - 2..output.text.len()]);
             }
             Node::InlineMath(math) => {
                 let mut code_style = style;
@@ -1275,6 +1347,7 @@ mod tests {
         block: MarkdownBlock,
         text_size: f32,
         line_height: f32,
+        selection: Option<crate::platform::gpui::MessageSelection>,
     }
 
     impl InlineLayoutHarness {
@@ -1289,12 +1362,17 @@ mod tests {
                 },
                 text_size: 16.0,
                 line_height: metrics::MESSAGE_LINE_HEIGHT,
+                selection: None,
             }
         }
     }
 
     impl Render for InlineLayoutHarness {
-        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let selection = self
+                .selection
+                .get_or_insert_with(|| crate::platform::gpui::MessageSelection::new(window, cx))
+                .frame(0);
             let Node::Paragraph(paragraph) = &self.block.node else {
                 unreachable!();
             };
@@ -1307,21 +1385,208 @@ mod tests {
                 streaming: false,
                 colors: test_palette(),
                 available_width,
+                selection: Some(&selection),
             };
-            div().size_full().child(super::inline_block(
-                &paragraph.children,
-                self.text_size,
-                self.line_height,
-                FontWeight::NORMAL,
-                &context,
-                window,
-            ))
+            div()
+                .size_full()
+                .child(gpui_base::TextSelectionLayer)
+                .child(selection.clone().wrap(super::inline_block(
+                    &paragraph.children,
+                    self.text_size,
+                    self.line_height,
+                    FontWeight::NORMAL,
+                    &context,
+                    window,
+                )))
         }
     }
 
     struct DisplayMathHarness {
         source: String,
         block: MarkdownBlock,
+    }
+
+    struct MarkdownSelectionHarness {
+        source: String,
+        streaming: bool,
+        markdown: crate::streaming_markdown::StreamingMarkdownState,
+        selection: crate::platform::gpui::MessageSelection,
+        frame: Option<crate::platform::gpui::SelectionFrame>,
+    }
+
+    impl Render for MarkdownSelectionHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.markdown.update(&self.source);
+            let selection = self.selection.frame(0);
+            let body = super::render_markdown(
+                0,
+                &self.markdown,
+                self.streaming,
+                f32::from(window.viewport_size().width),
+                &selection,
+                window,
+                cx,
+            );
+            self.frame = Some(selection.clone());
+            div()
+                .size_full()
+                .child(gpui_base::TextSelectionLayer)
+                .child(selection.wrap(body))
+        }
+    }
+
+    fn markdown_selection_harness<'a>(
+        source: &str,
+        cx: &'a mut TestAppContext,
+    ) -> (
+        gpui::Entity<MarkdownSelectionHarness>,
+        &'a mut gpui::VisualTestContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|window, cx| MarkdownSelectionHarness {
+            source: source.to_owned(),
+            streaming: false,
+            markdown: Default::default(),
+            selection: crate::platform::gpui::MessageSelection::new(window, cx),
+            frame: None,
+        });
+        cx.simulate_resize(size(px(600.0), px(700.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        (view, cx)
+    }
+
+    fn select_markdown(
+        view: &gpui::Entity<MarkdownSelectionHarness>,
+        start: &str,
+        end: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) -> String {
+        let (start, end) = view.read_with(cx, |view, _| {
+            let frame = view.frame.as_ref().unwrap();
+            (
+                frame.text_position(start, false),
+                frame.text_position(end, true),
+            )
+        });
+        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(
+            end,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(gpui_base::TextSelection::selected_text)
+    }
+
+    #[gpui::test]
+    fn mixed_markdown_selection_preserves_reading_order_and_code_whitespace(
+        cx: &mut TestAppContext,
+    ) {
+        let (view, cx) = markdown_selection_harness(
+            "开始中文 **加粗** $x^2$ 后面\n\n第二段 `inline`\n\n```rust\n    let x = 1;\n    x + 2\n```\n\n结束",
+            cx,
+        );
+        let selected = select_markdown(&view, "开始中文", "结束", cx);
+        assert_eq!(
+            selected,
+            "开始中文 加粗 $x^2$ 后面\n\n第二段 inline\n\n    let x = 1;\n    x + 2\n\n结束"
+        );
+        assert_eq!(
+            select_markdown(&view, "    let", "x + 2", cx),
+            "    let x = 1;\n    x + 2"
+        );
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-c"
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            "    let x = 1;\n    x + 2"
+        );
+    }
+
+    #[gpui::test]
+    fn invalid_inline_math_copies_latex_without_visual_padding(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(r"before $\frac{$ after", cx);
+        assert_eq!(
+            select_markdown(&view, "before", "after", cx),
+            r"before $\frac{$ after"
+        );
+    }
+
+    #[gpui::test]
+    fn selected_text_survives_streaming_settlement_and_reflow(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            "开始 选择中文 hello 后面还有一段足够长的内容，用于窗口缩窄时触发重新排版。",
+            cx,
+        );
+        assert_eq!(
+            select_markdown(&view, "选择中文", "hello", cx),
+            "选择中文 hello"
+        );
+        view.update(cx, |view, cx| {
+            view.streaming = true;
+            view.source.push_str("\n\n新增的流式内容");
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(150.0), px(700.0)));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(gpui_base::TextSelection::selected_text),
+            "选择中文 hello"
+        );
+        view.update(cx, |view, cx| {
+            view.streaming = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(gpui_base::TextSelection::selected_text),
+            "选择中文 hello"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(
+            cx.update(gpui_base::TextSelection::selected_text)
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
+    fn lists_tables_and_display_math_copy_as_structured_text(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            "开始\n\n- first\n- second\n\n| Name | Value |\n| --- | --- |\n| 中文 | 42 |\n\n$$\nx^2\n$$\n\n结束",
+            cx,
+        );
+        assert_eq!(
+            select_markdown(&view, "开始", "结束", cx),
+            "开始\n\n• first\n• second\n\nName\tValue\n中文\t42\n\n$$x^2$$\n\n结束"
+        );
+    }
+
+    #[gpui::test]
+    fn changed_selected_content_clears_instead_of_copying_stale_bytes(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness("选择 hello", cx);
+        assert_eq!(select_markdown(&view, "hello", "hello", cx), "hello");
+        view.update(cx, |view, cx| {
+            view.source = "已替换的内容".into();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.update(gpui_base::TextSelection::selected_text)
+                .is_empty()
+        );
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        assert!(
+            cx.update(gpui_base::TextSelection::selected_text)
+                .is_empty()
+        );
     }
 
     impl DisplayMathHarness {
@@ -1350,6 +1615,7 @@ mod tests {
                 streaming: false,
                 colors: test_palette(),
                 available_width: f32::from(window.viewport_size().width),
+                selection: None,
             };
             div()
                 .size_full()
@@ -1367,6 +1633,32 @@ mod tests {
         assert_eq!(heading_style(3).1, 30.0);
         assert_eq!(heading_style(3).2, FontWeight::SEMIBOLD);
         assert_eq!(heading_style(4).0, 16.0);
+    }
+
+    #[gpui::test]
+    fn ordinary_body_text_can_be_selected(cx: &mut TestAppContext) {
+        let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new("选择中文 hello"));
+        cx.simulate_resize(size(px(400.0), px(180.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.simulate_mouse_down(
+            gpui::point(px(0.0), px(12.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            gpui::point(px(200.0), px(12.0)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            gpui::point(px(200.0), px(12.0)),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        assert_eq!(selected, "选择中文 hello");
     }
 
     #[test]

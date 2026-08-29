@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap};
 
 use gpui::{ScrollHandle, SharedString, Window};
 
@@ -15,6 +15,7 @@ pub(crate) struct MessagePresentation {
     source_generation: u64,
     source_revision: u64,
     markdown_enabled: bool,
+    selection: RefCell<Option<super::MessageSelection>>,
     expanded: bool,
     rating: Option<bool>,
 }
@@ -34,6 +35,7 @@ impl MessagePresentation {
             source_generation,
             source_revision,
             markdown_enabled: markdown,
+            selection: RefCell::new(None),
             expanded: overlay.expanded,
             rating: overlay.rating,
         };
@@ -67,6 +69,18 @@ impl MessagePresentation {
 
     pub(crate) fn reasoning_summary_scroll(&self) -> ScrollHandle {
         self.reasoning_summary_scroll.handle()
+    }
+
+    pub(crate) fn selection(
+        &self,
+        order: u64,
+        window: &Window,
+        cx: &mut gpui::App,
+    ) -> super::SelectionFrame {
+        self.selection
+            .borrow_mut()
+            .get_or_insert_with(|| super::MessageSelection::new(window, cx))
+            .frame(order)
     }
 
     pub(crate) fn expanded(&self) -> bool {
@@ -179,6 +193,13 @@ impl MessagePresentationStore {
             self.active_session = None;
             self.entries.clear();
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_initialized(&self, id: MessageId) -> bool {
+        self.entries
+            .get(&id)
+            .is_some_and(|presentation| presentation.selection.borrow().is_some())
     }
 }
 

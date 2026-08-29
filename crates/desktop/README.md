@@ -39,6 +39,14 @@ In the composer, press `Enter` to send and `Shift+Enter` to insert a newline.
 Assistant Markdown renders inline formulas delimited by `$...$` or `\(...\)` and display formulas
 delimited by `$$...$$` or `\[...\]`.
 
+Drag to select text in user messages, assistant Markdown, expanded reasoning, and trajectory
+Markdown details. Press `Cmd+C` on macOS (`Ctrl+C` elsewhere) to copy, or `Escape` to clear the
+selection. Selection can span chat messages. Copies preserve code whitespace, use tabs between
+table cells, and export selected formulas as LaTeX. Visual padding around inline code is omitted.
+Selections retain their text across scrolling, resizing, and append-only streaming; replacing
+selected content or switching sessions clears stale selections. Edge-drag auto-scroll is not
+currently connected; use the scroll wheel to navigate longer selections.
+
 ## UI automation contract
 
 Core controls expose stable accessibility identifiers through GPUI/AccessKit. On macOS these are

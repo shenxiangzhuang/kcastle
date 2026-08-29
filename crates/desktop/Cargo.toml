@@ -17,6 +17,7 @@ gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
+gpui-base.workspace = true
 im.workspace = true
 kcastle-agent.workspace = true
 markdown.workspace = true
