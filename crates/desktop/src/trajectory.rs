@@ -253,6 +253,7 @@ pub(crate) struct TrajectoryDetailsMarkdownCache {
     key: Option<TrajectoryMarkdownCacheKey>,
     markdown: StreamingMarkdownState,
     fallback: SharedString,
+    selection: Option<crate::platform::gpui::MessageSelection>,
 }
 
 impl TrajectoryDetailsMarkdownCache {
@@ -271,6 +272,7 @@ impl TrajectoryDetailsMarkdownCache {
         if self.key.as_ref() != Some(&key) {
             self.key = Some(key);
             self.markdown = StreamingMarkdownState::default();
+            self.selection = None;
             self.fallback = source.to_owned().into();
         } else if self.fallback.as_ref() != source {
             self.fallback = source.to_owned().into();
@@ -4525,15 +4527,19 @@ impl DesktopApp {
             source_kind,
             source,
         );
-        dsh_markdown::render_markdown(
+        let selection = cache
+            .selection
+            .get_or_insert_with(|| crate::platform::gpui::MessageSelection::new(window, cx))
+            .frame(0);
+        selection.clone().wrap(dsh_markdown::render_markdown(
             record.source_seq,
             &cache.markdown,
             false,
-            &cache.fallback,
             (panel_width - 32.0).max(1.0),
+            &selection,
             window,
             cx,
-        )
+        ))
     }
 
     fn timing_details(

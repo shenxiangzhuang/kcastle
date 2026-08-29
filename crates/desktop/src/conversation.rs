@@ -240,115 +240,128 @@ impl DesktopApp {
                 message.role == Role::Assistant,
             );
             match message.role {
-                Role::User => div()
-                    .id(("user-message-row", index))
-                    .group(SharedString::from(format!("user-message-{index}")))
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .w_full()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .max_w(px(525.0))
-                            .px_4()
-                            .py(px(10.0))
-                            .rounded(px(22.0))
-                            .bg(colors.user_bubble)
-                            .line_height(px(metrics::BODY_LINE_HEIGHT))
-                            .child(presentation.render_text.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(28.0))
-                            .gap(px(10.0))
-                            .child(
-                                div()
-                                    .invisible()
-                                    .group_hover(
-                                        SharedString::from(format!("user-message-{index}")),
-                                        |time| time.visible(),
-                                    )
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(message_time_label(message)),
-                            )
-                            .child(
-                                Clipboard::new(("copy-user", index))
-                                    .value(presentation.render_text.clone()),
-                            ),
-                    )
-                    .into_any_element(),
-                Role::Assistant => div()
-                    .id(("assistant-message-row", index))
-                    .group(SharedString::from(format!("assistant-message-{index}")))
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .gap(px(metrics::ASSISTANT_ACTIONS_TOP_GAP))
-                    .text_color(colors.text)
-                    .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
-                    .child(assistant_body(
-                        message,
-                        presentation,
-                        self.core.layout.content_max_width,
-                        window,
-                        cx,
-                    ))
-                    .children((!message.pending).then(|| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(28.0))
-                            .gap(px(10.0))
-                            .child(
-                                Clipboard::new(("copy-assistant", index))
-                                    .value(presentation.render_text.clone()),
-                            )
-                            .child(
-                                Button::new(("good-response", index))
-                                    .icon(IconName::ThumbsUp)
-                                    .ghost()
-                                    .compact()
-                                    .when(presentation.rating() == Some(true), |button| {
-                                        button.primary()
-                                    })
-                                    .tooltip("Good response")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.rate_message(index, true, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new(("bad-response", index))
-                                    .icon(IconName::ThumbsDown)
-                                    .ghost()
-                                    .compact()
-                                    .when(presentation.rating() == Some(false), |button| {
-                                        button.danger()
-                                    })
-                                    .tooltip("Bad response")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.rate_message(index, false, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .invisible()
-                                    .group_hover(
-                                        SharedString::from(format!("assistant-message-{index}")),
-                                        |time| time.visible(),
-                                    )
-                                    .text_xs()
-                                    .text_color(colors.muted_text)
-                                    .child(message_time_label(message)),
-                            )
-                    }))
-                    .into_any_element(),
+                Role::User => {
+                    let selection = presentation.selection(index as u64, window, cx);
+                    div()
+                        .id(("user-message-row", index))
+                        .group(SharedString::from(format!("user-message-{index}")))
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .w_full()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .max_w(px(525.0))
+                                .px_4()
+                                .py(px(10.0))
+                                .rounded(px(22.0))
+                                .bg(colors.user_bubble)
+                                .line_height(px(metrics::BODY_LINE_HEIGHT))
+                                .child(selection.clone().wrap(dsh_markdown::plain_text(
+                                    presentation.render_text.clone(),
+                                    Some(&selection),
+                                ))),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .h(px(28.0))
+                                .gap(px(10.0))
+                                .child(
+                                    div()
+                                        .invisible()
+                                        .group_hover(
+                                            SharedString::from(format!("user-message-{index}")),
+                                            |time| time.visible(),
+                                        )
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(message_time_label(message)),
+                                )
+                                .child(
+                                    Clipboard::new(("copy-user", index))
+                                        .value(presentation.render_text.clone()),
+                                ),
+                        )
+                        .into_any_element()
+                }
+                Role::Assistant => {
+                    let selection = presentation.selection(index as u64, window, cx);
+                    div()
+                        .id(("assistant-message-row", index))
+                        .group(SharedString::from(format!("assistant-message-{index}")))
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .gap(px(metrics::ASSISTANT_ACTIONS_TOP_GAP))
+                        .text_color(colors.text)
+                        .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
+                        .child(selection.clone().wrap(assistant_body(
+                            message,
+                            presentation,
+                            self.core.layout.content_max_width,
+                            &selection,
+                            window,
+                            cx,
+                        )))
+                        .children((!message.pending).then(|| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .h(px(28.0))
+                                .gap(px(10.0))
+                                .child(
+                                    Clipboard::new(("copy-assistant", index))
+                                        .value(presentation.render_text.clone()),
+                                )
+                                .child(
+                                    Button::new(("good-response", index))
+                                        .icon(IconName::ThumbsUp)
+                                        .ghost()
+                                        .compact()
+                                        .when(presentation.rating() == Some(true), |button| {
+                                            button.primary()
+                                        })
+                                        .tooltip("Good response")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.rate_message(index, true, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new(("bad-response", index))
+                                        .icon(IconName::ThumbsDown)
+                                        .ghost()
+                                        .compact()
+                                        .when(presentation.rating() == Some(false), |button| {
+                                            button.danger()
+                                        })
+                                        .tooltip("Bad response")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.rate_message(index, false, cx)
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .invisible()
+                                        .group_hover(
+                                            SharedString::from(format!(
+                                                "assistant-message-{index}"
+                                            )),
+                                            |time| time.visible(),
+                                        )
+                                        .text_xs()
+                                        .text_color(colors.muted_text)
+                                        .child(message_time_label(message)),
+                                )
+                        }))
+                        .into_any_element()
+                }
                 Role::Reasoning => {
+                    let expanded = presentation.expanded();
                     let preview = reasoning_preview(&message.text, message.pending);
-                    let follow_summary_end = message.pending && !presentation.expanded();
+                    let follow_summary_end = message.pending && !expanded;
                     presentation.align_reasoning_summary(
                         follow_summary_end,
                         message.revision,
@@ -384,7 +397,7 @@ impl DesktopApp {
                                     },
                                 ))
                                 .child(
-                                    Icon::new(if presentation.expanded() {
+                                    Icon::new(if expanded {
                                         IconName::ChevronDown
                                     } else {
                                         IconName::ChevronRight
@@ -409,7 +422,7 @@ impl DesktopApp {
                                         })
                                         .into_any_element()
                                 })
-                                .child(if presentation.expanded() {
+                                .child(if expanded {
                                     div().flex_1().into_any_element()
                                 } else if message.pending {
                                     div()
@@ -434,7 +447,8 @@ impl DesktopApp {
                                         .into_any_element()
                                 }),
                         )
-                        .when(presentation.expanded(), |row| {
+                        .when(expanded, |row| {
+                            let selection = presentation.selection(index as u64, window, cx);
                             row.child(
                                 div()
                                     .ml(px(22.0))
@@ -444,7 +458,10 @@ impl DesktopApp {
                                     .text_sm()
                                     .line_height(px(24.0))
                                     .text_color(colors.muted_text)
-                                    .child(presentation.render_text.clone()),
+                                    .child(selection.clone().wrap(dsh_markdown::plain_text(
+                                        presentation.render_text.clone(),
+                                        Some(&selection),
+                                    ))),
                             )
                         })
                         .into_any_element()
@@ -635,6 +652,7 @@ fn assistant_body(
     message: &Message,
     presentation: &MessagePresentation,
     available_width: f32,
+    selection: &crate::platform::gpui::SelectionFrame,
     window: &mut Window,
     cx: &mut Context<DesktopApp>,
 ) -> gpui::AnyElement {
@@ -642,8 +660,8 @@ fn assistant_body(
         message.key.0,
         &presentation.markdown,
         message.pending,
-        &presentation.render_text,
         available_width,
+        selection,
         window,
         cx,
     )
@@ -792,12 +810,19 @@ fn reasoning_preview(text: &str, running: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::Arc,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use gpui::{
         AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
         StatefulInteractiveElement, Styled, TestAppContext, Window, div, px, size,
     };
 
     use super::{reasoning_preview, transcript_content_column};
+    use crate::app::DesktopApp;
+    use crate::domain::{Message, MessageId, Role};
     use crate::layout::{LayoutInput, resolve_layout};
     use crate::platform::gpui::measured_container;
     use crate::ui_theme::metrics;
@@ -932,5 +957,86 @@ mod tests {
             reasoning_preview("Inspect the session\nNewest reasoning tokens", false),
             "Inspect the session"
         );
+    }
+
+    #[gpui::test]
+    fn non_selectable_messages_do_not_allocate_selection_state(cx: &mut TestAppContext) {
+        fn message(id: u64, role: Role) -> Arc<Message> {
+            Arc::new(Message {
+                key: MessageId(id),
+                revision: 0,
+                role,
+                tool_call_id: None,
+                title: None,
+                text: "content".into(),
+                payload: None,
+                schema: None,
+                pending: false,
+                failed: false,
+                started_at_ms: None,
+                duration_ms: None,
+                turn: 0,
+                step: 0,
+                request_id: None,
+            })
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-selection-allocation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut app = DesktopApp::new(startup, window, cx);
+            app.core
+                .transient_messages
+                .push_back(message(901, Role::User));
+            app.core
+                .transient_messages
+                .push_back(message(902, Role::Reasoning));
+            app.core
+                .transient_messages
+                .push_back(message(903, Role::Tool));
+            window.blur();
+            app
+        });
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+
+        view.read_with(cx, |app, _| {
+            let presentations = app.message_presentations.borrow();
+            assert!(presentations.selection_initialized(MessageId(901)));
+            assert!(!presentations.selection_initialized(MessageId(902)));
+            assert!(!presentations.selection_initialized(MessageId(903)));
+        });
+
+        view.update(cx, |app, cx| {
+            assert_eq!(
+                app.message_presentations
+                    .get_mut()
+                    .toggle_expanded(MessageId(902)),
+                Some(true)
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.message_presentations
+                    .borrow()
+                    .selection_initialized(MessageId(902))
+            );
+        });
+
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
