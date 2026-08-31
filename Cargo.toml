@@ -34,6 +34,7 @@ tokio-util = "=0.7.19"
 unicode-linebreak = "=0.1.5"
 uuid = { version = "=1.24.0", features = ["serde", "v4"] }
 time = { version = "=0.3.55", features = ["formatting", "local-offset", "macros"] }
+tree-sitter-haskell = "=0.23.1"
 velopack = "=1.2.110-ge826545"
 
 kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.20" }

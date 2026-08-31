@@ -1,5 +1,7 @@
+use std::sync::{Arc, LazyLock};
+
 use gpui::{App, Hsla, rgb, rgba};
-use gpui_component::ActiveTheme;
+use gpui_component::{ActiveTheme, highlighter::HighlightTheme};
 
 #[derive(Clone, Copy)]
 pub(crate) struct UiPalette {
@@ -104,20 +106,83 @@ pub(crate) fn palette(cx: &App) -> UiPalette {
         user_bubble: rgb(0xedf3fe).into(),
         markdown_text: markdown_text_color(theme.is_dark()),
         markdown_inline_code: rgb(0xebeef2).into(),
-        markdown_code_block: rgb(0xf9fafb).into(),
-        markdown_code_banner: rgb(0xf9fafb).into(),
+        markdown_code_block: rgb(0xf4f4f4).into(),
+        markdown_code_banner: rgb(0xf4f4f4).into(),
         markdown_link: rgb(0x4176e6).into(),
         markdown_quote: rgb(0xadb2b8).into(),
     };
     if theme.is_dark() {
         palette.user_bubble = rgb(0x2c2c2e).into();
         palette.markdown_inline_code = rgb(0x2c2c2e).into();
-        palette.markdown_code_block = rgb(0x1b1b1c).into();
-        palette.markdown_code_banner = rgb(0x2c2c2e).into();
+        palette.markdown_code_block = rgb(0x202020).into();
+        palette.markdown_code_banner = rgb(0x202020).into();
         palette.markdown_link = rgb(0x679efe).into();
         palette.markdown_quote = rgb(0x81858c).into();
     }
     palette
+}
+
+pub(crate) fn markdown_highlight_theme(dark: bool) -> &'static Arc<HighlightTheme> {
+    static LIGHT: LazyLock<Arc<HighlightTheme>> = LazyLock::new(|| code_highlight_theme(false));
+    static DARK: LazyLock<Arc<HighlightTheme>> = LazyLock::new(|| code_highlight_theme(true));
+
+    if dark { &DARK } else { &LIGHT }
+}
+
+fn code_highlight_theme(dark: bool) -> Arc<HighlightTheme> {
+    let mut theme = if dark {
+        HighlightTheme::default_dark().as_ref().clone()
+    } else {
+        HighlightTheme::default_light().as_ref().clone()
+    };
+    theme.name = if dark {
+        "Kcastle Markdown Dark"
+    } else {
+        "Kcastle Markdown Light"
+    }
+    .into();
+    let syntax = serde_json::from_value(if dark {
+        serde_json::json!({
+            "attribute": { "color": "#79C0FF" },
+            "boolean": { "color": "#E0A05B" },
+            "comment": { "color": "#8B949E" },
+            "comment.doc": { "color": "#8B949E" },
+            "constant": { "color": "#E0A05B" },
+            "constructor": { "color": "#D2A8FF" },
+            "function": { "color": "#7AA7FF" },
+            "keyword": { "color": "#D783E7" },
+            "number": { "color": "#E0A05B" },
+            "property": { "color": "#79C0FF" },
+            "string": { "color": "#76C893" },
+            "string.escape": { "color": "#76C893" },
+            "string.regex": { "color": "#76C893" },
+            "type": { "color": "#D2A8FF" },
+            "variable.special": { "color": "#D783E7" }
+        })
+    } else {
+        serde_json::json!({
+            "attribute": { "color": "#0F6CBD" },
+            "boolean": { "color": "#A05A00" },
+            "comment": { "color": "#6B7280" },
+            "comment.doc": { "color": "#6B7280" },
+            "constant": { "color": "#A05A00" },
+            "constructor": { "color": "#7357C0" },
+            "function": { "color": "#3478F6" },
+            "keyword": { "color": "#B31DAD" },
+            "number": { "color": "#A05A00" },
+            "property": { "color": "#0F6CBD" },
+            "string": { "color": "#16803B" },
+            "string.escape": { "color": "#16803B" },
+            "string.regex": { "color": "#16803B" },
+            "type": { "color": "#7357C0" },
+            "variable.special": { "color": "#B31DAD" }
+        })
+    });
+    let Ok(syntax) = syntax else {
+        return Arc::new(theme);
+    };
+    theme.style.syntax = syntax;
+    Arc::new(theme)
 }
 
 pub(crate) fn trajectory_palette(cx: &App) -> TrajectoryPalette {
@@ -166,7 +231,25 @@ pub(crate) fn trajectory_palette(cx: &App) -> TrajectoryPalette {
 mod tests {
     use gpui::rgb;
 
-    use super::markdown_text_color;
+    use super::{markdown_highlight_theme, markdown_text_color};
+
+    #[test]
+    fn markdown_highlight_theme_separates_syntax_roles() {
+        let theme = markdown_highlight_theme(false);
+
+        assert_eq!(
+            theme.style("keyword").and_then(|style| style.color),
+            Some(rgb(0xb31dad).into())
+        );
+        assert_eq!(
+            theme.style("function").and_then(|style| style.color),
+            Some(rgb(0x3478f6).into())
+        );
+        assert_eq!(
+            theme.style("number").and_then(|style| style.color),
+            Some(rgb(0xa05a00).into())
+        );
+    }
 
     #[test]
     fn markdown_text_uses_deepseek_label_primary_colors() {

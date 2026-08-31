@@ -14,7 +14,6 @@ use gpui_base::{
 };
 use gpui_component::input::Copy;
 use gpui_component::{
-    ActiveTheme,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     input::Rope,
 };
@@ -147,9 +146,8 @@ impl SelectionFrame {
         key: &str,
         language: &str,
         source: &str,
-        cx: &App,
+        theme: &Arc<HighlightTheme>,
     ) -> CodeStyles {
-        let theme = &cx.theme().highlight_theme;
         let mut cache = self.selection.code.borrow_mut();
         if let Some((text, previous_theme, styles)) = cache.get(key)
             && text == source

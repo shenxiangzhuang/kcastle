@@ -15,7 +15,7 @@ path = "src/main.rs"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
-gpui-component.workspace = true
+gpui-component = { workspace = true, features = ["tree-sitter-languages"] }
 gpui-component-assets.workspace = true
 gpui-base.workspace = true
 im.workspace = true
@@ -30,6 +30,7 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tree-sitter-haskell.workspace = true
 unicode-linebreak.workspace = true
 velopack.workspace = true
 

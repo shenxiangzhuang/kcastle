@@ -60,6 +60,21 @@ const DATA_ROOT_ENV: &str = "KCASTLE_DATA_DIR";
 
 fn init_ui(cx: &mut App) {
     gpui_component::init(cx);
+    register_syntax_languages();
+}
+
+fn register_syntax_languages() {
+    let config = gpui_component::highlighter::LanguageConfig::new(
+        "haskell",
+        tree_sitter_haskell::LANGUAGE.into(),
+        vec![],
+        tree_sitter_haskell::HIGHLIGHTS_QUERY,
+        tree_sitter_haskell::INJECTIONS_QUERY,
+        tree_sitter_haskell::LOCALS_QUERY,
+    );
+    let registry = gpui_component::highlighter::LanguageRegistry::singleton();
+    registry.register("haskell", &config);
+    registry.register("hs", &config);
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
@@ -290,7 +305,29 @@ mod tests {
 
     use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
-    use super::{desktop_startup, models_from_profiles, resolve_data_root};
+    use super::{
+        desktop_startup, models_from_profiles, register_syntax_languages, resolve_data_root,
+    };
+
+    #[test]
+    fn haskell_code_blocks_produce_syntax_styles() {
+        use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+        use gpui_component::input::Rope;
+
+        register_syntax_languages();
+        let source = "quicksort (p:xs) = quicksort smaller\n  where smaller = filter (< p) xs";
+        for language in ["haskell", "hs"] {
+            let mut highlighter = SyntaxHighlighter::new(language);
+            assert!(highlighter.update(None, &Rope::from(source), None));
+            assert!(highlighter.tree().is_some());
+            assert!(
+                highlighter
+                    .styles(&(0..source.len()), HighlightTheme::default_light().as_ref())
+                    .iter()
+                    .any(|(_, style)| style.color.is_some())
+            );
+        }
+    }
 
     #[test]
     fn data_root_defaults_to_the_home_directory() {
