@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+fuzzing = []
+
 [[bin]]
 name = "kcastle-desktop"
 path = "src/main.rs"

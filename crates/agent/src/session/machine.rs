@@ -1800,6 +1800,95 @@ mod tests {
             let replayed = SessionMachine::from_events(&events).unwrap();
             prop_assert_eq!(live.semantic_snapshot(), replayed.semantic_snapshot());
         }
+
+        #[test]
+        fn corrupted_persisted_histories_return_errors_instead_of_panicking(
+            mutation in 0u8..4,
+            left in any::<usize>(),
+            right in any::<usize>(),
+        ) {
+            let mut machine = SessionMachine::default();
+            let mut events = Vec::new();
+            commit(&mut machine, &mut events, lifecycle("tx-lifecycle"));
+            commit(&mut machine, &mut events, input_pair("tx-input", 0, 3));
+            commit(
+                &mut machine,
+                &mut events,
+                request_with_tool_events("tx-request"),
+            );
+            commit(
+                &mut machine,
+                &mut events,
+                vec![
+                    draft(
+                        "tx-tool-result",
+                        15,
+                        SessionEvent::ToolAuthorizationResolved {
+                            call_id: "call".into(),
+                            decision: ToolAuthorizationDecision::Denied,
+                        },
+                    ),
+                    draft(
+                        "tx-tool-result",
+                        16,
+                        SessionEvent::ToolResultAttached {
+                            call_id: "call".into(),
+                            status: ToolResultStatus::Denied,
+                            item: tool_output_item(&CallId::from("call"), "denied"),
+                        },
+                    ),
+                ],
+            );
+            commit(
+                &mut machine,
+                &mut events,
+                vec![
+                    draft(
+                        "tx-terminal",
+                        20,
+                        SessionEvent::StepTerminated {
+                            step_id: "step".into(),
+                            outcome: StepOutcome::Completed,
+                            error: None,
+                        },
+                    ),
+                    draft(
+                        "tx-terminal",
+                        21,
+                        SessionEvent::TurnTerminated {
+                            turn_id: "turn".into(),
+                            reason: TurnEndReason::Completed,
+                        },
+                    ),
+                    draft(
+                        "tx-terminal",
+                        22,
+                        SessionEvent::RunTerminated {
+                            run_id: "run".into(),
+                            outcome: RunOutcome::Completed,
+                            error: None,
+                        },
+                    ),
+                ],
+            );
+            let first = left % events.len();
+            let second = right % events.len();
+            match mutation {
+                0 => {
+                    events.remove(first);
+                }
+                1 => events.swap(first, second),
+                2 => events.insert(second, events[first].clone()),
+                _ => events.truncate(first),
+            }
+            for (seq, event) in events.iter_mut().enumerate() {
+                event.seq = seq as u64;
+            }
+
+            if let Ok(replayed) = SessionMachine::from_events(&events) {
+                prop_assert_eq!(replayed.next_seq(), events.len() as u64);
+            }
+        }
     }
 
     #[test]

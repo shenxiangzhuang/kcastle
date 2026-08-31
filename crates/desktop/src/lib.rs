@@ -255,6 +255,7 @@ fn models_from_profiles(profiles: &[ProviderProfile]) -> Vec<ConfiguredModel> {
         let profile = profiles
             .iter()
             .find(|profile| profile.provider_id == provider_id)
+            .filter(|profile| !profile.models.is_empty())
             .cloned()
             .unwrap_or_else(|| default_provider_profile(provider_id));
         let key = profile
@@ -306,7 +307,8 @@ mod tests {
     use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
 
     use super::{
-        desktop_startup, models_from_profiles, register_syntax_languages, resolve_data_root,
+        default_provider_profile, desktop_startup, models_from_profiles, register_syntax_languages,
+        resolve_data_root,
     };
 
     #[test]
@@ -328,7 +330,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn data_root_defaults_to_the_home_directory() {
         assert_eq!(
@@ -399,6 +400,30 @@ mod tests {
             models
                 .iter()
                 .any(|model| model.provider_id == OPENAI_PROVIDER_ID && !model.model.has_api_key())
+        );
+    }
+
+    #[test]
+    fn empty_persisted_model_lists_fall_back_to_defaults() {
+        let mut profiles = [
+            default_provider_profile(DEEPSEEK_PROVIDER_ID),
+            default_provider_profile(OPENAI_PROVIDER_ID),
+        ];
+        for profile in &mut profiles {
+            profile.models.clear();
+        }
+
+        let models = models_from_profiles(&profiles);
+
+        assert!(
+            models
+                .iter()
+                .any(|model| model.provider_id == DEEPSEEK_PROVIDER_ID)
+        );
+        assert!(
+            models
+                .iter()
+                .any(|model| model.provider_id == OPENAI_PROVIDER_ID)
         );
     }
 }
