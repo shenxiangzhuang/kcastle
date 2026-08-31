@@ -119,3 +119,25 @@ impl Model {
         configured
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> Model {
+        Model::new("test", "key", "https://example.com", "test", 1)
+    }
+
+    #[test]
+    #[should_panic]
+    fn initial_reasoning_effort_must_be_supported() {
+        let _ = model().with_reasoning(&[ReasoningEffort::Low], ReasoningEffort::High);
+    }
+
+    #[test]
+    #[should_panic]
+    fn updated_reasoning_effort_must_be_supported() {
+        let mut model = model().with_reasoning(&[ReasoningEffort::Low], ReasoningEffort::Low);
+        model.set_reasoning_effort(ReasoningEffort::High);
+    }
+}

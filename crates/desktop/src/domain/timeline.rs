@@ -2461,6 +2461,54 @@ mod tests {
 
     proptest! {
         #[test]
+        fn arbitrary_valid_spans_are_safe_to_project_and_query(
+            raw_spans in prop::collection::vec(
+                (0u8..3, any::<u64>(), -10_000.0f64..10_000.0, -10_000.0f64..10_000.0),
+                0..64,
+            ),
+            viewport_start in -10_000.0f64..10_000.0,
+            viewport_end in -10_000.0f64..10_000.0,
+            width_px in 0.0f64..4_000.0,
+            primitive_limit in 0usize..256,
+        ) {
+            let spans = raw_spans
+                .into_iter()
+                .enumerate()
+                .map(|(id, (lane, sequence, start, end))| {
+                    let lane = match lane {
+                        0 => TimelineLane::Input,
+                        1 => TimelineLane::Model,
+                        _ => TimelineLane::Tools,
+                    };
+                    let mut span = span(id, lane, start, end);
+                    span.sequence = sequence;
+                    span
+                })
+                .collect::<Vec<_>>();
+            let viewport = DomainRange::new(viewport_start, viewport_end);
+
+            for mode in [TimelineMode::Sequence, TimelineMode::Actual, TimelineMode::Duration] {
+                let geometry = TimelineGeometry::build(axis(mode, 1), spans.clone());
+                let rendered = geometry.render_model(viewport, width_px, primitive_limit);
+
+                for cell in &rendered {
+                    for id in geometry.render_members(cell) {
+                        prop_assert!(geometry.range_for(id).is_some());
+                    }
+                }
+                for id in 0..spans.len() {
+                    let _ = geometry.range_for(&id);
+                    let _ = geometry.render_cell_for_record(&rendered, id);
+                }
+                for lane in TIMELINE_LANES {
+                    for id in geometry.query(lane, viewport) {
+                        prop_assert!(geometry.range_for(id).is_some());
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn normalized_ranges_always_stay_inside_the_domain(
             start in -10_000.0f64..10_000.0,
             end in -10_000.0f64..10_000.0,

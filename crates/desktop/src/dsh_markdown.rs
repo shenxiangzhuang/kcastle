@@ -1378,7 +1378,7 @@ mod tests {
             Self {
                 block: MarkdownBlock {
                     key: 0,
-                    source: source.to_owned().into(),
+                    source: source.to_owned(),
                     node: nodes.remove(0),
                 },
                 text_size: 16.0,
@@ -1616,7 +1616,7 @@ mod tests {
                 source: source.to_owned(),
                 block: MarkdownBlock {
                     key: 0,
-                    source: source.to_owned().into(),
+                    source: source.to_owned(),
                     node: Node::Paragraph(markdown::mdast::Paragraph {
                         children: Vec::new(),
                         position: None,
@@ -2078,6 +2078,48 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn inline_slices_accept_any_valid_utf8_and_style_ranges(
+            characters in proptest::collection::vec(any::<char>(), 0..96),
+            indices in proptest::array::uniform6(any::<usize>()),
+        ) {
+            let text = characters.into_iter().collect::<String>();
+            let mut boundaries = text.char_indices().map(|(index, _)| index).collect::<Vec<_>>();
+            boundaries.push(text.len());
+            let boundary = |index: usize| boundaries[index % boundaries.len()];
+            let ordered = |left: usize, right: usize| {
+                let left = boundary(left);
+                let right = boundary(right);
+                left.min(right)..left.max(right)
+            };
+            let slice_range = ordered(indices[0], indices[1]);
+            let style_range = ordered(indices[2], indices[3]);
+            let omitted_range = ordered(indices[4], indices[5]);
+            let expected = text[slice_range.clone()].to_owned();
+            let output = super::InlineOutput {
+                text,
+                highlights: vec![(style_range.clone(), gpui::HighlightStyle::default())],
+                backgrounds: vec![(style_range, test_palette().canvas)],
+                omitted: vec![omitted_range],
+            };
+
+            let slice = output.slice(slice_range);
+
+            prop_assert_eq!(&slice.text, &expected);
+            for range in slice
+                .highlights
+                .iter()
+                .map(|(range, _)| range)
+                .chain(slice.backgrounds.iter().map(|(range, _)| range))
+                .chain(slice.omitted.iter())
+            {
+                prop_assert!(range.start < range.end);
+                prop_assert!(range.end <= slice.text.len());
+                prop_assert!(slice.text.is_char_boundary(range.start));
+                prop_assert!(slice.text.is_char_boundary(range.end));
+            }
+        }
+
         #[test]
         fn unicode_wrap_ranges_are_a_lossless_utf8_partition(
             characters in proptest::collection::vec(any::<char>(), 0..96)

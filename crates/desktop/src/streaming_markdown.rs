@@ -1,4 +1,3 @@
-use gpui::SharedString;
 use markdown::{
     ParseOptions,
     mdast::{Math, Node, Paragraph},
@@ -10,7 +9,7 @@ const UNSTABLE_TAIL_BLOCKS: usize = 2;
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MarkdownBlock {
     pub(crate) key: usize,
-    pub(crate) source: SharedString,
+    pub(crate) source: String,
     pub(crate) node: Node,
 }
 
@@ -77,7 +76,7 @@ impl StreamingMarkdownState {
                 let end = base + position.end.offset;
                 self.frozen.push(MarkdownBlock {
                     key: start,
-                    source: text[start..end].to_owned().into(),
+                    source: text[start..end].to_owned(),
                     node: node.clone(),
                 });
             }
@@ -92,7 +91,7 @@ impl StreamingMarkdownState {
                 let end = base + position.end.offset;
                 Some(MarkdownBlock {
                     key: start,
-                    source: text[start..end].to_owned().into(),
+                    source: text[start..end].to_owned(),
                     node: node.clone(),
                 })
             })
@@ -129,6 +128,38 @@ impl StreamingMarkdownState {
             .len()
             .saturating_sub(self.last_parse_start)
     }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_updates(data: &[u8]) -> bool {
+    let mut state = StreamingMarkdownState::default();
+    let mut text = String::new();
+    for update in data.split(|byte| *byte == 0) {
+        let Some((&mode, payload)) = update.split_first() else {
+            continue;
+        };
+        let fragment = String::from_utf8_lossy(payload);
+        if mode & 1 == 0 {
+            text.push_str(&fragment);
+        } else {
+            text.clear();
+            text.push_str(&fragment);
+        }
+        state.update(&text);
+        if state.source() != text {
+            return false;
+        }
+        for block in state.frozen().iter().chain(state.tail_blocks()) {
+            let source = block
+                .key
+                .checked_add(block.source.len())
+                .and_then(|end| text.get(block.key..end));
+            if source != Some(block.source.as_str()) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn math_parse_options() -> ParseOptions {
@@ -334,9 +365,10 @@ fn push_paragraph(
     }));
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "fuzzing")))]
 mod tests {
     use markdown::mdast::Node;
+    use proptest::prelude::*;
 
     use super::StreamingMarkdownState;
 
@@ -347,6 +379,38 @@ mod tests {
         ) || node
             .children()
             .is_some_and(|children| children.iter().any(|child| contains_math(child, display)))
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_unicode_stream_updates_keep_block_slices_valid(
+            updates in prop::collection::vec(
+                (any::<bool>(), prop::collection::vec(any::<char>(), 0..24)),
+                0..16,
+            )
+        ) {
+            let mut state = StreamingMarkdownState::default();
+            let mut text = String::new();
+
+            for (append, characters) in updates {
+                let fragment = characters.into_iter().collect::<String>();
+                if append {
+                    text.push_str(&fragment);
+                } else {
+                    text = fragment;
+                }
+                state.update(&text);
+
+                prop_assert_eq!(state.source(), text.as_str());
+                for block in state.frozen().iter().chain(state.tail_blocks()) {
+                    let end = block.key.checked_add(block.source.len());
+                    prop_assert_eq!(
+                        end.and_then(|end| text.get(block.key..end)),
+                        Some(block.source.as_str()),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -521,7 +585,7 @@ mod tests {
             state
                 .frozen()
                 .iter()
-                .map(|block| block.source.as_ref())
+                .map(|block| block.source.as_str())
                 .collect::<Vec<_>>(),
             ["# 标题", "first", "second"],
         );
@@ -543,7 +607,7 @@ mod tests {
                 .collect::<Vec<_>>()[..stable_keys.len()],
             stable_keys,
         );
-        assert_eq!(state.frozen().last().unwrap().source.as_ref(), "third");
+        assert_eq!(state.frozen().last().unwrap().source.as_str(), "third");
         assert_eq!(state.tail(&second), "\n\nfourth\n\nfifth");
         assert!(state.parsed_bytes() < second.len());
     }
@@ -609,7 +673,7 @@ mod tests {
             fence
                 .frozen()
                 .iter()
-                .any(|block| block.source.as_ref().contains("still code"))
+                .any(|block| block.source.contains("still code"))
         );
 
         let mut list = StreamingMarkdownState::default();
@@ -624,7 +688,7 @@ mod tests {
         assert!(
             list.frozen()
                 .iter()
-                .any(|block| block.source.as_ref().contains("item c"))
+                .any(|block| block.source.contains("item c"))
         );
     }
 
