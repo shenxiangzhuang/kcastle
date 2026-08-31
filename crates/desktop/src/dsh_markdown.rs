@@ -946,7 +946,7 @@ impl InlineOutput {
         let adjust = |candidate: &Range<usize>| {
             let start = candidate.start.max(range.start);
             let end = candidate.end.min(range.end);
-            (start < end).then_some((start - range.start)..(end - range.start))
+            (start < end).then(|| (start - range.start)..(end - range.start))
         };
 
         Self {
@@ -2040,6 +2040,20 @@ mod tests {
 
         assert_eq!(&slice.text[slice.highlights[0].0.clone()], "phase");
         assert_eq!(&slice.text[slice.backgrounds[0].0.clone()], "\u{a0}token");
+    }
+
+    #[test]
+    fn inline_slice_ignores_disjoint_style_ranges() {
+        let output = super::InlineOutput {
+            text: "styled plain".into(),
+            highlights: vec![(0..6, gpui::HighlightStyle::default())],
+            ..super::InlineOutput::default()
+        };
+
+        let slice = output.slice(7..12);
+
+        assert_eq!(slice.text, "plain");
+        assert!(slice.highlights.is_empty());
     }
 
     proptest! {
