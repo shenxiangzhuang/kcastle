@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "kcastle-agent"
-version = "0.2.0-alpha.20"
+version = "0.2.0-alpha.21"
 dependencies = [
  "async-openai",
  "futures-util",
