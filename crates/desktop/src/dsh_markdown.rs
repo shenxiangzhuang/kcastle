@@ -11,14 +11,16 @@ use gpui::{
     ParentElement, Pixels, SharedString, StrikethroughStyle, Styled, StyledText, Window, div, fill,
     point, prelude::FluentBuilder, px, size, svg,
 };
-use gpui_component::clipboard::Clipboard;
 use gpui_component::scroll::ScrollableElement;
+use gpui_component::{ActiveTheme, clipboard::Clipboard};
 use markdown::mdast::Node;
 
 use crate::assets::register_generated_asset;
 use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
-use crate::ui_theme::{UiPalette, metrics, palette};
+use crate::ui_theme::{UiPalette, markdown_highlight_theme, metrics, palette};
+
+const CODE_FONT_FAMILY: &str = ".SF NS Mono";
 
 pub(crate) fn render_markdown(
     message_key: u64,
@@ -398,6 +400,7 @@ fn render_code_block(
     path: &str,
     cx: &mut App,
 ) -> AnyElement {
+    let language_label = code_language_label(language);
     let clipboard_id = SharedString::from(format!(
         "dsh-md-copy-{}-{}-{path}",
         context.message_key, context.block.key
@@ -416,24 +419,25 @@ fn render_code_block(
                 .items_center()
                 .justify_between()
                 .w_full()
-                .px(px(14.0))
-                .py(px(9.0))
+                .px(px(16.0))
+                .py(px(10.0))
                 .bg(context.colors.markdown_code_banner)
-                .font_family("SF Mono")
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .child(if language.is_empty() {
-                    "text".to_owned()
-                } else {
-                    language.to_owned()
-                })
+                .border_b_1()
+                .border_color(context.colors.border)
+                .text_color(context.colors.muted_text)
+                .text_size(px(16.0))
+                .line_height(px(20.0))
+                .child(language_label)
                 .child(Clipboard::new(clipboard_id).value(code.to_owned())),
         );
 
+    let highlight_theme = markdown_highlight_theme(cx.theme().is_dark());
     let highlights = if !context.streaming {
         context
             .selection
-            .map(|selection| selection.code_styles(&render_id(context, path), language, code, cx))
+            .map(|selection| {
+                selection.code_styles(&render_id(context, path), language, code, highlight_theme)
+            })
             .unwrap_or_default()
     } else {
         Vec::new()
@@ -444,9 +448,10 @@ fn render_code_block(
                 .min_w_full()
                 .p_4()
                 .whitespace_nowrap()
-                .font_family("SF Mono")
-                .text_size(px(13.0))
-                .line_height(px(22.0))
+                .font_family(CODE_FONT_FAMILY)
+                .text_color(context.colors.markdown_text)
+                .text_size(px(16.0))
+                .line_height(px(24.0))
                 .child(
                     InlineText::new(InlineOutput {
                         text: code.to_owned(),
@@ -458,6 +463,14 @@ fn render_code_block(
         ),
     );
     body.into_any_element()
+}
+
+fn code_language_label(language: &str) -> String {
+    let mut chars = language.chars();
+    let Some(first) = chars.next() else {
+        return "Text".to_owned();
+    };
+    first.to_uppercase().chain(chars).collect()
 }
 
 fn render_id(context: &BlockContext<'_>, path: &str) -> SharedString {
@@ -1295,7 +1308,9 @@ mod tests {
     use markdown::{ParseOptions, mdast::Node};
     use proptest::prelude::*;
 
-    use super::{InlineText, build_math, heading_style, inline_text, root_block_gap};
+    use super::{
+        InlineText, build_math, code_language_label, heading_style, inline_text, root_block_gap,
+    };
     use crate::assets::DesktopAssets;
     use crate::streaming_markdown::MarkdownBlock;
     use crate::ui_theme::{UiPalette, metrics};
@@ -1305,6 +1320,12 @@ mod tests {
             Node::Root(root) => root.children,
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn code_language_labels_match_ui_copy() {
+        assert_eq!(code_language_label("python"), "Python");
+        assert_eq!(code_language_label(""), "Text");
     }
 
     fn math_blocks(source: &str) -> Vec<Node> {
