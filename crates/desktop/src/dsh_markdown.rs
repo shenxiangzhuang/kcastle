@@ -794,7 +794,7 @@ fn cached_math(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key, MathCacheEntry::Ready(rendered.clone()));
-        return rendered.map(MathRequest::Ready);
+        rendered.map(MathRequest::Ready)
     }
 
     #[cfg(not(test))]
