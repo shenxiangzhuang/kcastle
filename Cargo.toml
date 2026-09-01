@@ -4,7 +4,7 @@ exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.0-alpha.21"
+version = "0.2.0-alpha.22"
 edition = "2024"
 rust-version = "1.97"
 license = "Apache-2.0"
@@ -38,7 +38,7 @@ time = { version = "=0.3.55", features = ["formatting", "local-offset", "macros"
 tree-sitter-haskell = "=0.23.1"
 velopack = "=1.2.110-ge826545"
 
-kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.21" }
+kcastle-agent = { path = "crates/agent", version = "=0.2.0-alpha.22" }
 
 [profile.release]
 codegen-units = 1
