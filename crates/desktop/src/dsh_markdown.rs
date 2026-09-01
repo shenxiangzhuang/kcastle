@@ -120,6 +120,7 @@ fn render_node(
             FontWeight::NORMAL,
             context,
             window,
+            cx,
         ),
         Node::Heading(heading) => {
             let (size, line_height, weight) = heading_style(heading.depth);
@@ -130,6 +131,7 @@ fn render_node(
                 weight,
                 context,
                 window,
+                cx,
             )
         }
         Node::List(list) => render_list(list, context, path, window, cx),
@@ -170,7 +172,7 @@ fn render_node(
             path,
             cx,
         ),
-        Node::Math(math) => render_math(&math.value, None, context)
+        Node::Math(math) => render_math(&math.value, None, context, window, cx)
             .unwrap_or_else(|| render_code_block("math", &math.value, context, path, cx)),
         Node::Table(table) => render_table(table, context, path, window, cx),
         Node::ThematicBreak(_) => div()
@@ -213,6 +215,7 @@ fn render_node(
             FontWeight::NORMAL,
             context,
             window,
+            cx,
         ),
     }
 }
@@ -381,6 +384,7 @@ fn render_table(
                         },
                         context,
                         window,
+                        _cx,
                     )),
             );
         }
@@ -523,6 +527,7 @@ fn inline_block(
     weight: FontWeight,
     context: &BlockContext<'_>,
     window: &Window,
+    cx: &mut App,
 ) -> AnyElement {
     if !contains_inline_math(nodes) {
         return div()
@@ -559,10 +564,16 @@ fn inline_block(
             }
             InlinePiece::Math { source, style } => {
                 body = body.child(
-                    render_math(&source, Some((text_baseline, line_height, size)), context)
-                        .unwrap_or_else(|| {
-                            inline_math_fallback(&source, style, context.colors, context.selection)
-                        }),
+                    render_math(
+                        &source,
+                        Some((text_baseline, line_height, size)),
+                        context,
+                        window,
+                        cx,
+                    )
+                    .unwrap_or_else(|| {
+                        inline_math_fallback(&source, style, context.colors, context.selection)
+                    }),
                 );
             }
         }
@@ -592,38 +603,98 @@ struct RenderedMath {
     baseline: f32,
 }
 
-type MathCache = HashMap<(String, bool, u32), Result<RenderedMath, String>>;
+impl RenderedMath {
+    fn metrics(&self) -> MathMetrics {
+        MathMetrics {
+            width: self.width,
+            height: self.height,
+            baseline: self.baseline,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MathMetrics {
+    width: f32,
+    height: f32,
+    baseline: f32,
+}
+
+#[derive(Clone, Debug)]
+#[cfg_attr(test, allow(dead_code))]
+enum MathCacheEntry {
+    Pending(MathMetrics),
+    Ready(Result<RenderedMath, String>),
+}
+
+#[derive(Clone, Debug)]
+enum MathRequest {
+    Pending(MathMetrics),
+    Ready(RenderedMath),
+}
+
+#[derive(Debug)]
+struct PreparedMath {
+    display_list: ratex_types::display_item::DisplayList,
+    font_size: f64,
+    padding: f64,
+    metrics: MathMetrics,
+}
+
+type MathCache = HashMap<(String, bool, u32), MathCacheEntry>;
 static MATH_CACHE: OnceLock<Mutex<MathCache>> = OnceLock::new();
 
 fn render_math(
     source: &str,
     inline_text_metrics: Option<(f32, f32, f32)>,
     context: &BlockContext<'_>,
+    window: &Window,
+    cx: &mut App,
 ) -> Option<AnyElement> {
     let display = inline_text_metrics.is_none();
     let font_size = inline_text_metrics
         .map(|(_, _, font_size)| font_size)
         .unwrap_or(20.0);
-    let rendered = cached_math(source, display, font_size).ok()?;
-    let width = rendered.width;
+    let requested = cached_math(source, display, font_size, window, cx).ok()?;
+    let metrics = match &requested {
+        MathRequest::Pending(metrics) => metrics.clone(),
+        MathRequest::Ready(rendered) => rendered.metrics(),
+    };
+    let width = metrics.width;
     let inline_offset = inline_text_metrics.map(|(text_baseline, line_height, _)| {
-        inline_math_offset(&rendered, text_baseline, line_height)
+        inline_math_offset(&metrics, text_baseline, line_height)
     });
     // GPUI exposes no baseline for these flex items; asymmetric margins move the
     // centered SVG by half their difference while preserving the line's bounds.
     let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
-    let formula = svg()
-        .path(rendered.asset)
-        .flex_none()
-        .w(px(width))
-        .h(px(rendered.height))
-        .mt(px(margin_top))
-        .mb(px(margin_bottom))
-        .text_color(context.colors.markdown_text)
-        .when(cfg!(test), |element| {
-            let source = source.to_owned();
-            element.debug_selector(move || format!("math:{source}"))
-        });
+    let formula = match requested {
+        MathRequest::Ready(rendered) => svg()
+            .path(rendered.asset)
+            .flex_none()
+            .w(px(width))
+            .h(px(rendered.height))
+            .mt(px(margin_top))
+            .mb(px(margin_bottom))
+            .text_color(context.colors.markdown_text)
+            .when(cfg!(test), |element| {
+                let source = source.to_owned();
+                element.debug_selector(move || format!("math:{source}"))
+            })
+            .into_any_element(),
+        MathRequest::Pending(metrics) => div()
+            .flex_none()
+            .w(px(width))
+            .h(px(metrics.height))
+            .mt(px(margin_top))
+            .mb(px(margin_bottom))
+            .rounded(px(3.0))
+            .bg(context.colors.subtle)
+            .when(cfg!(test), |element| {
+                let source = source.to_owned();
+                element.debug_selector(move || format!("math-pending:{source}"))
+            })
+            .into_any_element(),
+    };
     let formula = if let Some(selection) = context.selection {
         let delimiters = if display { "$$" } else { "$" };
         selection.atom(format!("{delimiters}{source}{delimiters}"), formula)
@@ -650,7 +721,7 @@ fn render_math(
     }
 }
 
-fn inline_math_offset(rendered: &RenderedMath, text_baseline: f32, line_height: f32) -> f32 {
+fn inline_math_offset(rendered: &MathMetrics, text_baseline: f32, line_height: f32) -> f32 {
     text_baseline - line_height / 2.0 - (rendered.baseline - rendered.height / 2.0)
 }
 
@@ -680,25 +751,79 @@ fn inline_math_margins(offset: f32) -> (f32, f32) {
     (offset.max(0.0) * 2.0, (-offset).max(0.0) * 2.0)
 }
 
-fn cached_math(source: &str, display: bool, font_size: f32) -> Result<RenderedMath, String> {
+fn cached_math(
+    source: &str,
+    display: bool,
+    font_size: f32,
+    window: &Window,
+    cx: &mut App,
+) -> Result<MathRequest, String> {
     let key = (source.to_owned(), display, font_size.to_bits());
     let cache = MATH_CACHE.get_or_init(Default::default);
-    if let Some(rendered) = cache
+    if let Some(entry) = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&key)
         .cloned()
     {
-        return rendered;
+        return match entry {
+            MathCacheEntry::Pending(metrics) => Ok(MathRequest::Pending(metrics)),
+            MathCacheEntry::Ready(rendered) => rendered.map(MathRequest::Ready),
+        };
     }
 
-    let rendered = build_math_at_size(source, display, font_size);
-    // ponytail: process-wide cache; add eviction only if long sessions show material growth.
+    let prepared = match prepare_math_at_size(source, display, font_size) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, MathCacheEntry::Ready(Err(error.clone())));
+            return Err(error);
+        }
+    };
+    // GPUI's test executor drains background work inside a refresh, and multiple test app
+    // contexts share this process-wide cache. Keep deterministic visual tests synchronous while
+    // production uses the real thread pool below; the preparation/render boundary is covered by
+    // a separate unit test.
+    #[cfg(test)]
+    {
+        let _ = (window, cx);
+        let rendered = render_prepared_math(prepared);
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, MathCacheEntry::Ready(rendered.clone()));
+        rendered.map(MathRequest::Ready)
+    }
+
+    #[cfg(not(test))]
+    let metrics = prepared.metrics.clone();
+    #[cfg(not(test))]
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(key, rendered.clone());
-    rendered
+        .insert(key.clone(), MathCacheEntry::Pending(metrics.clone()));
+
+    #[cfg(not(test))]
+    let executor = cx.background_executor().clone();
+    #[cfg(not(test))]
+    window
+        .spawn(cx, async move |cx| {
+            let rendered = executor
+                .spawn(async move { render_prepared_math(prepared) })
+                .await;
+            MATH_CACHE
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key, MathCacheEntry::Ready(rendered));
+            let _ = cx.update(|_, app| app.refresh_windows());
+        })
+        .detach();
+
+    #[cfg(not(test))]
+    Ok(MathRequest::Pending(metrics))
 }
 
 #[cfg(test)]
@@ -706,9 +831,17 @@ fn build_math(source: &str, display: bool) -> Result<RenderedMath, String> {
     build_math_at_size(source, display, if display { 20.0 } else { 16.0 })
 }
 
+#[cfg(test)]
 fn build_math_at_size(source: &str, display: bool, font_size: f32) -> Result<RenderedMath, String> {
+    prepare_math_at_size(source, display, font_size).and_then(render_prepared_math)
+}
+
+fn prepare_math_at_size(
+    source: &str,
+    display: bool,
+    font_size: f32,
+) -> Result<PreparedMath, String> {
     use ratex_layout::{LayoutOptions, layout, to_display_list};
-    use ratex_svg::{SvgOptions, render_to_svg};
     use ratex_types::math_style::MathStyle;
 
     let ast = ratex_parser::parse(source).map_err(|error| error.to_string())?;
@@ -734,11 +867,26 @@ fn build_math_at_size(source: &str, display: bool, font_size: f32) -> Result<Ren
         return Err("formula has no visible bounds".to_owned());
     }
 
+    Ok(PreparedMath {
+        metrics: MathMetrics {
+            width,
+            height,
+            baseline: (display_list.height * font_size + padding) as f32,
+        },
+        display_list,
+        font_size,
+        padding,
+    })
+}
+
+fn render_prepared_math(prepared: PreparedMath) -> Result<RenderedMath, String> {
+    use ratex_svg::{SvgOptions, render_to_svg};
+
     let svg = render_to_svg(
-        &display_list,
+        &prepared.display_list,
         &SvgOptions {
-            font_size,
-            padding,
+            font_size: prepared.font_size,
+            padding: prepared.padding,
             stroke_width: 1.0,
             embed_glyphs: true,
             font_dir: String::new(),
@@ -747,9 +895,9 @@ fn build_math_at_size(source: &str, display: bool, font_size: f32) -> Result<Ren
     let asset = register_generated_asset(svg.into_bytes());
     Ok(RenderedMath {
         asset,
-        width,
-        height,
-        baseline: (display_list.height * font_size + padding) as f32,
+        width: prepared.metrics.width,
+        height: prepared.metrics.height,
+        baseline: prepared.metrics.baseline,
     })
 }
 
@@ -1418,6 +1566,7 @@ mod tests {
                     FontWeight::NORMAL,
                     &context,
                     window,
+                    cx,
                 )))
         }
     }
@@ -1627,7 +1776,7 @@ mod tests {
     }
 
     impl Render for DisplayMathHarness {
-        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let context = super::BlockContext {
                 message_key: 0,
                 generation: 0,
@@ -1640,7 +1789,7 @@ mod tests {
             };
             div()
                 .size_full()
-                .child(super::render_math(&self.source, None, &context).unwrap())
+                .child(super::render_math(&self.source, None, &context, window, cx).unwrap())
         }
     }
 
@@ -1790,7 +1939,7 @@ mod tests {
         let text_baseline = 20.0;
         for source in ["q_t", "K,V", r"\gamma", r"\frac{1}{2}"] {
             let rendered = build_math(source, false).unwrap();
-            let offset = super::inline_math_offset(&rendered, text_baseline, line_height);
+            let offset = super::inline_math_offset(&rendered.metrics(), text_baseline, line_height);
             let (margin_top, margin_bottom) = super::inline_math_margins(offset);
             let aligned_baseline = -(rendered.height + margin_top + margin_bottom) / 2.0
                 + margin_top
@@ -1891,6 +2040,21 @@ mod tests {
         let formula_center = formula.origin.x + formula.size.width / 2.0;
 
         assert!((formula_center - px(260.0)).abs() < px(1.0), "{formula:?}");
+    }
+
+    #[test]
+    fn math_preparation_preserves_layout_while_svg_render_is_deferred() {
+        let source = r"\text{渐进公式}_{987654321}";
+        let prepared = super::prepare_math_at_size(source, true, 20.0).unwrap();
+        let placeholder = prepared.metrics.clone();
+
+        assert!(placeholder.width > 0.0);
+        assert!(placeholder.height > 0.0);
+
+        let rendered = super::render_prepared_math(prepared).unwrap();
+        assert_eq!(rendered.width, placeholder.width);
+        assert_eq!(rendered.height, placeholder.height);
+        assert_eq!(rendered.baseline, placeholder.baseline);
     }
 
     #[test]
