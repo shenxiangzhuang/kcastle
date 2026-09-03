@@ -2573,16 +2573,16 @@ mod tests {
         }
         assert_eq!(requested, ["interactive-a", "interactive-b"]);
 
-        control.approve("interactive-a", true).await.unwrap();
+        control.approve("interactive-a").await.unwrap();
         control
-            .approve("interactive-a", true)
+            .approve("interactive-a")
             .await
             .expect("an identical retry is idempotent while the approval phase is open");
-        let error = control.approve("interactive-a", false).await.unwrap_err();
+        let error = control.deny("interactive-a").await.unwrap_err();
         assert!(error.to_string().contains("already resolved as Allowed"));
 
         for call_id in ["automatic", "unavailable", "unknown"] {
-            let error = control.approve(call_id, true).await.unwrap_err();
+            let error = control.approve(call_id).await.unwrap_err();
             assert!(
                 error
                     .to_string()
@@ -2590,7 +2590,7 @@ mod tests {
                 "unexpected error for {call_id}: {error}"
             );
         }
-        control.approve("interactive-b", false).await.unwrap();
+        control.deny("interactive-b").await.unwrap();
 
         let agent = timeout(Duration::from_secs(3), execution)
             .await
@@ -2661,7 +2661,7 @@ mod tests {
                 break;
             }
         }
-        control.approve("interactive", true).await.unwrap();
+        control.approve("interactive").await.unwrap();
         loop {
             let event = timeout(Duration::from_secs(2), received.recv())
                 .await
@@ -2680,20 +2680,14 @@ mod tests {
             }
         }
 
-        timeout(
-            Duration::from_millis(100),
-            control.approve("interactive", true),
-        )
-        .await
-        .expect("an acknowledgement retry must not wait for the tool")
-        .expect("the persisted decision makes an identical retry idempotent");
-        let conflict = timeout(
-            Duration::from_millis(100),
-            control.approve("interactive", false),
-        )
-        .await
-        .expect("a conflicting retry must not wait for the tool")
-        .unwrap_err();
+        timeout(Duration::from_millis(100), control.approve("interactive"))
+            .await
+            .expect("an acknowledgement retry must not wait for the tool")
+            .expect("the persisted decision makes an identical retry idempotent");
+        let conflict = timeout(Duration::from_millis(100), control.deny("interactive"))
+            .await
+            .expect("a conflicting retry must not wait for the tool")
+            .unwrap_err();
         assert!(conflict.to_string().contains("already resolved as Allowed"));
 
         timeout(Duration::from_secs(3), execution)
