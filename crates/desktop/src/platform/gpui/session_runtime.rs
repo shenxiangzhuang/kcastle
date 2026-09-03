@@ -410,7 +410,7 @@ impl SessionRuntime {
                 };
                 cx.spawn(async move |this, cx| {
                     for call_id in approvals {
-                        if let Err(error) = control.approve(call_id, true).await {
+                        if let Err(error) = control.approve(call_id).await {
                             let _ = this.update(cx, |runtime, cx| {
                                 runtime.fail_runtime(error.to_string());
                                 cx.notify();
@@ -788,7 +788,12 @@ impl SessionRuntime {
             return;
         };
         cx.spawn(async move |this, cx| {
-            if let Err(error) = control.approve(call_id, allow).await {
+            let result = if allow {
+                control.approve(call_id).await
+            } else {
+                control.deny(call_id).await
+            };
+            if let Err(error) = result {
                 let _ = this.update(cx, |runtime, cx| {
                     if runtime.lifecycle.allows(RuntimeOperation::SubmitDuringRun) {
                         runtime.approvals.0.push_front(approval);
@@ -812,7 +817,7 @@ impl SessionRuntime {
                 if self.allow_all_tools {
                     if let Some(control) = self.control.clone() {
                         tokio::spawn(async move {
-                            let _ = control.approve(call.call_id, true).await;
+                            let _ = control.approve(call.call_id).await;
                         });
                     } else {
                         self.fail_runtime("run control is unavailable");

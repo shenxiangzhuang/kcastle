@@ -199,11 +199,21 @@ impl RunControl {
             .map_err(AgentError::Task)
     }
 
-    pub async fn approve(&self, call_id: impl Into<String>, allow: bool) -> Result<(), AgentError> {
+    /// Allows a pending interactive tool call, returning only after the decision is committed.
+    pub async fn approve(&self, call_id: impl Into<String>) -> Result<(), AgentError> {
+        self.resolve_approval(call_id.into(), true).await
+    }
+
+    /// Denies a pending interactive tool call, returning only after the decision is committed.
+    pub async fn deny(&self, call_id: impl Into<String>) -> Result<(), AgentError> {
+        self.resolve_approval(call_id.into(), false).await
+    }
+
+    async fn resolve_approval(&self, call_id: String, allow: bool) -> Result<(), AgentError> {
         let (acknowledgement, accepted) = oneshot::channel();
         self.approvals
             .send(ApprovalCommand {
-                call_id: call_id.into(),
+                call_id,
                 allow,
                 acknowledgement,
             })
