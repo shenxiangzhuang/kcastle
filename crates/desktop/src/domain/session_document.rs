@@ -1022,7 +1022,7 @@ impl SessionDocument {
                 let options = Arc::new(ModelRequestOptions {
                     reason: *reason,
                     model: Arc::from(model.as_str()),
-                    reasoning_effort: reasoning_effort.as_deref().map(Arc::from),
+                    reasoning_effort: reasoning_effort.map(|effort| Arc::from(effort.as_str())),
                     max_output_tokens: *max_output_tokens,
                     session_config: session_config.clone(),
                 });

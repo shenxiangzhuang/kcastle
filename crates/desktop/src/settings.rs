@@ -108,8 +108,8 @@ impl SettingsStore {
         model
             .reasoning_efforts()
             .iter()
-            .find(|effort| reasoning_key(effort) == selected)
-            .cloned()
+            .find(|effort| effort.as_str() == selected)
+            .copied()
     }
 
     pub(crate) fn selected_model(&self) -> Option<&str> {
@@ -129,7 +129,7 @@ impl SettingsStore {
     ) -> Result<(), Box<dyn Error>> {
         self.stored
             .reasoning_efforts
-            .insert(model_id.into(), reasoning_key(effort).into());
+            .insert(model_id.into(), effort.as_str().into());
         self.save()
     }
 
@@ -425,17 +425,6 @@ fn invalid_text_value(column: usize, label: &str, value: String) -> rusqlite::Er
             format!("invalid {label}: {value:?}"),
         )),
     )
-}
-
-fn reasoning_key(effort: &ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::None => "none",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Xhigh => "xhigh",
-        _ => "unknown",
-    }
 }
 
 #[cfg(test)]

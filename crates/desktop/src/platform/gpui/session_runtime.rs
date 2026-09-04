@@ -487,7 +487,7 @@ impl SessionRuntime {
             return false;
         }
         let mut config = self.config.clone();
-        config.model.reasoning_effort = Some(reasoning_key(&effort));
+        config.model.reasoning_effort = Some(effort);
         self.apply_config(config, ModelUpdate::Keep, cx)
     }
 
@@ -977,13 +977,6 @@ fn settlement_config_failure(
 
 fn millis_to_seconds(millis: i64) -> u64 {
     u64::try_from(millis.max(0)).unwrap_or_default() / 1_000
-}
-
-fn reasoning_key(effort: &ReasoningEffort) -> String {
-    serde_json::to_value(effort)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
 }
 
 #[cfg(test)]

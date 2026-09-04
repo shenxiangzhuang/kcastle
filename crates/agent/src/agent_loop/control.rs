@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
+use crate::model::ReasoningEffort;
 use crate::session::SessionError;
 use crate::session::event::{InputId, InputOrigin};
 use crate::session::machine::SessionMachineError;
@@ -23,6 +24,11 @@ pub enum AgentError {
     ModelResponse(String),
     #[error("not enough history to compact")]
     NothingToCompact,
+    #[error("reasoning effort {effort} is not supported by model {model}")]
+    UnsupportedReasoningEffort {
+        effort: ReasoningEffort,
+        model: String,
+    },
     #[error("agent operation was aborted")]
     Aborted,
     #[error("session machine failed: {0}")]
@@ -72,6 +78,7 @@ impl RunFailure {
             AgentError::EmptyInput
             | AgentError::MaxTurns(_)
             | AgentError::NothingToCompact
+            | AgentError::UnsupportedReasoningEffort { .. }
             | AgentError::Aborted
             | AgentError::Machine(_) => false,
         };

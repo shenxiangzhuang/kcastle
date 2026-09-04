@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::context::ResponseMetadata;
+use crate::model::ReasoningEffort;
 use crate::session::SessionConfig;
 
 pub const SESSION_FORMAT_VERSION: u32 = 3;
@@ -219,7 +220,7 @@ pub enum SessionEvent {
         instructions: Option<String>,
         tools: Vec<Tool>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        reasoning_effort: Option<String>,
+        reasoning_effort: Option<ReasoningEffort>,
         #[serde(skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u32>,
         session_config: SessionConfig,
@@ -273,7 +274,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning_effort: Option<String>,
+        reasoning_effort: Option<ReasoningEffort>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_output_tokens: Option<u32>,
     },

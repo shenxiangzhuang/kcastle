@@ -10,6 +10,7 @@ use thiserror::Error;
 #[cfg(test)]
 use crate::context::ContextEntry;
 use crate::context::ContextState;
+use crate::model::ReasoningEffort;
 use crate::session::SessionConfig;
 use crate::session::event::{
     AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin,
@@ -116,7 +117,7 @@ struct RequestConfig {
     model: String,
     instructions: Option<String>,
     tools: Vec<Tool>,
-    reasoning_effort: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
     max_output_tokens: Option<u32>,
     session_config: SessionConfig,
 }
@@ -299,7 +300,7 @@ impl SessionMachine {
         model: &str,
         instructions: Option<&str>,
         tools: &[Tool],
-        reasoning_effort: Option<&str>,
+        reasoning_effort: Option<ReasoningEffort>,
         max_output_tokens: Option<u32>,
         session_config: &SessionConfig,
     ) -> RequestHeaderReason {
@@ -309,7 +310,7 @@ impl SessionMachine {
         if previous.model == model
             && previous.instructions.as_deref() == instructions
             && previous.tools == tools
-            && previous.reasoning_effort.as_deref() == reasoning_effort
+            && previous.reasoning_effort == reasoning_effort
             && previous.max_output_tokens == max_output_tokens
             && previous.session_config == *session_config
         {
@@ -814,7 +815,6 @@ impl SessionMachine {
                     || !self.open_tools.is_empty()
                     || model.trim().is_empty()
                     || instructions.as_deref().is_some_and(str::is_empty)
-                    || reasoning_effort.as_deref().is_some_and(str::is_empty)
                     || self.requests.contains_key(request_id)
                     || step.phase != StepPhase::AwaitingRequest
                     || step.current_request.is_some()
@@ -825,7 +825,7 @@ impl SessionMachine {
                     model,
                     instructions.as_deref(),
                     tools,
-                    reasoning_effort.as_deref(),
+                    *reasoning_effort,
                     *max_output_tokens,
                     session_config,
                 );
@@ -833,7 +833,7 @@ impl SessionMachine {
                     model: model.clone(),
                     instructions: instructions.clone(),
                     tools: tools.clone(),
-                    reasoning_effort: reasoning_effort.clone(),
+                    reasoning_effort: *reasoning_effort,
                     max_output_tokens: *max_output_tokens,
                     session_config: session_config.clone(),
                 };
@@ -1104,7 +1104,6 @@ impl SessionMachine {
                 tokens_before,
                 first_kept_id,
                 model,
-                reasoning_effort,
                 ..
             } => {
                 ensure_non_empty_id("compaction", compaction_id)?;
@@ -1123,7 +1122,6 @@ impl SessionMachine {
                     || model
                         .as_deref()
                         .is_some_and(|model| model.trim().is_empty())
-                    || reasoning_effort.as_deref().is_some_and(str::is_empty)
                 {
                     return invalid(format!("compaction {compaction_id} cannot start"));
                 }

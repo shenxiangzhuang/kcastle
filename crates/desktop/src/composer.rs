@@ -496,7 +496,7 @@ impl DesktopApp {
                     .model
                     .reasoning_efforts()
                     .to_vec();
-                let selected = self.selected_reasoning_effort.clone();
+                let selected = self.selected_reasoning_effort;
                 div()
                     .flex()
                     .flex_col()
@@ -512,7 +512,7 @@ impl DesktopApp {
                             self.core.composer.highlighted_item == index,
                             colors,
                             cx.listener(move |this, _, _, cx| {
-                                this.set_reasoning_effort(effort.clone(), cx);
+                                this.set_reasoning_effort(effort, cx);
                                 this.dispatch_local(Action::SetComposerMenu(None), cx);
                             }),
                         )
@@ -795,10 +795,10 @@ fn format_duration(duration: Duration) -> String {
 fn effort_label(effort: &kcastle_agent::ReasoningEffort) -> &'static str {
     match effort {
         kcastle_agent::ReasoningEffort::None => "Off",
+        kcastle_agent::ReasoningEffort::Minimal => "Minimal",
         kcastle_agent::ReasoningEffort::Low => "Low",
         kcastle_agent::ReasoningEffort::Medium => "Medium",
         kcastle_agent::ReasoningEffort::High => "High",
         kcastle_agent::ReasoningEffort::Xhigh => "XHigh",
-        _ => "Other",
     }
 }

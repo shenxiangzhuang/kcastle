@@ -6107,8 +6107,12 @@ fn request_options_details(
     if let Some(model) = options.session_config.model.model_id.as_deref() {
         body = body.child(detail_pair("Configured model", model, colors));
     }
-    if let Some(effort) = options.session_config.model.reasoning_effort.as_deref() {
-        body = body.child(detail_pair("Configured reasoning effort", effort, colors));
+    if let Some(effort) = options.session_config.model.reasoning_effort {
+        body = body.child(detail_pair(
+            "Configured reasoning effort",
+            effort.as_str(),
+            colors,
+        ));
     }
     body.child(detail_pair(
         "Allow all tools",

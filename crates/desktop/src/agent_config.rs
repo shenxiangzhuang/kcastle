@@ -67,7 +67,7 @@ impl ConfiguredModel {
     pub(crate) fn session_model_config(&self) -> SessionModelConfig {
         SessionModelConfig {
             model_id: Some(self.id.clone()),
-            reasoning_effort: self.reasoning_effort.as_ref().map(reasoning_key),
+            reasoning_effort: self.reasoning_effort,
         }
     }
 }
@@ -123,13 +123,6 @@ pub(crate) fn default_reasoning_effort(provider_id: &str) -> Option<ReasoningEff
     }
 }
 
-fn reasoning_key(effort: &ReasoningEffort) -> String {
-    serde_json::to_value(effort)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
-}
-
 pub(crate) fn initial_session_title(input: &str) -> Option<String> {
     let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = normalized.chars();
@@ -160,7 +153,7 @@ mod tests {
             configured.session_model_config(),
             SessionModelConfig {
                 model_id: Some("openai/gpt-test".into()),
-                reasoning_effort: Some("medium".into()),
+                reasoning_effort: Some(ReasoningEffort::Medium),
             }
         );
     }

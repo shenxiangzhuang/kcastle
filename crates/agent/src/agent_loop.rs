@@ -6,7 +6,8 @@ mod control;
 
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputMessage, FunctionCallOutputItemParam, FunctionToolCall, InputItem,
-    Item, OutputItem, Reasoning, Response, ResponseStreamEvent,
+    Item, OutputItem, Reasoning, ReasoningEffort as ProviderReasoningEffort, Response,
+    ResponseStreamEvent,
 };
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
@@ -46,22 +47,22 @@ struct ResolvedModelConfig {
 
 impl ResolvedModelConfig {
     fn reasoning(&self) -> Option<Reasoning> {
-        self.reasoning_effort.clone().map(|effort| Reasoning {
-            effort: Some(effort),
+        self.reasoning_effort.map(|effort| Reasoning {
+            effort: Some(provider_reasoning_effort(effort)),
             summary: None,
         })
     }
 }
 
-fn reasoning_key(effort: &ReasoningEffort) -> String {
-    serde_json::to_value(effort)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
-}
-
-fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
-    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
+fn provider_reasoning_effort(effort: ReasoningEffort) -> ProviderReasoningEffort {
+    match effort {
+        ReasoningEffort::None => ProviderReasoningEffort::None,
+        ReasoningEffort::Minimal => ProviderReasoningEffort::Minimal,
+        ReasoningEffort::Low => ProviderReasoningEffort::Low,
+        ReasoningEffort::Medium => ProviderReasoningEffort::Medium,
+        ReasoningEffort::High => ProviderReasoningEffort::High,
+        ReasoningEffort::Xhigh => ProviderReasoningEffort::Xhigh,
+    }
 }
 
 impl AgentLoop {
@@ -409,13 +410,13 @@ impl AgentLoop {
         let tools = self.agent.tool_schemas();
         let instructions =
             (!self.agent.instructions.is_empty()).then(|| self.agent.instructions.clone());
-        let model_config = self.resolved_model_config();
-        let reasoning_effort = model_config.reasoning_effort.as_ref().map(reasoning_key);
+        let model_config = self.resolved_model_config()?;
+        let reasoning_effort = model_config.reasoning_effort;
         let reason = self.agent.machine.expected_request_reason(
             &model_config.model,
             instructions.as_deref(),
             &tools,
-            reasoning_effort.as_deref(),
+            reasoning_effort,
             model_config.max_output_tokens,
             &self.agent.session_config,
         );
@@ -1121,20 +1122,21 @@ impl AgentLoop {
             .find(|input| input.origin == origin)
     }
 
-    fn resolved_model_config(&self) -> ResolvedModelConfig {
-        let reasoning_effort = self
-            .agent
-            .session_config
-            .model
-            .reasoning_effort
-            .as_deref()
-            .and_then(parse_reasoning_effort)
-            .filter(|effort| self.agent.model.reasoning_efforts().contains(effort));
-        ResolvedModelConfig {
+    fn resolved_model_config(&self) -> Result<ResolvedModelConfig, AgentError> {
+        let reasoning_effort = self.agent.session_config.model.reasoning_effort;
+        if let Some(effort) = reasoning_effort
+            && !self.agent.model.reasoning_efforts().contains(&effort)
+        {
+            return Err(AgentError::UnsupportedReasoningEffort {
+                effort,
+                model: self.agent.model.model.clone(),
+            });
+        }
+        Ok(ResolvedModelConfig {
             model: self.agent.model.model.clone(),
             reasoning_effort,
             max_output_tokens: self.agent.model.max_output_tokens,
-        }
+        })
     }
 
     async fn commit_now(
@@ -1397,7 +1399,7 @@ impl AgentLoop {
             AgentError::Task("automatic compaction requires an active run".into())
         })?;
         let compaction_id = CompactionId::random();
-        let model_config = self.resolved_model_config();
+        let model_config = self.resolved_model_config()?;
         self.commit_now(
             vec![SessionEvent::CompactionStarted {
                 compaction_id: compaction_id.clone(),
@@ -1405,7 +1407,7 @@ impl AgentLoop {
                 tokens_before,
                 first_kept_id: prepared.first_kept_id,
                 model: Some(model_config.model.clone()),
-                reasoning_effort: model_config.reasoning_effort.as_ref().map(reasoning_key),
+                reasoning_effort: model_config.reasoning_effort,
                 max_output_tokens: model_config.max_output_tokens,
             }],
             events,
@@ -1714,12 +1716,31 @@ mod tests {
             .model
             .clone()
             .with_reasoning_efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
-        agent.agent.session_config.model.reasoning_effort = Some("high".into());
+        agent.agent.session_config.model.reasoning_effort = Some(ReasoningEffort::High);
 
-        let resolved = agent.resolved_model_config();
+        let resolved = agent.resolved_model_config().unwrap();
 
         assert_eq!(resolved.model, "test-model");
         assert_eq!(resolved.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn unsupported_session_reasoning_effort_is_rejected() {
+        let mut agent = test_agent();
+        agent.agent.model = agent
+            .agent
+            .model
+            .clone()
+            .with_reasoning_efforts(&[ReasoningEffort::Low]);
+        agent.agent.session_config.model.reasoning_effort = Some(ReasoningEffort::High);
+
+        assert!(matches!(
+            agent.resolved_model_config(),
+            Err(AgentError::UnsupportedReasoningEffort {
+                effort: ReasoningEffort::High,
+                ..
+            })
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3055,7 +3076,7 @@ mod tests {
         let changed = SessionConfig {
             model: crate::SessionModelConfig {
                 model_id: Some("externally-selected-model".into()),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: Some(ReasoningEffort::High),
             },
             allow_all_tools: true,
         };
