@@ -47,9 +47,10 @@ mod ui_theme;
 mod updater;
 
 use agent_config::{
-    DEEPSEEK_PROVIDER_ID, INSTRUCTIONS, OPENAI_PROVIDER_ID, build_model, default_provider_profile,
+    ConfiguredModel, DEEPSEEK_PROVIDER_ID, INSTRUCTIONS, OPENAI_PROVIDER_ID, build_model,
+    default_provider_profile,
 };
-use app::{ConfiguredModel, DesktopApp, DesktopStartup, active_model_index};
+use app::{DesktopApp, DesktopStartup, active_model_index};
 use app_store::AppStore;
 use assets::DesktopAssets;
 use project::ProjectStore;

@@ -12,12 +12,11 @@ use gpui_kit::{
     PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, Subscription, Window, point,
     px,
 };
-use kcastle_agent::{
-    Agent, Model, Session, SessionConfig, SessionError, SessionId, SessionInfo, SessionModelConfig,
-};
+use kcastle_agent::{Agent, Session, SessionConfig, SessionError, SessionId, SessionInfo};
 #[cfg(test)]
-use kcastle_agent::{SessionCatalog, SessionStoreError};
+use kcastle_agent::{Model, SessionCatalog, SessionModelConfig, SessionStoreError};
 
+use crate::agent_config::ConfiguredModel;
 use crate::application::session_catalog::{
     SessionCatalogCache, SessionSearchDocument, apply_project_catalog_result,
     load_project_archived_sessions, load_session_catalog_cache, matching_search_snippet,
@@ -43,47 +42,13 @@ use crate::platform::gpui::{
     SessionRuntime, SessionRuntimeSnapshot, SessionRuntimeStatus, run_effects,
 };
 use crate::project::{ProjectId, ProjectStore};
-use crate::settings::{Appearance, EnterBehavior, ProviderModel, SettingsStore};
+#[cfg(test)]
+use crate::settings::ProviderModel;
+use crate::settings::{Appearance, EnterBehavior, SettingsStore};
 use crate::trajectory::{
     TimelineModelCache, TrajectoryDetailsLayoutState, TrajectoryDetailsMarkdownCache,
 };
 use crate::updater::AvailableUpdate;
-
-#[derive(Clone)]
-pub(crate) struct ConfiguredModel {
-    pub(crate) id: String,
-    pub(crate) model: Model,
-    pub(crate) provider_id: String,
-    pub(crate) profile: ProviderModel,
-    pub(crate) reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
-}
-
-impl ConfiguredModel {
-    pub(crate) fn new(
-        provider_id: impl Into<String>,
-        profile: ProviderModel,
-        model: Model,
-    ) -> Self {
-        let provider_id = provider_id.into();
-        let reasoning_effort = crate::agent_config::default_reasoning_effort(&provider_id);
-        Self {
-            id: format!("{provider_id}/{}", profile.model_id),
-            model,
-            provider_id,
-            profile,
-            reasoning_effort,
-        }
-    }
-
-    pub(crate) fn label(&self) -> String {
-        let model = if self.profile.display_name.trim().is_empty() {
-            &self.profile.model_id
-        } else {
-            &self.profile.display_name
-        };
-        format!("{} · {model}", self.model.name())
-    }
-}
 
 pub(crate) fn composer_model_indices(
     models: &[ConfiguredModel],
@@ -2611,14 +2576,8 @@ impl DesktopApp {
         }
         let configured = self.models[index].clone();
         let label = configured.label();
-        self.selected_runtime.update(cx, |runtime, cx| {
-            runtime.set_model(
-                configured.id.clone(),
-                configured.model.clone(),
-                configured.reasoning_effort.clone(),
-                cx,
-            )
-        });
+        self.selected_runtime
+            .update(cx, |runtime, cx| runtime.select_model(&configured, cx));
         self.selected_model = index;
         self.model = label;
         self.selected_reasoning_effort = configured.reasoning_effort;
@@ -2634,23 +2593,12 @@ impl DesktopApp {
                 let snapshot = runtime.read(cx).snapshot();
                 let model_id = snapshot.config.model.model_id?;
                 let configured = self.models.iter().find(|model| model.id == model_id)?;
-                let effort = snapshot
-                    .config
-                    .model
-                    .reasoning_effort
-                    .as_deref()
-                    .and_then(parse_reasoning_effort);
-                Some((
-                    runtime.clone(),
-                    configured.id.clone(),
-                    configured.model.clone(),
-                    effort,
-                ))
+                Some((runtime.clone(), configured.clone()))
             })
             .collect::<Vec<_>>();
-        for (runtime, model_id, model, effort) in updates {
+        for (runtime, configured) in updates {
             runtime.update(cx, |runtime, cx| {
-                runtime.set_model(model_id, model, effort, cx);
+                runtime.refresh_model(&configured, cx);
             });
         }
     }
@@ -2871,23 +2819,13 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-fn reasoning_key(effort: &kcastle_agent::ReasoningEffort) -> String {
-    serde_json::to_value(effort)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
-}
-
 fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort> {
     serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
 fn config_for_model(model: &ConfiguredModel, allow_all_tools: bool) -> SessionConfig {
     SessionConfig {
-        model: SessionModelConfig {
-            model_id: Some(model.id.clone()),
-            reasoning_effort: model.reasoning_effort.as_ref().map(reasoning_key),
-        },
+        model: model.session_model_config(),
         allow_all_tools,
     }
 }

@@ -1,4 +1,4 @@
-use kcastle_agent::{Model, ReasoningEffort};
+use kcastle_agent::{Model, ReasoningEffort, SessionModelConfig};
 
 use crate::settings::{ProviderModel, ProviderProfile};
 
@@ -28,6 +28,49 @@ const OPENAI_MODELS: &[(&str, &str, usize)] = &[
     ("gpt-5.6-terra", "GPT-5.6 Terra", 1_050_000),
     ("gpt-5.6-luna", "GPT-5.6 Luna", 1_050_000),
 ];
+
+#[derive(Clone)]
+pub(crate) struct ConfiguredModel {
+    pub(crate) id: String,
+    pub(crate) model: Model,
+    pub(crate) provider_id: String,
+    pub(crate) profile: ProviderModel,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl ConfiguredModel {
+    pub(crate) fn new(
+        provider_id: impl Into<String>,
+        profile: ProviderModel,
+        model: Model,
+    ) -> Self {
+        let provider_id = provider_id.into();
+        let reasoning_effort = default_reasoning_effort(&provider_id);
+        Self {
+            id: format!("{provider_id}/{}", profile.model_id),
+            model,
+            provider_id,
+            profile,
+            reasoning_effort,
+        }
+    }
+
+    pub(crate) fn label(&self) -> String {
+        let model = if self.profile.display_name.trim().is_empty() {
+            &self.profile.model_id
+        } else {
+            &self.profile.display_name
+        };
+        format!("{} · {model}", self.model.name())
+    }
+
+    pub(crate) fn session_model_config(&self) -> SessionModelConfig {
+        SessionModelConfig {
+            model_id: Some(self.id.clone()),
+            reasoning_effort: self.reasoning_effort.as_ref().map(reasoning_key),
+        }
+    }
+}
 
 #[allow(
     clippy::unreachable,
@@ -80,6 +123,13 @@ pub(crate) fn default_reasoning_effort(provider_id: &str) -> Option<ReasoningEff
     }
 }
 
+fn reasoning_key(effort: &ReasoningEffort) -> String {
+    serde_json::to_value(effort)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
+}
+
 pub(crate) fn initial_session_title(input: &str) -> Option<String> {
     let normalized = input.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = normalized.chars();
@@ -95,7 +145,25 @@ pub(crate) fn initial_session_title(input: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::initial_session_title;
+    use super::*;
+
+    #[test]
+    fn configured_model_owns_its_session_selection() {
+        let profile = ProviderModel::new("gpt-test", "GPT Test", 10_000, None);
+        let configured = ConfiguredModel::new(
+            OPENAI_PROVIDER_ID,
+            profile,
+            Model::new("OpenAI", "key", "https://example.com", "gpt-test", 10_000),
+        );
+
+        assert_eq!(
+            configured.session_model_config(),
+            SessionModelConfig {
+                model_id: Some("openai/gpt-test".into()),
+                reasoning_effort: Some("medium".into()),
+            }
+        );
+    }
 
     #[test]
     fn initial_title_is_normalized_and_bounded() {
