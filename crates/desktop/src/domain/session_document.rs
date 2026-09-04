@@ -1631,6 +1631,7 @@ impl SessionDocument {
                 run_id,
                 tokens_before,
                 first_kept_id,
+                ..
             } => {
                 self.graph.compactions.insert(
                     compaction_id.clone(),
@@ -2723,6 +2724,9 @@ pub(crate) mod tests {
                     run_id: run_id.clone(),
                     tokens_before: 123_456,
                     first_kept_id: 1,
+                    model: None,
+                    reasoning_effort: None,
+                    max_output_tokens: None,
                 },
             ),
             recorded(

@@ -12,7 +12,9 @@ use gpui_kit::{
     PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, Subscription, Window, point,
     px,
 };
-use kcastle_agent::{Agent, Model, Session, SessionConfig, SessionError, SessionId, SessionInfo};
+use kcastle_agent::{
+    Agent, Model, Session, SessionConfig, SessionError, SessionId, SessionInfo, SessionModelConfig,
+};
 #[cfg(test)]
 use kcastle_agent::{SessionCatalog, SessionStoreError};
 
@@ -53,6 +55,7 @@ pub(crate) struct ConfiguredModel {
     pub(crate) model: Model,
     pub(crate) provider_id: String,
     pub(crate) profile: ProviderModel,
+    pub(crate) reasoning_effort: Option<kcastle_agent::ReasoningEffort>,
 }
 
 impl ConfiguredModel {
@@ -62,11 +65,13 @@ impl ConfiguredModel {
         model: Model,
     ) -> Self {
         let provider_id = provider_id.into();
+        let reasoning_effort = crate::agent_config::default_reasoning_effort(&provider_id);
         Self {
             id: format!("{provider_id}/{}", profile.model_id),
             model,
             provider_id,
             profile,
+            reasoning_effort,
         }
     }
 
@@ -334,6 +339,7 @@ impl DesktopApp {
         let current_session_id = agent.session_info().id.clone();
         let runtime_config = config_for_model(&models[selected_model], settings.allow_all_tools());
         let selected_reasoning_effort = runtime_config
+            .model
             .reasoning_effort
             .as_deref()
             .and_then(parse_reasoning_effort);
@@ -670,7 +676,7 @@ impl DesktopApp {
     }
 
     fn apply_selected_runtime_snapshot(&mut self, snapshot: SessionRuntimeSnapshot) {
-        if let Some(model_id) = snapshot.config.model_id.as_deref()
+        if let Some(model_id) = snapshot.config.model.model_id.as_deref()
             && let Some(index) = self.models.iter().position(|model| model.id == model_id)
             && self.models[index].model.has_api_key()
         {
@@ -679,15 +685,10 @@ impl DesktopApp {
         }
         self.selected_reasoning_effort = snapshot
             .config
+            .model
             .reasoning_effort
             .as_deref()
-            .and_then(parse_reasoning_effort)
-            .or_else(|| {
-                self.models[self.selected_model]
-                    .model
-                    .reasoning_effort()
-                    .cloned()
-            });
+            .and_then(parse_reasoning_effort);
         let previous_path = self.core.session.current.clone();
         let session_id = snapshot.session.id.clone();
         self.core.session_view = snapshot.view;
@@ -839,23 +840,16 @@ impl DesktopApp {
             Ok(document) => document,
             Err(_) => return None,
         };
-        let mut config = session.config().clone();
-        let model_index = active_model_index(&self.models, config.model_id.as_deref())
+        let config = session.config().clone();
+        let model_index = active_model_index(&self.models, config.model.model_id.as_deref())
             .unwrap_or(self.selected_model);
         let configured = &self.models[model_index];
-        if config.model_id.as_deref() != Some(&configured.id) {
-            config = config_for_model(configured, self.settings.allow_all_tools());
-        }
-        let mut model = configured.model.clone();
-        if let Some(effort) = config.reasoning_effort.as_deref()
-            && let Some(effort) = model
-                .reasoning_efforts()
-                .iter()
-                .find(|candidate| reasoning_key(candidate) == effort)
-        {
-            model.set_reasoning_effort(effort.clone());
-        }
-        let agent = Agent::new(model, crate::INSTRUCTIONS, session, project.path.clone());
+        let agent = Agent::new(
+            configured.model.clone(),
+            crate::INSTRUCTIONS,
+            session,
+            project.path.clone(),
+        );
         let runtime = cx.new(|_| {
             SessionRuntime::new(
                 agent,
@@ -2618,11 +2612,16 @@ impl DesktopApp {
         let configured = self.models[index].clone();
         let label = configured.label();
         self.selected_runtime.update(cx, |runtime, cx| {
-            runtime.set_model(configured.id.clone(), configured.model.clone(), cx)
+            runtime.set_model(
+                configured.id.clone(),
+                configured.model.clone(),
+                configured.reasoning_effort.clone(),
+                cx,
+            )
         });
         self.selected_model = index;
         self.model = label;
-        self.selected_reasoning_effort = configured.model.reasoning_effort().cloned();
+        self.selected_reasoning_effort = configured.reasoning_effort;
         self.dispatch_local(Action::SetComposerMenu(None), cx);
     }
 
@@ -2633,24 +2632,25 @@ impl DesktopApp {
             .flat_map(|project| project.sessions.values())
             .filter_map(|runtime| {
                 let snapshot = runtime.read(cx).snapshot();
-                let model_id = snapshot.config.model_id?;
+                let model_id = snapshot.config.model.model_id?;
                 let configured = self.models.iter().find(|model| model.id == model_id)?;
-                let mut model = configured.model.clone();
-                if let Some(effort) = snapshot
+                let effort = snapshot
                     .config
+                    .model
                     .reasoning_effort
                     .as_deref()
-                    .and_then(parse_reasoning_effort)
-                    && model.reasoning_efforts().contains(&effort)
-                {
-                    model.set_reasoning_effort(effort);
-                }
-                Some((runtime.clone(), configured.id.clone(), model))
+                    .and_then(parse_reasoning_effort);
+                Some((
+                    runtime.clone(),
+                    configured.id.clone(),
+                    configured.model.clone(),
+                    effort,
+                ))
             })
             .collect::<Vec<_>>();
-        for (runtime, model_id, model) in updates {
+        for (runtime, model_id, model, effort) in updates {
             runtime.update(cx, |runtime, cx| {
-                runtime.set_model(model_id, model, cx);
+                runtime.set_model(model_id, model, effort, cx);
             });
         }
     }
@@ -2884,8 +2884,10 @@ fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort>
 
 fn config_for_model(model: &ConfiguredModel, allow_all_tools: bool) -> SessionConfig {
     SessionConfig {
-        model_id: Some(model.id.clone()),
-        reasoning_effort: model.model.reasoning_effort().map(reasoning_key),
+        model: SessionModelConfig {
+            model_id: Some(model.id.clone()),
+            reasoning_effort: model.reasoning_effort.as_ref().map(reasoning_key),
+        },
         allow_all_tools,
     }
 }
@@ -4366,8 +4368,10 @@ mod tests {
             ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
         let project = project_store.project(active_project).unwrap().clone();
         let initial_config = SessionConfig {
-            model_id: Some("test/test-model".into()),
-            reasoning_effort: None,
+            model: SessionModelConfig {
+                model_id: Some("test/test-model".into()),
+                reasoning_effort: None,
+            },
             allow_all_tools: false,
         };
         let session_info = create_v2_session_with_config(

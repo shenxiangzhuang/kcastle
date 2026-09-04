@@ -33,6 +33,6 @@ pub use session::store::{
 };
 pub use session::{
     DEFAULT_PROJECT_ID, Session, SessionCatalog, SessionConfig, SessionError, SessionId,
-    SessionInfo, SessionSnapshot, validate_events,
+    SessionInfo, SessionModelConfig, SessionSnapshot, validate_events,
 };
 pub use tools::{AgentTool, Env, ShellTool, ToolResult};

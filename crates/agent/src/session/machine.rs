@@ -1103,6 +1103,9 @@ impl SessionMachine {
                 run_id,
                 tokens_before,
                 first_kept_id,
+                model,
+                reasoning_effort,
+                ..
             } => {
                 ensure_non_empty_id("compaction", compaction_id)?;
                 let active_step_is_ready = self.active_step.as_ref().is_none_or(|step_id| {
@@ -1117,6 +1120,10 @@ impl SessionMachine {
                     || !self.open_tools.is_empty()
                     || !active_step_is_ready
                     || !self.state.has_active_items_id(*first_kept_id)
+                    || model
+                        .as_deref()
+                        .is_some_and(|model| model.trim().is_empty())
+                    || reasoning_effort.as_deref().is_some_and(str::is_empty)
                 {
                     return invalid(format!("compaction {compaction_id} cannot start"));
                 }
@@ -2505,6 +2512,9 @@ mod tests {
                     run_id: "run".into(),
                     tokens_before: 100,
                     first_kept_id: 1,
+                    model: None,
+                    reasoning_effort: None,
+                    max_output_tokens: None,
                 },
             )],
         );

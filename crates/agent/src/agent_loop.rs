@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::Agent;
 use crate::context::compaction::{SUMMARY_INSTRUCTIONS, context_tokens, prepare_compaction};
+use crate::model::ReasoningEffort;
 use crate::session::SessionError;
 use crate::session::event::{
     AssistantChunk, CallId, CompactionId, EventDraft, EventTime, InputId, InputOrigin, RequestId,
@@ -34,6 +35,33 @@ type EventSink = mpsc::UnboundedSender<AgentEvent>;
 /// Owns an [`Agent`] exclusively while one operation is active.
 struct AgentLoop {
     agent: Agent,
+}
+
+#[derive(Clone)]
+struct ResolvedModelConfig {
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
+    max_output_tokens: Option<u32>,
+}
+
+impl ResolvedModelConfig {
+    fn reasoning(&self) -> Option<Reasoning> {
+        self.reasoning_effort.clone().map(|effort| Reasoning {
+            effort: Some(effort),
+            summary: None,
+        })
+    }
+}
+
+fn reasoning_key(effort: &ReasoningEffort) -> String {
+    serde_json::to_value(effort)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| format!("{effort:?}").to_lowercase())
+}
+
+fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
 impl AgentLoop {
@@ -381,24 +409,20 @@ impl AgentLoop {
         let tools = self.agent.tool_schemas();
         let instructions =
             (!self.agent.instructions.is_empty()).then(|| self.agent.instructions.clone());
-        let reasoning_effort = self
-            .agent
-            .model
-            .reasoning_effort
-            .as_ref()
-            .map(|effort| format!("{effort:?}").to_lowercase());
+        let model_config = self.resolved_model_config();
+        let reasoning_effort = model_config.reasoning_effort.as_ref().map(reasoning_key);
         let reason = self.agent.machine.expected_request_reason(
-            &self.agent.model.model,
+            &model_config.model,
             instructions.as_deref(),
             &tools,
             reasoning_effort.as_deref(),
-            self.agent.model.max_output_tokens,
+            model_config.max_output_tokens,
             &self.agent.session_config,
         );
         let context = self.agent.machine.context();
         let mut builder = CreateResponseArgs::default();
         builder
-            .model(self.agent.model.model.clone())
+            .model(model_config.model.clone())
             .input(context)
             .tools(tools.clone())
             .store(false);
@@ -408,19 +432,19 @@ impl AgentLoop {
         // Request construction is pure and happens before the durable "started" intent. Once that
         // intent is committed, every exit path below can explicitly close this request.
         let mut request = builder.build()?;
-        request.reasoning = self.reasoning();
-        request.max_output_tokens = self.agent.model.max_output_tokens;
+        request.reasoning = model_config.reasoning();
+        request.max_output_tokens = model_config.max_output_tokens;
         self.commit_now(
             vec![
                 SessionEvent::RequestSnapshot {
                     request_id: request_id.clone(),
                     step_id: step_id.clone(),
                     reason,
-                    model: self.agent.model.model.clone(),
+                    model: model_config.model,
                     instructions: instructions.clone(),
                     tools: tools.clone(),
                     reasoning_effort,
-                    max_output_tokens: self.agent.model.max_output_tokens,
+                    max_output_tokens: model_config.max_output_tokens,
                     session_config: self.agent.session_config.clone(),
                 },
                 SessionEvent::ModelRequestStarted {
@@ -1097,15 +1121,20 @@ impl AgentLoop {
             .find(|input| input.origin == origin)
     }
 
-    fn reasoning(&self) -> Option<Reasoning> {
-        self.agent
+    fn resolved_model_config(&self) -> ResolvedModelConfig {
+        let reasoning_effort = self
+            .agent
+            .session_config
             .model
             .reasoning_effort
-            .clone()
-            .map(|effort| Reasoning {
-                effort: Some(effort),
-                summary: None,
-            })
+            .as_deref()
+            .and_then(parse_reasoning_effort)
+            .filter(|effort| self.agent.model.reasoning_efforts().contains(effort));
+        ResolvedModelConfig {
+            model: self.agent.model.model.clone(),
+            reasoning_effort,
+            max_output_tokens: self.agent.model.max_output_tokens,
+        }
     }
 
     async fn commit_now(
@@ -1368,25 +1397,29 @@ impl AgentLoop {
             AgentError::Task("automatic compaction requires an active run".into())
         })?;
         let compaction_id = CompactionId::random();
+        let model_config = self.resolved_model_config();
         self.commit_now(
             vec![SessionEvent::CompactionStarted {
                 compaction_id: compaction_id.clone(),
                 run_id,
                 tokens_before,
                 first_kept_id: prepared.first_kept_id,
+                model: Some(model_config.model.clone()),
+                reasoning_effort: model_config.reasoning_effort.as_ref().map(reasoning_key),
+                max_output_tokens: model_config.max_output_tokens,
             }],
             events,
         )
         .await?;
         let mut builder = CreateResponseArgs::default();
         builder
-            .model(self.agent.model.model.clone())
+            .model(model_config.model.clone())
             .instructions(SUMMARY_INSTRUCTIONS)
             .input(prepared.prompt)
             .store(false);
         let mut request = builder.build()?;
-        request.reasoning = self.reasoning();
-        request.max_output_tokens = self.agent.model.max_output_tokens;
+        request.reasoning = model_config.reasoning();
+        request.max_output_tokens = model_config.max_output_tokens;
         let client = self.agent.model.client.clone();
         let responses = client.responses();
         let response = responses.create(request);
@@ -1671,6 +1704,22 @@ mod tests {
         );
         agent.writer = Some(agent.store.acquire_writer(&agent.info.id).unwrap());
         AgentLoop::new(agent)
+    }
+
+    #[test]
+    fn resolved_request_config_uses_the_session_reasoning_effort() {
+        let mut agent = test_agent();
+        agent.agent.model = agent
+            .agent
+            .model
+            .clone()
+            .with_reasoning_efforts(&[ReasoningEffort::Low, ReasoningEffort::High]);
+        agent.agent.session_config.model.reasoning_effort = Some("high".into());
+
+        let resolved = agent.resolved_model_config();
+
+        assert_eq!(resolved.model, "test-model");
+        assert_eq!(resolved.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3004,8 +3053,10 @@ mod tests {
         let mut agent_a = Agent::new(model.clone(), "test instructions", session_a, ".");
         let agent_b = Agent::new(model, "test instructions", session_b, ".");
         let changed = SessionConfig {
-            model_id: Some("externally-selected-model".into()),
-            reasoning_effort: Some("high".into()),
+            model: crate::SessionModelConfig {
+                model_id: Some("externally-selected-model".into()),
+                reasoning_effort: Some("high".into()),
+            },
             allow_all_tools: true,
         };
         agent_a.persist_session_config(&changed).await.unwrap();

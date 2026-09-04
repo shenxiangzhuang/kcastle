@@ -62,6 +62,12 @@ placement.
   compactions, steps, turns, and runs in one terminal transaction.
 - A request is built from the full canonical request snapshot that was committed immediately before
   dispatch, never from a second mutable configuration path.
+- `Model` contains only connection data and static capabilities. The active model selection and
+  reasoning effort belong to `SessionConfig`; desktop settings supply defaults only when a session
+  is created.
+- Ordinary requests and compactions resolve those two inputs once, persist the actual model,
+  reasoning effort, and output limit before dispatch, and build the provider request from the same
+  resolved values.
 - Compaction commits a summary boundary and retains recent input batches in the canonical replayed
   surface; it never rewrites prior journal transactions.
 

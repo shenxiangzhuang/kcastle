@@ -16,7 +16,6 @@ pub struct Model {
     context_window: usize,
     pub(crate) max_output_tokens: Option<u32>,
     reasoning_efforts: &'static [ReasoningEffort],
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl Model {
@@ -41,18 +40,11 @@ impl Model {
             context_window,
             max_output_tokens: None,
             reasoning_efforts: &[],
-            reasoning_effort: None,
         }
     }
 
-    pub fn with_reasoning(
-        mut self,
-        reasoning_efforts: &'static [ReasoningEffort],
-        reasoning_effort: ReasoningEffort,
-    ) -> Self {
-        assert!(reasoning_efforts.contains(&reasoning_effort));
+    pub fn with_reasoning_efforts(mut self, reasoning_efforts: &'static [ReasoningEffort]) -> Self {
         self.reasoning_efforts = reasoning_efforts;
-        self.reasoning_effort = Some(reasoning_effort);
         self
     }
 
@@ -89,15 +81,6 @@ impl Model {
         self.reasoning_efforts
     }
 
-    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
-        self.reasoning_effort.as_ref()
-    }
-
-    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        assert!(self.reasoning_efforts.contains(&reasoning_effort));
-        self.reasoning_effort = Some(reasoning_effort);
-    }
-
     pub fn reconfigured(
         &self,
         name: impl Into<String>,
@@ -114,7 +97,6 @@ impl Model {
             context_window,
         );
         configured.reasoning_efforts = self.reasoning_efforts;
-        configured.reasoning_effort = self.reasoning_effort.clone();
         configured.max_output_tokens = self.max_output_tokens;
         configured
     }
@@ -129,15 +111,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn initial_reasoning_effort_must_be_supported() {
-        let _ = model().with_reasoning(&[ReasoningEffort::Low], ReasoningEffort::High);
-    }
-
-    #[test]
-    #[should_panic]
-    fn updated_reasoning_effort_must_be_supported() {
-        let mut model = model().with_reasoning(&[ReasoningEffort::Low], ReasoningEffort::Low);
-        model.set_reasoning_effort(ReasoningEffort::High);
+    fn reconfiguration_preserves_static_reasoning_capabilities() {
+        let model = model().with_reasoning_efforts(&[ReasoningEffort::Low]);
+        let reconfigured = model.reconfigured("new", None, "https://new", "new", 2);
+        assert_eq!(reconfigured.reasoning_efforts(), &[ReasoningEffort::Low]);
     }
 }

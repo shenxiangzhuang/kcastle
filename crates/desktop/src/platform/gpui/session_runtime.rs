@@ -436,11 +436,12 @@ impl SessionRuntime {
         &mut self,
         model_id: String,
         model: Model,
+        reasoning_effort: Option<ReasoningEffort>,
         cx: &mut Context<Self>,
     ) -> bool {
         let mut config = self.config.clone();
-        config.model_id = Some(model_id);
-        config.reasoning_effort = model.reasoning_effort().map(reasoning_key);
+        config.model.model_id = Some(model_id);
+        config.model.reasoning_effort = reasoning_effort.as_ref().map(reasoning_key);
         self.update_config(config, Some(model), cx)
     }
 
@@ -449,13 +450,12 @@ impl SessionRuntime {
         effort: ReasoningEffort,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(mut model) = self.agent.as_ref().map(|agent| agent.model().clone()) else {
+        if self.agent.is_none() {
             return false;
-        };
-        model.set_reasoning_effort(effort.clone());
+        }
         let mut config = self.config.clone();
-        config.reasoning_effort = Some(reasoning_key(&effort));
-        self.update_config(config, Some(model), cx)
+        config.model.reasoning_effort = Some(reasoning_key(&effort));
+        self.update_config(config, None, cx)
     }
 
     fn update_config(

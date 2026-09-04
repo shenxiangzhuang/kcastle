@@ -6,7 +6,7 @@ use async_openai::types::responses::Tool;
 
 use crate::agent_loop::{self, ActiveAgent, AgentError};
 use crate::context::compaction::CompactionConfig;
-use crate::model::{Model, ReasoningEffort};
+use crate::model::Model;
 use crate::session::event::EventTime;
 use crate::session::machine::SessionMachine;
 use crate::session::store::{MetadataUpdate, SessionStore, SessionWriterPermit};
@@ -136,10 +136,6 @@ impl Agent {
     pub fn set_model(&mut self, model: Model) {
         self.compaction = Some(CompactionConfig::new(model.context_window()));
         self.model = model;
-    }
-
-    pub fn set_reasoning_effort(&mut self, reasoning_effort: ReasoningEffort) {
-        self.model.set_reasoning_effort(reasoning_effort);
     }
 
     pub fn set_session(&mut self, session: Session) {
