@@ -303,11 +303,7 @@ impl DesktopApp {
         let current_session = agent.session_info().path.clone();
         let current_session_id = agent.session_info().id.clone();
         let runtime_config = config_for_model(&models[selected_model], settings.allow_all_tools());
-        let selected_reasoning_effort = runtime_config
-            .model
-            .reasoning_effort
-            .as_deref()
-            .and_then(parse_reasoning_effort);
+        let selected_reasoning_effort = runtime_config.model.reasoning_effort;
         let runtime = cx.new(|_| {
             SessionRuntime::new(
                 agent,
@@ -648,12 +644,7 @@ impl DesktopApp {
             self.selected_model = index;
             self.model = self.models[index].label();
         }
-        self.selected_reasoning_effort = snapshot
-            .config
-            .model
-            .reasoning_effort
-            .as_deref()
-            .and_then(parse_reasoning_effort);
+        self.selected_reasoning_effort = snapshot.config.model.reasoning_effort;
         let previous_path = self.core.session.current.clone();
         let session_id = snapshot.session.id.clone();
         self.core.session_view = snapshot.view;
@@ -2558,9 +2549,8 @@ impl DesktopApp {
         if self.selection_pending() || self.task_active() {
             return;
         }
-        self.selected_runtime.update(cx, |runtime, cx| {
-            runtime.set_reasoning_effort(effort.clone(), cx)
-        });
+        self.selected_runtime
+            .update(cx, |runtime, cx| runtime.set_reasoning_effort(effort, cx));
         self.selected_reasoning_effort = Some(effort);
         cx.notify();
     }
@@ -2817,10 +2807,6 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
-}
-
-fn parse_reasoning_effort(value: &str) -> Option<kcastle_agent::ReasoningEffort> {
-    serde_json::from_value(serde_json::Value::String(value.to_owned())).ok()
 }
 
 fn config_for_model(model: &ConfiguredModel, allow_all_tools: bool) -> SessionConfig {

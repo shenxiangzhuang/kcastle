@@ -3033,7 +3033,7 @@ mod tests {
         let config = SessionConfig {
             model: crate::SessionModelConfig {
                 model_id: Some("provider/model".into()),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: Some(crate::ReasoningEffort::High),
             },
             allow_all_tools: true,
         };

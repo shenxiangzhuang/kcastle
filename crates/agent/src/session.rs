@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::model::ReasoningEffort;
 use crate::session::event::RecordedEvent;
 use crate::session::machine::{PendingInput, SessionMachine, SessionMachineError};
 use crate::session::store::{
@@ -60,7 +61,7 @@ pub struct SessionModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -659,7 +660,7 @@ mod tests {
         let config = SessionConfig {
             model: SessionModelConfig {
                 model_id: Some("openai/gpt-5.6-sol".into()),
-                reasoning_effort: Some("high".into()),
+                reasoning_effort: Some(crate::ReasoningEffort::High),
             },
             allow_all_tools: true,
         };
