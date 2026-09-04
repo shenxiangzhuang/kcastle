@@ -3,22 +3,22 @@
 //! runs in reading order, without introducing line breaks between flex items.
 use std::{cell::RefCell, collections::HashMap, fmt, ops::Range, rc::Rc, sync::Arc};
 
-use gpui::{
+use gpui_kit::base::{
+    TextSelection, TextSelectionCoverage, TextSelectionEvent, TextSelectionHandle,
+    TextSelectionRegistration, TextSelectionRun, TextSelectionSnapshot,
+};
+use gpui_kit::component::input::Copy;
+use gpui_kit::component::{
+    highlighter::{HighlightTheme, SyntaxHighlighter},
+    input::Rope,
+};
+use gpui_kit::{
     AnyElement, App, Bounds, Element, ElementId, FocusHandle, GlobalElementId, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels,
     SharedString, Styled, Subscription, TextLayout, Window, div, fill, point,
 };
-use gpui_base::{
-    TextSelection, TextSelectionCoverage, TextSelectionEvent, TextSelectionHandle,
-    TextSelectionRegistration, TextSelectionRun, TextSelectionSnapshot,
-};
-use gpui_component::input::Copy;
-use gpui_component::{
-    highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::Rope,
-};
 
-type CodeStyles = Vec<(Range<usize>, gpui::HighlightStyle)>;
+type CodeStyles = Vec<(Range<usize>, gpui_kit::HighlightStyle)>;
 type CodeCache = HashMap<String, (String, Arc<HighlightTheme>, CodeStyles)>;
 
 #[derive(Default)]
@@ -227,7 +227,7 @@ impl SelectionFrame {
                 if text.is_empty() {
                     cx.propagate();
                 } else {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
                 }
             })
             .on_key_down(|event, window, cx| {
@@ -319,7 +319,7 @@ impl SelectionFrame {
     }
 
     #[cfg(test)]
-    pub(crate) fn text_position(&self, needle: &str, end: bool) -> gpui::Point<Pixels> {
+    pub(crate) fn text_position(&self, needle: &str, end: bool) -> gpui_kit::Point<Pixels> {
         let content = self.content.borrow();
         let start = content
             .text
@@ -352,8 +352,8 @@ fn same_logical_selection(
 
 fn atom_in_selection(
     bounds: Bounds<Pixels>,
-    a: gpui::Point<Pixels>,
-    b: gpui::Point<Pixels>,
+    a: gpui_kit::Point<Pixels>,
+    b: gpui_kit::Point<Pixels>,
 ) -> bool {
     let (a, b) = if (a.y, a.x) <= (b.y, b.x) {
         (a, b)
@@ -491,7 +491,7 @@ impl Element for SelectionGroup {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
+        let hitbox = window.insert_hitbox(bounds, gpui_kit::HitboxBehavior::Normal);
         self.child.prepaint(window, cx);
         let text_bounds = self
             .frame
@@ -574,7 +574,8 @@ impl Element for SelectionAtom {
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.fragment.paint(gpui::hsla(0.58, 0.8, 0.6, 0.3), window);
+        self.fragment
+            .paint(gpui_kit::hsla(0.58, 0.8, 0.6, 0.3), window);
         self.child.paint(window, cx);
     }
 }
@@ -582,7 +583,7 @@ impl Element for SelectionAtom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{
+    use gpui_kit::{
         Context, Entity, Modifiers, MouseButton, Render, ScrollHandle, StatefulInteractiveElement,
         TestAppContext, VisualTestContext, px, size,
     };
@@ -617,13 +618,13 @@ mod tests {
             }
             div()
                 .size_full()
-                .child(gpui_base::TextSelectionLayer)
+                .child(gpui_kit::base::TextSelectionLayer)
                 .child(body)
         }
     }
 
     fn setup(cx: &mut TestAppContext) -> (Entity<Transcript>, &mut VisualTestContext) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::component::init);
         let (view, cx) = cx.add_window_view(|window, cx| Transcript {
             selections: [
                 MessageSelection::new(window, cx),
@@ -638,7 +639,7 @@ mod tests {
         (view, cx)
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn cross_message_selection_survives_scrolling_and_clears_with_session(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
         let (start, end) = view.read_with(cx, |view, _| {
@@ -677,7 +678,7 @@ mod tests {
         assert!(cx.update(TextSelection::selected_text).is_empty());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn changed_selection_invalidates_copy_projection(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
         let (start, end) = view.read_with(cx, |view, _| {
@@ -701,7 +702,7 @@ mod tests {
         assert!(cx.update(TextSelection::selected_text).is_empty());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn inactive_messages_do_not_cache_copy_buffers(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
         view.read_with(cx, |view, _| {

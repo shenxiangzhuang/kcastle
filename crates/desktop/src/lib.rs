@@ -13,12 +13,12 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use gpui::{
+use gpui_kit::component::{Root, Theme, ThemeMode};
+use gpui_kit::{
     App, AppContext, Bounds, Context, InteractiveElement, IntoElement, ParentElement, Render,
     StatefulInteractiveElement, Styled, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, accesskit::Role, div, px, size,
 };
-use gpui_component::{Root, Theme, ThemeMode};
 use kcastle_agent::{Agent, Session};
 
 mod agent_config;
@@ -59,12 +59,12 @@ pub(crate) const APP_NAME: &str = "Kcastle";
 const DATA_ROOT_ENV: &str = "KCASTLE_DATA_DIR";
 
 fn init_ui(cx: &mut App) {
-    gpui_component::init(cx);
+    gpui_kit::init(cx);
     register_syntax_languages();
 }
 
 fn register_syntax_languages() {
-    let config = gpui_component::highlighter::LanguageConfig::new(
+    let config = gpui_kit::component::highlighter::LanguageConfig::new(
         "haskell",
         tree_sitter_haskell::LANGUAGE.into(),
         vec![],
@@ -72,7 +72,7 @@ fn register_syntax_languages() {
         tree_sitter_haskell::INJECTIONS_QUERY,
         tree_sitter_haskell::LOCALS_QUERY,
     );
-    let registry = gpui_component::highlighter::LanguageRegistry::singleton();
+    let registry = gpui_kit::component::highlighter::LanguageRegistry::singleton();
     registry.register("haskell", &config);
     registry.register("hs", &config);
 }
@@ -90,7 +90,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         .as_ref()
         .map_err(Clone::clone)
         .and_then(|root| desktop_startup(root.clone()).map_err(|error| error.to_string()));
-    let application = gpui_platform::application().with_assets(DesktopAssets);
+    let application = gpui_kit::application().with_assets(DesktopAssets);
     application.on_reopen(move |cx| {
         if cx.windows().is_empty() {
             let startup = root
@@ -210,7 +210,11 @@ struct StartupErrorView {
 }
 
 impl Render for StartupErrorView {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(
+        &mut self,
+        _window: &mut gpui_kit::Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let colors = ui_theme::palette(cx);
         div()
             .id("startup-error")
@@ -313,8 +317,8 @@ mod tests {
 
     #[test]
     fn haskell_code_blocks_produce_syntax_styles() {
-        use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
-        use gpui_component::input::Rope;
+        use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
+        use gpui_kit::component::input::Rope;
 
         register_syntax_languages();
         let source = "quicksort (p:xs) = quicksort smaller\n  where smaller = filter (< p) xs";

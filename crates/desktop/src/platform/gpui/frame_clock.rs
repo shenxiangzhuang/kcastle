@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{ScrollHandle, Window, point, px};
+use gpui_kit::{ScrollHandle, Window, point, px};
 
 const VISUAL_UPDATE_INTERVAL_FRAMES: u8 = 3;
 const LAYOUT_SETTLE_FRAMES: u8 = 3;
@@ -15,7 +15,7 @@ impl DeferredScrollAlignment {
     pub(crate) fn schedule_vertical_end(
         &self,
         scroll: ScrollHandle,
-        short_content_max: gpui::Pixels,
+        short_content_max: gpui_kit::Pixels,
         window: &mut Window,
     ) {
         let generation = self.generation.get().wrapping_add(1);
@@ -38,7 +38,7 @@ impl DeferredScrollAlignment {
 
 fn schedule_vertical_end(
     scroll: ScrollHandle,
-    short_content_max: gpui::Pixels,
+    short_content_max: gpui_kit::Pixels,
     current_generation: Rc<Cell<u64>>,
     generation: u64,
     remaining_frames: u8,
@@ -64,14 +64,17 @@ fn schedule_vertical_end(
     window.refresh();
 }
 
-fn align_vertical_end(scroll: &ScrollHandle, short_content_max: gpui::Pixels) {
+fn align_vertical_end(scroll: &ScrollHandle, short_content_max: gpui_kit::Pixels) {
     let max_offset = scroll.max_offset().y;
     let offset = scroll.offset();
     let y = vertical_end_offset(max_offset, short_content_max);
     scroll.set_offset(point(offset.x, y));
 }
 
-fn vertical_end_offset(max_offset: gpui::Pixels, short_content_max: gpui::Pixels) -> gpui::Pixels {
+fn vertical_end_offset(
+    max_offset: gpui_kit::Pixels,
+    short_content_max: gpui_kit::Pixels,
+) -> gpui_kit::Pixels {
     if max_offset <= short_content_max {
         px(0.0)
     } else {
@@ -176,7 +179,7 @@ fn schedule_follow_end(
     window.refresh();
 }
 
-fn trailing_edge_offset(max_offset: gpui::Pixels) -> gpui::Pixels {
+fn trailing_edge_offset(max_offset: gpui_kit::Pixels) -> gpui_kit::Pixels {
     -max_offset.max(px(0.0))
 }
 

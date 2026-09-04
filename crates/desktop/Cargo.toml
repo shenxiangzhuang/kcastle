@@ -16,11 +16,7 @@ name = "kcastle-desktop"
 path = "src/main.rs"
 
 [dependencies]
-gpui.workspace = true
-gpui_platform.workspace = true
-gpui-component = { workspace = true, features = ["tree-sitter-languages"] }
-gpui-component-assets.workspace = true
-gpui-base.workspace = true
+gpui-kit.workspace = true
 im.workspace = true
 kcastle-agent.workspace = true
 markdown.workspace = true
@@ -45,5 +41,5 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 proptest.workspace = true

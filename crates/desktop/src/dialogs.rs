@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::setting::{
+    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+};
+use gpui_kit::component::{Disableable, Icon, IconName, IndexPath, Sizable};
+use gpui_kit::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, accesskit::Role, div,
     prelude::FluentBuilder, px, rgb,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputState};
-use gpui_component::select::{Select, SelectEvent, SelectState};
-use gpui_component::setting::{
-    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
-};
-use gpui_component::{Disableable, Icon, IconName, IndexPath, Sizable};
 use kcastle_agent::SessionInfo;
 
 use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
@@ -42,7 +42,7 @@ fn settings_dialog_view(
     dialog: &SettingsDialog,
     cx: &mut Context<DesktopApp>,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let view = cx.entity();
     let project = display_path(&app.core.workspace.cwd);
     let general_group = SettingGroup::new()
@@ -244,7 +244,7 @@ fn archived_sessions_view(
     app: &DesktopApp,
     view: &Entity<DesktopApp>,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let mut projects = Vec::new();
     for (project_index, project) in app.project_store.projects().iter().enumerate() {
         let sessions = app
@@ -330,7 +330,7 @@ fn archived_sessions_view(
                         .items_center()
                         .gap_2()
                         .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                         .child(Icon::new(IconName::Folder).size_4())
                         .child(project.name.clone())
                         .child(
@@ -378,9 +378,9 @@ fn archived_sessions_view(
 
 fn appearance_setting_field(
     view: &Entity<DesktopApp>,
-    options: &gpui_component::setting::RenderOptions,
+    options: &gpui_kit::component::setting::RenderOptions,
     cx: &App,
-) -> gpui::Div {
+) -> gpui_kit::Div {
     let appearance = view.read(cx).settings.appearance();
     div().flex().items_center().gap_1().children(
         [
@@ -407,7 +407,7 @@ fn models_settings_view(
     dialog: &SettingsDialog,
     view: &Entity<DesktopApp>,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let busy = app.task_active();
     let editor_provider = dialog
         .model_editor
@@ -446,7 +446,7 @@ fn models_settings_view(
                             .gap_2()
                             .child(
                                 div()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
                                     .child(profile.display_name.clone()),
                             )
                             .child(div().w(px(8.0)).h(px(8.0)).rounded_full().bg(rgb(0x36a763)))
@@ -531,7 +531,7 @@ fn model_editor_view(
     editor: &ModelEditor,
     view: &Entity<DesktopApp>,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let profile = crate::default_provider_profile(editor.provider_id);
     let provider_field = match &editor.provider_select {
         Some(provider_select) => div()
@@ -541,7 +541,7 @@ fn model_editor_view(
             .child(
                 div()
                     .text_xs()
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .child("Provider"),
             )
             .child(Select::new(provider_select).small().w_full())
@@ -552,7 +552,7 @@ fn model_editor_view(
             .gap_2()
             .child(
                 div()
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
                     .child(profile.display_name),
             )
             .child(
@@ -615,7 +615,7 @@ fn model_editor_view(
                                 .child(
                                     div()
                                         .text_sm()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                                         .child("Model catalog"),
                                 )
                                 .child(
@@ -684,7 +684,7 @@ fn model_editor_row_view(
     model_count: usize,
     view: &Entity<DesktopApp>,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     div()
         .flex()
         .flex_col()
@@ -745,7 +745,7 @@ fn model_editor_field(
     label: &'static str,
     state: &Entity<InputState>,
     password: bool,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     div()
         .flex()
         .flex_col()
@@ -753,7 +753,7 @@ fn model_editor_field(
         .child(
             div()
                 .text_xs()
-                .font_weight(gpui::FontWeight::MEDIUM)
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
                 .child(label),
         )
         .child(
@@ -1369,7 +1369,7 @@ impl DesktopApp {
         &self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let colors = palette(cx);
         let dialog_label = match &self.modal {
             Some(Modal::RenameSession { .. }) => "Rename session",
@@ -1507,13 +1507,15 @@ impl DesktopApp {
                 .bg(colors.overlay)
                 .track_focus(&self.modal_focus)
                 .tab_index(0)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "enter"
-                        && matches!(this.modal, Some(Modal::RenameSession { .. }))
-                    {
-                        this.confirm_rename(window, cx);
-                    }
-                }))
+                .on_key_down(
+                    cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                        if event.keystroke.key == "enter"
+                            && matches!(this.modal, Some(Modal::RenameSession { .. }))
+                        {
+                            this.confirm_rename(window, cx);
+                        }
+                    }),
+                )
                 .on_click(cx.listener(|this, _, window, cx| this.close_modal(window, cx)))
                 .child(
                     div()
@@ -1529,7 +1531,7 @@ impl DesktopApp {
     }
 }
 
-fn modal_card(title: &'static str, colors: UiPalette) -> gpui::Div {
+fn modal_card(title: &'static str, colors: UiPalette) -> gpui_kit::Div {
     div()
         .flex()
         .flex_col()
@@ -1544,12 +1546,12 @@ fn modal_card(title: &'static str, colors: UiPalette) -> gpui::Div {
         .child(
             div()
                 .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .child(title),
         )
 }
 
-fn modal_actions() -> gpui::Div {
+fn modal_actions() -> gpui_kit::Div {
     div().flex().items_center().justify_end().gap_2().pt_2()
 }
 

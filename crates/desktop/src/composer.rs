@@ -1,15 +1,15 @@
 use std::time::Duration;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Textarea;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Disableable, Icon, IconName};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
     relative,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::Textarea;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Disableable, Icon, IconName};
 
 use crate::app::{DesktopApp, composer_model_indices};
 use crate::application::{composer_status, empty_conversation_view_model};
@@ -55,7 +55,7 @@ impl DesktopApp {
                                 .child(
                                     div()
                                         .text_xl()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .child("Into the Unknown"),
                                 )
                                 .child(
@@ -349,7 +349,10 @@ impl DesktopApp {
             )
     }
 
-    pub(crate) fn composer_menu_view(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn composer_menu_view(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
         let colors = palette(cx);
         let menu = self.core.composer.menu?;
         let body = match menu {
@@ -611,7 +614,7 @@ impl DesktopApp {
         )
     }
 
-    pub(crate) fn approval_card(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn approval_card(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let colors = palette(cx);
         self.core.approval.as_ref().map(|approval| {
             let allow_id = approval.call_id.clone();
@@ -646,7 +649,7 @@ impl DesktopApp {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                         .child(format!("Allow {}?", approval.name)),
                                 )
                                 .child(
@@ -696,18 +699,18 @@ fn menu_title(title: &'static str, cx: &mut Context<DesktopApp>) -> impl IntoEle
         .px_3()
         .border_b_1()
         .border_color(colors.border)
-        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
         .child(title)
 }
 
 fn menu_item(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     icon: IconName,
     title: &'static str,
     description: &'static str,
     highlighted: bool,
     colors: UiPalette,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -739,14 +742,14 @@ fn menu_item(
 }
 
 fn menu_choice(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     title: &str,
     description: &'static str,
     selected: bool,
     highlighted: bool,
     colors: UiPalette,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> gpui::AnyElement {
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+) -> gpui_kit::AnyElement {
     div()
         .id(id)
         .role(Role::MenuItem)

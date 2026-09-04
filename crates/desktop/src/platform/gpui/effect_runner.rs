@@ -1,4 +1,4 @@
-use gpui::{Context, Window};
+use gpui_kit::{Context, Window};
 
 use crate::app::DesktopApp;
 use crate::domain::Effect;

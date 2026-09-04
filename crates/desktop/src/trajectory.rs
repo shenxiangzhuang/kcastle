@@ -2,17 +2,17 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ElementExt, Icon, IconName, Sizable};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Role, ScrollStrategy, ScrollWheelEvent,
     SharedString, StatefulInteractiveElement, Styled, Window, accesskit, div,
     prelude::FluentBuilder, px, relative,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::Input;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{ElementExt, Icon, IconName, Sizable};
 use im::{HashSet as ImHashSet, Vector};
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
 
@@ -2115,10 +2115,10 @@ fn calls_summary_text(call_count: usize, tools: &str) -> String {
 }
 
 fn sync_trajectory_list_state(
-    state: &gpui::ListState,
+    state: &gpui_kit::ListState,
     item_count: usize,
     structure_changed: bool,
-    restore: Option<gpui::ListOffset>,
+    restore: Option<gpui_kit::ListOffset>,
     follow_tail: bool,
 ) {
     let current_count = state.item_count();
@@ -2134,7 +2134,7 @@ fn sync_trajectory_list_state(
     if let Some(restore) = restore {
         state.scroll_to(restore);
     } else if follow_tail {
-        state.scroll_to(gpui::ListOffset {
+        state.scroll_to(gpui_kit::ListOffset {
             item_ix: item_count,
             offset_in_item: px(0.0),
         });
@@ -2146,9 +2146,9 @@ fn aligned_trajectory_list_offset(
     target: usize,
     viewport_height: f32,
     alignment: f32,
-) -> gpui::ListOffset {
+) -> gpui_kit::ListOffset {
     let Some(target_row) = rows.get(target) else {
-        return gpui::ListOffset {
+        return gpui_kit::ListOffset {
             item_ix: rows.len(),
             offset_in_item: px(0.0),
         };
@@ -2164,7 +2164,7 @@ fn aligned_trajectory_list_offset(
             available_before += trajectory_ledger_row_height(&row);
         }
     }
-    gpui::ListOffset {
+    gpui_kit::ListOffset {
         item_ix,
         offset_in_item: px((available_before - desired_before).max(0.0)),
     }
@@ -2317,7 +2317,7 @@ impl DesktopApp {
         query_active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let mode = self.core.layout.trajectory;
         let layout_generation = self.core.layout_generation;
         let fallback_split_width = self.core.layout.main_width;
@@ -2485,7 +2485,7 @@ impl DesktopApp {
                     cx.notify();
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
                 let delta = match event.keystroke.key.as_str() {
                     "left" => DETAILS_KEYBOARD_STEP,
                     "right" => -DETAILS_KEYBOARD_STEP,
@@ -2902,14 +2902,16 @@ impl DesktopApp {
                     .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
                         this.timeline_wheel(event, window, cx)
                     }))
-                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                        if event.keystroke.key.as_str() == "escape"
-                            && this.core.trajectory.selected_range.is_some()
-                        {
-                            this.dispatch(Action::SetTimelineSelection(None), window, cx);
-                            cx.stop_propagation();
-                        }
-                    })),
+                    .on_key_down(cx.listener(
+                        |this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                            if event.keystroke.key.as_str() == "escape"
+                                && this.core.trajectory.selected_range.is_some()
+                            {
+                                this.dispatch(Action::SetTimelineSelection(None), window, cx);
+                                cx.stop_propagation();
+                            }
+                        },
+                    )),
             )
     }
 
@@ -3106,7 +3108,7 @@ impl DesktopApp {
         cell: &RenderCell,
         paint: &TimelinePaintContext<'_>,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let selected = paint.selected_cell == Some(ordinal);
         let hovered = paint.hovered_cell == Some(ordinal);
@@ -3265,7 +3267,7 @@ impl DesktopApp {
             .as_ref()
             .and_then(|cache| cache.focus.as_ref())
             .cloned();
-        let list = gpui::list(
+        let list = gpui_kit::list(
             self.trajectory_scroll.clone(),
             cx.processor(move |this, row_index: usize, _, cx| {
                 let row = rows
@@ -3373,7 +3375,7 @@ impl DesktopApp {
         focused: Option<&HashSet<usize>>,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let record = &self.core.session_view.trajectory.records[index];
         let selected = self
@@ -3509,7 +3511,7 @@ impl DesktopApp {
                 }),
             )
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.select_trajectory(
                             index,
@@ -3531,7 +3533,7 @@ impl DesktopApp {
         compact: bool,
         run_index: u16,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let selected = self
             .core
@@ -3645,10 +3647,10 @@ impl DesktopApp {
                 );
                 this.dispatch(Action::SetDetailsTab(DetailsTab::Summary), window, cx);
                 this.details_scroll
-                    .set_offset(gpui::point(px(0.0), px(0.0)));
+                    .set_offset(gpui_kit::point(px(0.0), px(0.0)));
             }))
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.dispatch(
                             Action::SelectDetails(Some(DetailsSelection::Request(
@@ -3659,7 +3661,7 @@ impl DesktopApp {
                         );
                         this.dispatch(Action::SetDetailsTab(DetailsTab::Summary), window, cx);
                         this.details_scroll
-                            .set_offset(gpui::point(px(0.0), px(0.0)));
+                            .set_offset(gpui_kit::point(px(0.0), px(0.0)));
                         cx.stop_propagation();
                     }
                 }),
@@ -3675,7 +3677,7 @@ impl DesktopApp {
         outside_focus: bool,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let request = &self.core.session_view.trajectory.requests[request_index];
         let opacity = if outside_focus { 0.24 } else { 1.0 };
         let marker =
@@ -3705,7 +3707,7 @@ impl DesktopApp {
         focus: Option<&TimelineFocusCache>,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let outside =
             focus.is_some_and(|focus| !focus.intersects_non_system(first_hidden, last_hidden));
@@ -3746,7 +3748,7 @@ impl DesktopApp {
                 this.dispatch(Action::ToggleTrajectoryTurn(turn), window, cx);
             }))
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.dispatch(Action::ToggleTrajectoryTurn(turn), window, cx);
                     }
@@ -3765,7 +3767,7 @@ impl DesktopApp {
         focus: Option<&TimelineFocusCache>,
         compact: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let outside = focus.is_some_and(|focus| !focus.intersects(first_tool, last_tool));
         let opacity = if outside { 0.24 } else { 1.0 };
@@ -3814,7 +3816,7 @@ impl DesktopApp {
                 );
             }))
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.dispatch(
                             Action::ToggleTrajectoryAssistant(assistant_key_id.clone()),
@@ -3832,7 +3834,7 @@ impl DesktopApp {
         target: InspectorTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let trajectory = &self.core.session_view.trajectory;
         let (tabs, title, location, status, kind_color, request_header) = match target {
@@ -3893,7 +3895,7 @@ impl DesktopApp {
                     div()
                         .flex_none()
                         .text_size(px(12.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
                         .child(title),
                 )
                 .child(
@@ -3921,7 +3923,7 @@ impl DesktopApp {
                         .items_center()
                         .rounded(px(4.0))
                         .text_size(px(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(kind_color)
                         .bg(kind_color.opacity(0.1))
                         .child(title),
@@ -4032,7 +4034,7 @@ impl DesktopApp {
         tab: DetailsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         match target {
             InspectorTarget::Record(index) => {
                 self.trajectory_record_details_body(index, tab, window, cx)
@@ -4047,7 +4049,7 @@ impl DesktopApp {
         tab: DetailsTab,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let trajectory = &self.core.session_view.trajectory;
         let record = &trajectory.records[index];
@@ -4145,7 +4147,7 @@ impl DesktopApp {
                             );
                             this.dispatch(Action::SetDetailsTab(DetailsTab::Summary), window, cx);
                             this.details_scroll
-                                .set_offset(gpui::point(px(0.0), px(0.0)));
+                                .set_offset(gpui_kit::point(px(0.0), px(0.0)));
                         }))
                 });
                 let assistant_link = matches!(record.kind, TrajectoryKind::Tool)
@@ -4231,7 +4233,7 @@ impl DesktopApp {
                                     cx,
                                 );
                                 this.details_scroll
-                                    .set_offset(gpui::point(px(0.0), px(0.0)));
+                                    .set_offset(gpui_kit::point(px(0.0), px(0.0)));
                             }))
                     });
                 let mut body = div()
@@ -4263,7 +4265,7 @@ impl DesktopApp {
         index: usize,
         tab: DetailsTab,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = trajectory_palette(cx);
         let request = &self.core.session_view.trajectory.requests[index];
         match tab {
@@ -4406,7 +4408,7 @@ impl DesktopApp {
         value: String,
         colors: TrajectoryPalette,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let id = SharedString::from(format!("request-{request_number}-{tab:?}-preview"));
         div()
             .id(id)
@@ -4428,7 +4430,7 @@ impl DesktopApp {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.dispatch(Action::SetDetailsTab(tab), window, cx);
                 this.details_scroll
-                    .set_offset(gpui::point(px(0.0), px(0.0)));
+                    .set_offset(gpui_kit::point(px(0.0), px(0.0)));
             }))
             .into_any_element()
     }
@@ -4438,7 +4440,7 @@ impl DesktopApp {
         request: &TrajectoryRequest,
         colors: TrajectoryPalette,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         if let Some(record) = request
             .result
             .as_ref()
@@ -4508,7 +4510,7 @@ impl DesktopApp {
         source: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let generation = self.core.layout_generation;
         let panel_width = self
             .trajectory_details_layout
@@ -4547,7 +4549,7 @@ impl DesktopApp {
         record: &TrajectoryRecord,
         colors: TrajectoryPalette,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let started = format_started(record, self.core.details.unix_time);
         let started_value = if record.timing.started.is_some() {
             div()
@@ -4731,7 +4733,7 @@ impl DesktopApp {
             cx,
         );
         self.details_scroll
-            .set_offset(gpui::point(px(0.0), px(0.0)));
+            .set_offset(gpui_kit::point(px(0.0), px(0.0)));
         self.scroll_trajectory_to_record(index, cx);
     }
 
@@ -4840,7 +4842,7 @@ impl DesktopApp {
     ) {
         self.trajectory_follow_tail.set(false);
         match strategy {
-            ScrollStrategy::Top => self.trajectory_scroll.scroll_to(gpui::ListOffset {
+            ScrollStrategy::Top => self.trajectory_scroll.scroll_to(gpui_kit::ListOffset {
                 item_ix: target,
                 offset_in_item: px(0.0),
             }),
@@ -5090,7 +5092,7 @@ impl DesktopApp {
                 cx,
             );
             self.details_scroll
-                .set_offset(gpui::point(px(0.0), px(0.0)));
+                .set_offset(gpui_kit::point(px(0.0), px(0.0)));
             self.scroll_trajectory_to_record(index, cx);
         }
         cx.notify();
@@ -5163,11 +5165,11 @@ impl DesktopApp {
         cx.stop_propagation();
     }
 
-    fn timeline_value(&self, x: gpui::Pixels) -> Option<f64> {
+    fn timeline_value(&self, x: gpui_kit::Pixels) -> Option<f64> {
         self.timeline_value_in_viewport(x, None)
     }
 
-    fn timeline_drag_fractions(&self, x: gpui::Pixels) -> Option<(f64, f64)> {
+    fn timeline_drag_fractions(&self, x: gpui_kit::Pixels) -> Option<(f64, f64)> {
         let bounds = self.timeline_bounds?;
         let width = f64::from(f32::from(bounds.size.width));
         if !width.is_finite() || width <= 0.0 {
@@ -5182,7 +5184,7 @@ impl DesktopApp {
 
     fn timeline_value_in_viewport(
         &self,
-        x: gpui::Pixels,
+        x: gpui_kit::Pixels,
         viewport: Option<AxisRange>,
     ) -> Option<f64> {
         let bounds = self.timeline_bounds?;
@@ -5261,11 +5263,11 @@ fn trajectory_event_cell(
     compact: bool,
     outside: bool,
     opacity: f32,
-    kind_color: gpui::Hsla,
+    kind_color: gpui_kit::Hsla,
     colors: TrajectoryPalette,
     active_turn: bool,
     selected: bool,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let kind = kind_label(record.kind).to_uppercase();
     let content = if compact {
         let tooltip = kind.clone();
@@ -5323,7 +5325,7 @@ fn trajectory_event_cell(
                             .items_center()
                             .rounded(px(4.0))
                             .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                             .text_color(kind_color.opacity(opacity))
                             .bg(kind_color.opacity(if outside { 0.035 } else { 0.1 }))
                             .max_w_full()
@@ -5456,7 +5458,7 @@ fn timeline_block_opacity(
     }
 }
 
-fn timeline_lane_label(label: &'static str, top: f32) -> gpui::AnyElement {
+fn timeline_lane_label(label: &'static str, top: f32) -> gpui_kit::AnyElement {
     div()
         .absolute()
         .top(px(top + 1.0))
@@ -5676,7 +5678,7 @@ fn resolved_axis_range(range: Option<AxisRange>, geometry: &TimelineGeometry) ->
     })
 }
 
-fn record_color(record: &TrajectoryRecord, colors: TrajectoryPalette) -> gpui::Hsla {
+fn record_color(record: &TrajectoryRecord, colors: TrajectoryPalette) -> gpui_kit::Hsla {
     if matches!(
         record.status,
         ItemStatus::Failed | ItemStatus::Aborted | ItemStatus::Unknown
@@ -5772,7 +5774,7 @@ fn trajectory_record_preview(
     colors: TrajectoryPalette,
     opacity: f32,
     tool_request_width: Option<f32>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     if record.kind != TrajectoryKind::Tool {
         return div()
             .flex_1()
@@ -5976,7 +5978,7 @@ fn prompt_snapshot(details: Option<&TrajectoryRecordDetails>) -> Option<&PromptS
 fn prompt_diff_panel(
     details: Option<&TrajectoryRecordDetails>,
     colors: TrajectoryPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let Some(TrajectoryRecordDetails::PromptChange {
         kind,
         current,
@@ -6009,7 +6011,7 @@ fn prompt_diff_panel(
     body.into_any_element()
 }
 
-fn prompt_tools_panel(prompt: &PromptSnapshot, colors: TrajectoryPalette) -> gpui::AnyElement {
+fn prompt_tools_panel(prompt: &PromptSnapshot, colors: TrajectoryPalette) -> gpui_kit::AnyElement {
     if prompt.tool_count() == 0 {
         return empty_detail("No tools in this request", colors);
     }
@@ -6034,7 +6036,7 @@ fn prompt_tools_panel(prompt: &PromptSnapshot, colors: TrajectoryPalette) -> gpu
         .into_any_element()
 }
 
-fn usage_summary(usage: kcastle_agent::TokenUsage, colors: TrajectoryPalette) -> gpui::Div {
+fn usage_summary(usage: kcastle_agent::TokenUsage, colors: TrajectoryPalette) -> gpui_kit::Div {
     div()
         .flex()
         .flex_col()
@@ -6079,7 +6081,7 @@ fn usage_summary(usage: kcastle_agent::TokenUsage, colors: TrajectoryPalette) ->
 fn request_options_details(
     options: &ModelRequestOptions,
     colors: TrajectoryPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let reason = match options.reason {
         kcastle_agent::RequestHeaderReason::Initial => "Initial",
         kcastle_agent::RequestHeaderReason::Resume => "Resume",
@@ -6123,7 +6125,7 @@ fn request_options_details(
 fn request_usage_details(
     request: &TrajectoryRequest,
     colors: TrajectoryPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let mut body = div().flex().flex_col().gap_3();
     body = body.child(section_title("This request", colors));
     body = match request.usage {
@@ -6138,7 +6140,7 @@ fn request_usage_details(
     body.into_any_element()
 }
 
-fn detail_pair(label: &str, value: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+fn detail_pair(label: &str, value: &str, colors: TrajectoryPalette) -> gpui_kit::AnyElement {
     div()
         .flex()
         .justify_between()
@@ -6153,7 +6155,7 @@ fn detail_pair(label: &str, value: &str, colors: TrajectoryPalette) -> gpui::Any
         .into_any_element()
 }
 
-fn empty_detail(label: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+fn empty_detail(label: &str, colors: TrajectoryPalette) -> gpui_kit::AnyElement {
     div()
         .text_sm()
         .text_color(colors.label_tertiary)
@@ -6161,7 +6163,7 @@ fn empty_detail(label: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn section_title(title: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+fn section_title(title: &str, colors: TrajectoryPalette) -> gpui_kit::AnyElement {
     div()
         .mt_3()
         .pt_3()
@@ -6173,7 +6175,7 @@ fn section_title(title: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn code_panel(text: &str, colors: TrajectoryPalette) -> gpui::AnyElement {
+fn code_panel(text: &str, colors: TrajectoryPalette) -> gpui_kit::AnyElement {
     div()
         .p_3()
         .rounded(px(6.0))
@@ -8027,48 +8029,48 @@ mod tests {
 
     #[test]
     fn variable_ledger_list_preserves_and_restores_logical_scroll() {
-        let state = gpui::ListState::new(4, gpui::ListAlignment::Top, gpui::px(100.0));
-        state.scroll_to(gpui::ListOffset {
+        let state = gpui_kit::ListState::new(4, gpui_kit::ListAlignment::Top, gpui_kit::px(100.0));
+        state.scroll_to(gpui_kit::ListOffset {
             item_ix: 2,
-            offset_in_item: gpui::px(7.0),
+            offset_in_item: gpui_kit::px(7.0),
         });
 
         sync_trajectory_list_state(&state, 7, false, None, false);
         assert_eq!(state.item_count(), 7);
         assert_eq!(state.logical_scroll_top().item_ix, 2);
-        assert_eq!(state.logical_scroll_top().offset_in_item, gpui::px(7.0));
+        assert_eq!(state.logical_scroll_top().offset_in_item, gpui_kit::px(7.0));
 
         sync_trajectory_list_state(
             &state,
             3,
             true,
-            Some(gpui::ListOffset {
+            Some(gpui_kit::ListOffset {
                 item_ix: 1,
-                offset_in_item: gpui::px(4.0),
+                offset_in_item: gpui_kit::px(4.0),
             }),
             false,
         );
         assert_eq!(state.item_count(), 3);
         assert_eq!(state.logical_scroll_top().item_ix, 1);
-        assert_eq!(state.logical_scroll_top().offset_in_item, gpui::px(4.0));
+        assert_eq!(state.logical_scroll_top().offset_in_item, gpui_kit::px(4.0));
     }
 
     #[test]
     fn variable_ledger_list_follows_the_tail_only_when_enabled() {
-        let state = gpui::ListState::new(0, gpui::ListAlignment::Top, gpui::px(100.0));
+        let state = gpui_kit::ListState::new(0, gpui_kit::ListAlignment::Top, gpui_kit::px(100.0));
         sync_trajectory_list_state(&state, 4, true, None, true);
         assert_eq!(state.logical_scroll_top().item_ix, 4);
 
         sync_trajectory_list_state(&state, 7, false, None, true);
         assert_eq!(state.logical_scroll_top().item_ix, 7);
 
-        state.scroll_to(gpui::ListOffset {
+        state.scroll_to(gpui_kit::ListOffset {
             item_ix: 2,
-            offset_in_item: gpui::px(3.0),
+            offset_in_item: gpui_kit::px(3.0),
         });
         sync_trajectory_list_state(&state, 8, false, None, false);
         assert_eq!(state.logical_scroll_top().item_ix, 2);
-        assert_eq!(state.logical_scroll_top().offset_in_item, gpui::px(3.0));
+        assert_eq!(state.logical_scroll_top().offset_in_item, gpui_kit::px(3.0));
     }
 
     #[test]
@@ -8101,10 +8103,10 @@ mod tests {
 
         let centered = aligned_trajectory_list_offset(&rows, 3, 80.0, 0.5);
         assert_eq!(centered.item_ix, 2);
-        assert_eq!(centered.offset_in_item, gpui::px(5.0));
+        assert_eq!(centered.offset_in_item, gpui_kit::px(5.0));
         let bottom = aligned_trajectory_list_offset(&rows, 3, 80.0, 1.0);
         assert_eq!(bottom.item_ix, 1);
-        assert_eq!(bottom.offset_in_item, gpui::px(0.0));
+        assert_eq!(bottom.offset_in_item, gpui_kit::px(0.0));
     }
 
     #[test]

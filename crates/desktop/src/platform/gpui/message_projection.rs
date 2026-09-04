@@ -1,6 +1,6 @@
 use std::{cell::RefCell, collections::HashMap};
 
-use gpui::{ScrollHandle, SharedString, Window};
+use gpui_kit::{ScrollHandle, SharedString, Window};
 
 use crate::domain::MessageId;
 use crate::streaming_markdown::StreamingMarkdownState;
@@ -75,7 +75,7 @@ impl MessagePresentation {
         &self,
         order: u64,
         window: &Window,
-        cx: &mut gpui::App,
+        cx: &mut gpui_kit::App,
     ) -> super::SelectionFrame {
         self.selection
             .borrow_mut()

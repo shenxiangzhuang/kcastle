@@ -1,9 +1,9 @@
 #[cfg(not(test))]
 use std::time::Duration;
 
-use gpui::Context;
+use gpui_kit::Context;
 #[cfg(not(test))]
-use gpui::Window;
+use gpui_kit::Window;
 #[cfg(not(test))]
 use velopack::{UpdateCheck, UpdateManager, sources::HttpSource};
 

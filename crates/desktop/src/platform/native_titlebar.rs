@@ -1,4 +1,4 @@
-use gpui::Window;
+use gpui_kit::Window;
 
 pub(crate) struct NativeTitlebarController {
     #[cfg(target_os = "macos")]
@@ -44,7 +44,7 @@ mod macos {
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use block2::RcBlock;
-    use gpui::Window;
+    use gpui_kit::Window;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, ProtocolObject};
     use objc2_app_kit::{

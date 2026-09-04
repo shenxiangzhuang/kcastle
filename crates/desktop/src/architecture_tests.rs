@@ -26,7 +26,7 @@ fn pure_layers_do_not_depend_on_gpui() {
         for path in paths {
             let text = fs::read_to_string(&path).expect("source file should be readable");
             assert!(
-                !text.contains("gpui::") && !text.contains("use gpui"),
+                !text.contains("gpui_kit::") && !text.contains("use gpui"),
                 "pure layer imported GPUI: {}",
                 path.display()
             );

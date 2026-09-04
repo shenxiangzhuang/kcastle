@@ -1,17 +1,17 @@
 use std::path::PathBuf;
 
 use crate::app::{DesktopApp, SidebarSessionStatus, same_path, session_age};
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, IconName, Sizable};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role, div,
     linear_color_stop, linear_gradient, prelude::FluentBuilder, px,
 };
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_component::input::Input;
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::spinner::Spinner;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, IconName, Sizable};
 
 use crate::assets::DesktopIconName;
 use crate::domain::{Action, INITIAL_SESSION_LIMIT};
@@ -20,7 +20,7 @@ use crate::ui_automation::{self, ids};
 use crate::ui_theme::{UiPalette, metrics, palette};
 
 impl DesktopApp {
-    pub(crate) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn sidebar(&self, window: &Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let colors = palette(cx);
         let toggle_leading = if window.is_fullscreen() {
             metrics::SIDEBAR_TOGGLE_FULLSCREEN_LEADING
@@ -95,7 +95,7 @@ impl DesktopApp {
         panel.into_any_element()
     }
 
-    fn sidebar_rail(&self, toggle_leading: f32, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn sidebar_rail(&self, toggle_leading: f32, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let colors = palette(cx);
         let panel = div()
             .id("sidebar-rail")
@@ -175,7 +175,7 @@ impl DesktopApp {
                     .justify_between()
                     .h(px(40.0))
                     .px_2()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child(crate::APP_NAME)
                     .child(
                         Button::new("search-sessions")
@@ -318,7 +318,7 @@ impl DesktopApp {
                     .px_2()
                     .py_1()
                     .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(colors.muted_text)
                     .child("Group"),
             )
@@ -348,7 +348,7 @@ impl DesktopApp {
                     .border_t_1()
                     .border_color(colors.border)
                     .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(colors.muted_text)
                     .child("Order"),
             )
@@ -372,7 +372,7 @@ impl DesktopApp {
             ))
     }
 
-    fn workspace_tree(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn workspace_tree(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let colors = palette(cx);
         let query = self.session_search.read(cx).value().trim().to_lowercase();
         if !self.core.sidebar.group_by_workspace {
@@ -453,7 +453,7 @@ impl DesktopApp {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.toggle_project(index, window, cx)
                             }))
-                            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                            .on_key_down(cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                     this.toggle_project(index, window, cx);
                                 }
@@ -621,7 +621,7 @@ impl DesktopApp {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_project_session(index, open_path.clone(), window, cx)
                                         }))
-                                        .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                        .on_key_down(cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                 this.open_project_session(index, keyboard_path.clone(), window, cx);
                                             }
@@ -653,7 +653,7 @@ impl DesktopApp {
                                                     cx,
                                                 )
                                             }))
-                                            .on_key_down(cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            .on_key_down(cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                                                 if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                                     this.dispatch(
                                                         Action::ShowMoreSessions(show_more_keyboard_project_path.clone()),
@@ -674,7 +674,7 @@ impl DesktopApp {
         query: &str,
         colors: UiPalette,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let mut sessions = self
             .project_store
             .projects()
@@ -784,7 +784,7 @@ impl DesktopApp {
                         this.open_project_session(project_index, open_path.clone(), window, cx)
                     }))
                     .on_key_down(cx.listener(
-                        move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                             if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                                 this.open_project_session(
                                     project_index,
@@ -806,7 +806,7 @@ fn sidebar_option(
     label: &'static str,
     selected: bool,
     colors: UiPalette,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -844,14 +844,14 @@ struct SessionRowData {
 }
 
 fn session_row(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     group: impl Into<SharedString>,
     data: SessionRowData,
     role: Role,
     selected: bool,
     colors: UiPalette,
-    action: Option<gpui::AnyElement>,
-) -> gpui::Stateful<gpui::Div> {
+    action: Option<gpui_kit::AnyElement>,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
     let group = group.into();
     let title = normalized_sidebar_text(&data.title);
     let title_overflows = sidebar_text_units(&title) > metrics::SIDEBAR_LABEL_UNITS;
@@ -971,7 +971,7 @@ fn session_row(
         })
 }
 
-fn title_fade(color: gpui::Hsla) -> gpui::Background {
+fn title_fade(color: gpui_kit::Hsla) -> gpui_kit::Background {
     linear_gradient(
         90.0,
         linear_color_stop(color.opacity(0.0), 0.0),
@@ -1001,7 +1001,7 @@ fn session_preview_card(
                         .flex_1()
                         .min_w(px(0.0))
                         .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .child(sidebar_label(&title, 56)),
                 )
                 .child(
@@ -1029,7 +1029,7 @@ fn session_status_icon(
     reduce_motion: bool,
     colors: UiPalette,
     group: SharedString,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let label = match status {
         SidebarSessionStatus::Preparing => "Preparing",
         SidebarSessionStatus::Running => "Running",
@@ -1083,7 +1083,7 @@ fn session_actions(
     path: PathBuf,
     title: String,
     cx: &mut Context<DesktopApp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let rename_path = path.clone();
     div()
         .flex()
