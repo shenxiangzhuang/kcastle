@@ -9,7 +9,7 @@ use kcastle_agent::{
     SessionConfig, SessionInfo,
 };
 
-use crate::agent_config::initial_session_title;
+use crate::agent_config::{ConfiguredModel, initial_session_title};
 use crate::domain::session_document::SessionDocument;
 use crate::domain::{ApprovalState, RunId, SessionView};
 use crate::settings::EnterBehavior;
@@ -31,6 +31,19 @@ enum RuntimeOperation {
     Configure,
     Rename,
     ChangePermissionDuringRun,
+}
+
+enum ModelUpdate {
+    Keep,
+    Replace(Box<Model>),
+}
+
+impl ModelUpdate {
+    fn apply(self, agent: &mut Agent) {
+        if let Self::Replace(model) = self {
+            agent.set_model(*model);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -429,20 +442,40 @@ impl SessionRuntime {
         }
         let mut config = self.config.clone();
         config.allow_all_tools = allow;
-        self.update_config(config, None, cx)
+        self.apply_config(config, ModelUpdate::Keep, cx)
     }
 
-    pub(crate) fn set_model(
+    pub(crate) fn select_model(
         &mut self,
-        model_id: String,
-        model: Model,
-        reasoning_effort: Option<ReasoningEffort>,
+        configured: &ConfiguredModel,
         cx: &mut Context<Self>,
     ) -> bool {
         let mut config = self.config.clone();
-        config.model.model_id = Some(model_id);
-        config.model.reasoning_effort = reasoning_effort.as_ref().map(reasoning_key);
-        self.update_config(config, Some(model), cx)
+        config.model = configured.session_model_config();
+        self.apply_config(
+            config,
+            ModelUpdate::Replace(Box::new(configured.model.clone())),
+            cx,
+        )
+    }
+
+    pub(crate) fn refresh_model(
+        &mut self,
+        configured: &ConfiguredModel,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.lifecycle.allows(RuntimeOperation::Configure)
+            || self.config.model.model_id.as_deref() != Some(&configured.id)
+        {
+            return false;
+        }
+        let Some(agent) = self.agent.as_mut() else {
+            return false;
+        };
+        agent.set_model(configured.model.clone());
+        self.lifecycle.complete_local_configuration();
+        cx.notify();
+        true
     }
 
     pub(crate) fn set_reasoning_effort(
@@ -455,30 +488,21 @@ impl SessionRuntime {
         }
         let mut config = self.config.clone();
         config.model.reasoning_effort = Some(reasoning_key(&effort));
-        self.update_config(config, None, cx)
+        self.apply_config(config, ModelUpdate::Keep, cx)
     }
 
-    fn update_config(
+    fn apply_config(
         &mut self,
         config: SessionConfig,
-        model: Option<Model>,
+        model_update: ModelUpdate,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.lifecycle.allows(RuntimeOperation::Configure) {
-            return false;
-        }
-        if config == self.config {
-            if let (Some(agent), Some(model)) = (&mut self.agent, model) {
-                agent.set_model(model);
-                self.lifecycle.complete_local_configuration();
-                cx.notify();
-                return true;
-            }
+        if !self.lifecycle.allows(RuntimeOperation::Configure) || config == self.config {
             return false;
         }
         if self.session.path.as_os_str().is_empty() {
-            if let (Some(agent), Some(model)) = (&mut self.agent, model) {
-                agent.set_model(model);
+            if let Some(agent) = &mut self.agent {
+                model_update.apply(agent);
             }
             self.allow_all_tools = config.allow_all_tools;
             self.config = config;
@@ -502,7 +526,7 @@ impl SessionRuntime {
             let _ = this.update(cx, |runtime, cx| {
                 match result {
                     Ok(()) => {
-                        runtime.complete_persisted_config(config, model, &mut agent);
+                        runtime.complete_persisted_config(config, model_update, &mut agent);
                     }
                     Err(error) => {
                         if runtime.allow_all_tools == config.allow_all_tools {
@@ -526,12 +550,10 @@ impl SessionRuntime {
     fn complete_persisted_config(
         &mut self,
         config: SessionConfig,
-        model: Option<Model>,
+        model_update: ModelUpdate,
         agent: &mut Agent,
     ) {
-        if let Some(model) = model {
-            agent.set_model(model);
-        }
+        model_update.apply(agent);
         self.config = config;
         self.sync_agent_metadata(agent);
         self.metadata_generation = self.metadata_generation.saturating_add(1);
@@ -967,6 +989,9 @@ fn reasoning_key(effort: &ReasoningEffort) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext;
+
+    use crate::settings::ProviderModel;
 
     fn lifecycle(status: SessionRuntimeStatus) -> RuntimeLifecycle {
         RuntimeLifecycle {
@@ -990,6 +1015,29 @@ mod tests {
             SessionDocument::default(),
             config,
         )
+    }
+
+    #[gpui::test]
+    fn refreshing_a_model_does_not_change_session_config(cx: &mut gpui::TestAppContext) {
+        let runtime = cx.new(|_| runtime());
+        let configured = ConfiguredModel::new(
+            "provider",
+            ProviderModel::new("model", "Model", 20_000, None),
+            Model::new("refreshed", "new-key", "http://localhost", "model", 20_000),
+        );
+        cx.update_entity(&runtime, |runtime, _| {
+            runtime.config.model.model_id = Some(configured.id.clone());
+        });
+        let before = cx.read_entity(&runtime, |runtime, _| runtime.config.clone());
+
+        assert!(cx.update_entity(&runtime, |runtime, cx| {
+            runtime.refresh_model(&configured, cx)
+        }));
+
+        cx.read_entity(&runtime, |runtime, _| {
+            assert_eq!(runtime.config, before);
+            assert_eq!(runtime.agent.as_ref().unwrap().model().name(), "refreshed");
+        });
     }
 
     fn approval(call_id: &str) -> AgentEvent {
@@ -1133,7 +1181,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn persisted_idle_config_syncs_agent_metadata_and_generation() {
+    async fn persisted_model_selection_updates_config_and_agent_together() {
         let session_id = kcastle_agent::SessionId::new();
         let root = std::env::temp_dir().join(format!(
             "kcastle-runtime-config-{}-{session_id}",
@@ -1168,13 +1216,20 @@ mod tests {
         let initial_generation = runtime.metadata_generation;
         let mut agent = runtime.agent.take().unwrap();
         assert!(runtime.lifecycle.begin_configuring());
-        let requested = SessionConfig {
+        let mut requested = SessionConfig {
             allow_all_tools: true,
             ..SessionConfig::default()
         };
+        requested.model.model_id = Some("provider/new-model".into());
+        let selected_model = Model::new("selected", "key", "http://localhost", "new-model", 20_000);
 
         agent.persist_session_config(&requested).await.unwrap();
-        runtime.complete_persisted_config(requested.clone(), None, &mut agent);
+        runtime.complete_persisted_config(
+            requested.clone(),
+            ModelUpdate::Replace(Box::new(selected_model)),
+            &mut agent,
+        );
+        assert_eq!(agent.model().model(), "new-model");
         runtime.agent = Some(agent);
 
         let loaded = Session::open_in_project(&path, "project").await.unwrap();

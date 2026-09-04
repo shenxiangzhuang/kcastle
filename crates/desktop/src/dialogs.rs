@@ -15,8 +15,8 @@ use gpui_kit::{
 };
 use kcastle_agent::SessionInfo;
 
-use crate::agent_config::{DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
-use crate::app::{ConfiguredModel, DesktopApp, active_model_index};
+use crate::agent_config::{ConfiguredModel, DEEPSEEK_PROVIDER_ID, OPENAI_PROVIDER_ID};
+use crate::app::{DesktopApp, active_model_index};
 use crate::assets::DesktopIconName;
 use crate::domain::Action;
 use crate::settings::{Appearance, EnterBehavior, ProviderModel, ProviderProfile};
@@ -1305,8 +1305,7 @@ impl DesktopApp {
                         crate::build_model(&profile, &model_profile, api_key.clone())
                     })
                     .with_max_output_tokens(model_profile.max_output_tokens);
-                let mut configured =
-                    crate::app::ConfiguredModel::new(provider_id, model_profile, model);
+                let mut configured = ConfiguredModel::new(provider_id, model_profile, model);
                 if let Some(effort) = self
                     .settings
                     .reasoning_effort(&configured.id, &configured.model)
@@ -1580,7 +1579,7 @@ mod tests {
         SettingsDialog, SettingsPage, addable_provider_ids, parse_capacity,
         parse_optional_output_tokens,
     };
-    use crate::app::ConfiguredModel;
+    use crate::agent_config::ConfiguredModel;
     use crate::settings::ProviderModel;
 
     #[test]
