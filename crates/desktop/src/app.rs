@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use gpui::{
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::{
     AppContext, Bounds, Context, Entity, FocusHandle, ListAlignment, ListOffset, ListState,
     PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, Subscription, Window, point,
     px,
 };
-use gpui_component::input::{InputEvent, InputState, TextareaState};
-use gpui_component::{Theme, ThemeMode};
 use kcastle_agent::{Agent, Model, Session, SessionConfig, SessionError, SessionId, SessionInfo};
 #[cfg(test)]
 use kcastle_agent::{SessionCatalog, SessionStoreError};
@@ -1893,7 +1893,7 @@ impl DesktopApp {
 
     pub(crate) fn handle_root_key(
         &mut self,
-        event: &gpui::KeyDownEvent,
+        event: &gpui_kit::KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2909,13 +2909,13 @@ fn safe_file_name(value: &str) -> String {
     }
 }
 
-fn within_bottom_threshold(max_offset: gpui::Pixels, offset_y: gpui::Pixels) -> bool {
+fn within_bottom_threshold(max_offset: gpui_kit::Pixels, offset_y: gpui_kit::Pixels) -> bool {
     max_offset + offset_y <= px(24.0)
 }
 
 #[cfg(test)]
 fn update_chat_follow_on_scroll(
-    delta_y: gpui::Pixels,
+    delta_y: gpui_kit::Pixels,
     at_bottom: bool,
     follow_chat_tail: &mut bool,
     unread_stream_updates: &mut usize,
@@ -2992,7 +2992,7 @@ fn presentation_namespace(project_id: &ProjectId, session_id: &SessionId) -> Str
 mod tests {
     use super::*;
 
-    fn close_test_window(view: Entity<DesktopApp>, cx: &mut gpui::VisualTestContext) {
+    fn close_test_window(view: Entity<DesktopApp>, cx: &mut gpui_kit::VisualTestContext) {
         let weak_view = view.downgrade();
         drop(view);
         cx.update(|window, _| window.remove_window());
@@ -3003,12 +3003,12 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn trajectory_scroll_callback_can_leave_and_rejoin_tail(cx: &mut gpui::TestAppContext) {
-        use gpui::{IntoElement, ScrollDelta, Styled, div, list, size};
+    #[gpui_kit::test]
+    fn trajectory_scroll_callback_can_leave_and_rejoin_tail(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{IntoElement, ScrollDelta, Styled, div, list, size};
 
         struct TestList(ListState);
-        impl gpui::Render for TestList {
+        impl gpui_kit::Render for TestList {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 list(self.0.clone(), |_, _, _| {
                     div().h(px(20.0)).w_full().into_any_element()
@@ -3026,7 +3026,7 @@ mod tests {
         cx.update(crate::init_ui);
         let (view, cx) = cx.add_window_view(|window, cx| {
             let app = DesktopApp::new(startup, window, cx);
-            window.blur();
+            window.blur(cx);
             app
         });
         let state = cx.read_entity(&view, |app, _| app.trajectory_scroll.clone());
@@ -3502,9 +3502,9 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn refreshing_an_invalid_catalog_removes_stale_sidebar_search_and_index_rows(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-invalid-switch-{}-{}",
@@ -3551,7 +3551,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -3648,8 +3648,8 @@ mod tests {
         assert_eq!(indices.get(&(project_id, second.id)), Some(&0));
     }
 
-    #[gpui::test]
-    fn created_session_path_refreshes_the_sidebar_list(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn created_session_path_refreshes_the_sidebar_list(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-new-session-{}-{}",
             std::process::id(),
@@ -3679,7 +3679,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -3735,9 +3735,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn opening_an_invalid_session_silently_removes_its_catalog_entry(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-invalid-open-{}-{}",
@@ -3777,7 +3777,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -3827,8 +3827,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
-    fn archive_and_restore_refresh_both_session_catalogs(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn archive_and_restore_refresh_both_session_catalogs(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-archive-{}-{}",
             std::process::id(),
@@ -3867,7 +3867,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -3897,8 +3897,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
-    fn stale_session_open_cannot_replace_a_new_chat_draft(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn stale_session_open_cannot_replace_a_new_chat_draft(cx: &mut gpui_kit::TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-stale-open-{}-{}",
             std::process::id(),
@@ -3935,7 +3935,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -3973,8 +3973,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
-    fn pending_session_open_does_not_submit_to_the_previous_runtime(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn pending_session_open_does_not_submit_to_the_previous_runtime(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-pending-open-command-gate-{}-{}",
             std::process::id(),
@@ -4011,7 +4013,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -4091,9 +4093,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn successful_session_open_captures_view_edits_made_while_loading(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-pending-open-view-state-{}-{}",
@@ -4131,7 +4133,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -4221,9 +4223,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn failed_cross_project_open_falls_back_to_the_target_project_draft(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-cross-project-open-failure-{}-{}",
@@ -4258,7 +4260,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -4349,9 +4351,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn reopening_cached_runtime_reloads_external_revision_and_config_drift(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-reopen-cache-{}-{}",
@@ -4395,7 +4397,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -4535,8 +4537,10 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[gpui::test]
-    fn background_failed_runtimes_share_the_terminal_cache_bound(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn background_failed_runtimes_share_the_terminal_cache_bound(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-settled-runtime-cache-{}-{}",
             std::process::id(),
@@ -4577,7 +4581,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 
@@ -4746,9 +4750,9 @@ mod tests {
         assert!(saved.restore(TimelineMode::Sequence, 91, 12).is_none());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn evicted_runtime_restores_surface_and_ranges_on_the_fresh_projection_lineage(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         let root = std::env::temp_dir().join(format!(
             "kcastle-desktop-evicted-timeline-state-{}-{}",
@@ -4786,7 +4790,7 @@ mod tests {
                 window,
                 cx,
             );
-            window.blur();
+            window.blur(cx);
             app
         });
 

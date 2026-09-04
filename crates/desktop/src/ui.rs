@@ -1,9 +1,9 @@
-use gpui::{
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
+use gpui_kit::component::{Icon, IconName};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
 };
-use gpui_component::resizable::{h_resizable, resizable_panel};
-use gpui_component::{Icon, IconName};
 
 use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
@@ -105,9 +105,11 @@ impl Render for DesktopApp {
             .relative()
             .flex()
             .size_full()
-            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                this.handle_root_key(event, window, cx);
-            }))
+            .capture_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    this.handle_root_key(event, window, cx);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {

@@ -1,7 +1,7 @@
 use std::sync::{Arc, LazyLock};
 
-use gpui::{App, Hsla, rgb, rgba};
-use gpui_component::{ActiveTheme, highlighter::HighlightTheme};
+use gpui_kit::component::{ActiveTheme, highlighter::HighlightTheme};
+use gpui_kit::{App, Hsla, rgb, rgba};
 
 #[derive(Clone, Copy)]
 pub(crate) struct UiPalette {
@@ -229,7 +229,7 @@ pub(crate) fn trajectory_palette(cx: &App) -> TrajectoryPalette {
 
 #[cfg(test)]
 mod tests {
-    use gpui::rgb;
+    use gpui_kit::rgb;
 
     use super::{markdown_highlight_theme, markdown_text_color};
 

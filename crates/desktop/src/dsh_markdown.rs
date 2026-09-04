@@ -5,14 +5,14 @@ use std::{
 };
 
 use crate::platform::gpui::{SelectionFragment, SelectionFrame};
-use gpui::{
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::{ActiveTheme, clipboard::Clipboard};
+use gpui_kit::{
     AnyElement, App, Bounds, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
     HighlightStyle, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     ParentElement, Pixels, SharedString, StrikethroughStyle, Styled, StyledText, Window, div, fill,
     point, prelude::FluentBuilder, px, size, svg,
 };
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme, clipboard::Clipboard};
 use markdown::mdast::Node;
 
 use crate::assets::register_generated_asset;
@@ -1303,7 +1303,7 @@ impl Element for InlineText {
     ) {
         self.paint_backgrounds(window);
         if let Some(selection) = &self.selection {
-            selection.paint(gpui::hsla(0.58, 0.8, 0.6, 0.3), window);
+            selection.paint(gpui_kit::hsla(0.58, 0.8, 0.6, 0.3), window);
         }
         self.styled
             .paint(id, inspector_id, bounds, state, prepaint, window, cx);
@@ -1449,7 +1449,7 @@ fn append_inline_text(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{
+    use gpui_kit::{
         AssetSource, Context, FontWeight, Hsla, IntoElement, ParentElement, Render, Styled,
         TestAppContext, Window, div, px, rgb, size,
     };
@@ -1558,7 +1558,7 @@ mod tests {
             };
             div()
                 .size_full()
-                .child(gpui_base::TextSelectionLayer)
+                .child(gpui_kit::base::TextSelectionLayer)
                 .child(selection.clone().wrap(super::inline_block(
                     &paragraph.children,
                     self.text_size,
@@ -1600,7 +1600,7 @@ mod tests {
             self.frame = Some(selection.clone());
             div()
                 .size_full()
-                .child(gpui_base::TextSelectionLayer)
+                .child(gpui_kit::base::TextSelectionLayer)
                 .child(selection.wrap(body))
         }
     }
@@ -1609,10 +1609,10 @@ mod tests {
         source: &str,
         cx: &'a mut TestAppContext,
     ) -> (
-        gpui::Entity<MarkdownSelectionHarness>,
-        &'a mut gpui::VisualTestContext,
+        gpui_kit::Entity<MarkdownSelectionHarness>,
+        &'a mut gpui_kit::VisualTestContext,
     ) {
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::component::init);
         let (view, cx) = cx.add_window_view(|window, cx| MarkdownSelectionHarness {
             source: source.to_owned(),
             streaming: false,
@@ -1627,10 +1627,10 @@ mod tests {
     }
 
     fn select_markdown(
-        view: &gpui::Entity<MarkdownSelectionHarness>,
+        view: &gpui_kit::Entity<MarkdownSelectionHarness>,
         start: &str,
         end: &str,
-        cx: &mut gpui::VisualTestContext,
+        cx: &mut gpui_kit::VisualTestContext,
     ) -> String {
         let (start, end) = view.read_with(cx, |view, _| {
             let frame = view.frame.as_ref().unwrap();
@@ -1639,18 +1639,26 @@ mod tests {
                 frame.text_position(end, true),
             )
         });
-        cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_down(
+            start,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
         cx.simulate_mouse_move(
             end,
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::default(),
+            Some(gpui_kit::MouseButton::Left),
+            gpui_kit::Modifiers::default(),
         );
-        cx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(
+            end,
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
+        );
         cx.run_until_parked();
-        cx.update(gpui_base::TextSelection::selected_text)
+        cx.update(gpui_kit::base::TextSelection::selected_text)
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn mixed_markdown_selection_preserves_reading_order_and_code_whitespace(
         cx: &mut TestAppContext,
     ) {
@@ -1679,7 +1687,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn invalid_inline_math_copies_latex_without_visual_padding(cx: &mut TestAppContext) {
         let (view, cx) = markdown_selection_harness(r"before $\frac{$ after", cx);
         assert_eq!(
@@ -1688,7 +1696,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn selected_text_survives_streaming_settlement_and_reflow(cx: &mut TestAppContext) {
         let (view, cx) = markdown_selection_harness(
             "开始 选择中文 hello 后面还有一段足够长的内容，用于窗口缩窄时触发重新排版。",
@@ -1706,7 +1714,7 @@ mod tests {
         cx.simulate_resize(size(px(150.0), px(700.0)));
         cx.run_until_parked();
         assert_eq!(
-            cx.update(gpui_base::TextSelection::selected_text),
+            cx.update(gpui_kit::base::TextSelection::selected_text),
             "选择中文 hello"
         );
         view.update(cx, |view, cx| {
@@ -1715,18 +1723,18 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(
-            cx.update(gpui_base::TextSelection::selected_text),
+            cx.update(gpui_kit::base::TextSelection::selected_text),
             "选择中文 hello"
         );
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert!(
-            cx.update(gpui_base::TextSelection::selected_text)
+            cx.update(gpui_kit::base::TextSelection::selected_text)
                 .is_empty()
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn lists_tables_and_display_math_copy_as_structured_text(cx: &mut TestAppContext) {
         let (view, cx) = markdown_selection_harness(
             "开始\n\n- first\n- second\n\n| Name | Value |\n| --- | --- |\n| 中文 | 42 |\n\n$$\nx^2\n$$\n\n结束",
@@ -1738,7 +1746,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn changed_selected_content_clears_instead_of_copying_stale_bytes(cx: &mut TestAppContext) {
         let (view, cx) = markdown_selection_harness("选择 hello", cx);
         assert_eq!(select_markdown(&view, "hello", "hello", cx), "hello");
@@ -1748,13 +1756,13 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(
-            cx.update(gpui_base::TextSelection::selected_text)
+            cx.update(gpui_kit::base::TextSelection::selected_text)
                 .is_empty()
         );
         cx.refresh().unwrap();
         cx.run_until_parked();
         assert!(
-            cx.update(gpui_base::TextSelection::selected_text)
+            cx.update(gpui_kit::base::TextSelection::selected_text)
                 .is_empty()
         );
     }
@@ -1805,29 +1813,29 @@ mod tests {
         assert_eq!(heading_style(4).0, 16.0);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn ordinary_body_text_can_be_selected(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new("选择中文 hello"));
         cx.simulate_resize(size(px(400.0), px(180.0)));
         cx.refresh().unwrap();
         cx.run_until_parked();
         cx.simulate_mouse_down(
-            gpui::point(px(0.0), px(12.0)),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::default(),
+            gpui_kit::point(px(0.0), px(12.0)),
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
         );
         cx.simulate_mouse_move(
-            gpui::point(px(200.0), px(12.0)),
-            Some(gpui::MouseButton::Left),
-            gpui::Modifiers::default(),
+            gpui_kit::point(px(200.0), px(12.0)),
+            Some(gpui_kit::MouseButton::Left),
+            gpui_kit::Modifiers::default(),
         );
         cx.simulate_mouse_up(
-            gpui::point(px(200.0), px(12.0)),
-            gpui::MouseButton::Left,
-            gpui::Modifiers::default(),
+            gpui_kit::point(px(200.0), px(12.0)),
+            gpui_kit::MouseButton::Left,
+            gpui_kit::Modifiers::default(),
         );
         cx.run_until_parked();
-        let selected = cx.update(gpui_base::TextSelection::selected_text);
+        let selected = cx.update(gpui_kit::base::TextSelection::selected_text);
         assert_eq!(selected, "选择中文 hello");
     }
 
@@ -1950,7 +1958,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn inline_math_uses_remaining_width_before_wrapping(cx: &mut TestAppContext) {
         let source = "回顾上轮结论：decode 阶段计算强度 $I \\approx 1$甲后续文本足够长，用于验证公式后内容不会整块移到下一行。";
         let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
@@ -1968,7 +1976,7 @@ mod tests {
         assert!(following.origin.x >= formula.origin.x + formula.size.width - px(1.0));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn inline_math_scales_with_the_surrounding_text(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new("heading $\\gamma$"));
         cx.simulate_resize(size(px(520.0), px(180.0)));
@@ -1991,7 +1999,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn inline_math_nested_in_bold_text_reaches_the_svg_renderer(cx: &mut TestAppContext) {
         let source = "**一次前向生成全部 $\\gamma$ 个草稿 token**";
         let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
@@ -2003,7 +2011,7 @@ mod tests {
         assert!(cx.debug_bounds(r"math-fallback:\gamma").is_none());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn tall_inline_fraction_is_contained_and_does_not_overlap_text(cx: &mut TestAppContext) {
         let source = r"left$\frac{1}{2}$right";
         let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(source));
@@ -2025,10 +2033,10 @@ mod tests {
         assert!(formula.origin.x + formula.size.width <= right.origin.x + px(1.0));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn display_math_is_centered_when_it_fits(cx: &mut TestAppContext) {
         let source = r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}";
-        cx.update(gpui_component::init);
+        cx.update(gpui_kit::component::init);
         let (_, cx) = cx.add_window_view(|_, _| DisplayMathHarness::new(source));
         cx.simulate_resize(size(px(520.0), px(180.0)));
         cx.refresh().unwrap();
@@ -2175,7 +2183,7 @@ mod tests {
         assert_eq!(formulas, ["x", "y"]);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn hard_break_after_inline_math_starts_the_following_text_on_a_new_line(
         cx: &mut TestAppContext,
     ) {
@@ -2194,7 +2202,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn invalid_inline_math_fallback_remains_visible(cx: &mut TestAppContext) {
         let (_, cx) = cx.add_window_view(|_, _| InlineLayoutHarness::new(r"before $\frac{$ after"));
         cx.simulate_resize(size(px(520.0), px(180.0)));
@@ -2231,7 +2239,7 @@ mod tests {
     fn inline_slice_ignores_disjoint_style_ranges() {
         let output = super::InlineOutput {
             text: "styled plain".into(),
-            highlights: vec![(0..6, gpui::HighlightStyle::default())],
+            highlights: vec![(0..6, gpui_kit::HighlightStyle::default())],
             ..super::InlineOutput::default()
         };
 
@@ -2262,7 +2270,7 @@ mod tests {
             let expected = text[slice_range.clone()].to_owned();
             let output = super::InlineOutput {
                 text,
-                highlights: vec![(style_range.clone(), gpui::HighlightStyle::default())],
+                highlights: vec![(style_range.clone(), gpui_kit::HighlightStyle::default())],
                 backgrounds: vec![(style_range, test_palette().canvas)],
                 omitted: vec![omitted_range],
             };

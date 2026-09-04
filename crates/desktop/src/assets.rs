@@ -7,9 +7,9 @@ use std::{
     },
 };
 
-use gpui::{AssetSource, Result, SharedString};
-use gpui_component::IconNamed;
-use gpui_component_assets::Assets as ComponentAssets;
+use gpui_kit::assets::Assets as ComponentAssets;
+use gpui_kit::component::IconNamed;
+use gpui_kit::{AssetSource, Result, SharedString};
 
 const SQUARE_PEN_PATH: &str = "icons/square-pen.svg";
 const DOWNLOAD_PATH: &str = "icons/download.svg";

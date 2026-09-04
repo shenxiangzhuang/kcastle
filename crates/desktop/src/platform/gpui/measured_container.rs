@@ -1,4 +1,4 @@
-use gpui::{Context, IntoElement, Styled, WeakEntity, Window, canvas};
+use gpui_kit::{Context, IntoElement, Styled, WeakEntity, Window, canvas};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MeasuredBounds {
@@ -48,7 +48,7 @@ pub(crate) fn measured_container<T: 'static>(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{
+    use gpui_kit::{
         AppContext, Context, IntoElement, ParentElement, Render, Styled, TestAppContext, Window,
         div, px, size,
     };
@@ -77,7 +77,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn measurement_updates_during_prepaint_and_survives_resize(cx: &mut TestAppContext) {
         let (view, cx) = cx.add_window_view(|_, _| MeasurementHarness::default());
         cx.simulate_resize(size(px(320.0), px(400.0)));

@@ -1,13 +1,13 @@
-use gpui::{
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::clipboard::Clipboard;
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::text::TextView;
+use gpui_kit::component::{Icon, IconName, Selectable, Sizable};
+use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, accesskit::Role as AxRole, div,
     prelude::FluentBuilder, px, rgba,
 };
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_component::clipboard::Clipboard;
-use gpui_component::spinner::Spinner;
-use gpui_component::text::TextView;
-use gpui_component::{Icon, IconName, Selectable, Sizable};
 
 use crate::app::DesktopApp;
 use crate::application::conversation_view_model;
@@ -57,7 +57,7 @@ impl DesktopApp {
                                 div()
                                     .max_w(px(460.0))
                                     .truncate()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .child(conversation_view_model(&self.core).title.to_owned()),
                             )
                             .children(self.session_running().then(|| {
@@ -108,7 +108,7 @@ impl DesktopApp {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         if self.core.surface == Surface::Trajectory {
             self.trajectory_panel(window, cx).into_any_element()
         } else {
@@ -147,7 +147,7 @@ impl DesktopApp {
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .on_scroll_wheel(cx.listener(
-                        |this, event: &gpui::ScrollWheelEvent, window, cx| {
+                        |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
                             this.handle_chat_scroll(event, window, cx)
                         },
                     ))
@@ -218,7 +218,7 @@ impl DesktopApp {
         message: &Message,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = palette(cx);
         let content = if message.role == Role::Notice {
             div()
@@ -389,7 +389,7 @@ impl DesktopApp {
                                     this.toggle_reasoning(index, cx)
                                 }))
                                 .on_key_down(cx.listener(
-                                    move |this, event: &gpui::KeyDownEvent, _, cx| {
+                                    move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
                                         if matches!(event.keystroke.key.as_str(), "enter" | "space")
                                         {
                                             this.toggle_reasoning(index, cx);
@@ -492,7 +492,7 @@ impl DesktopApp {
         message: &Message,
         presentation: &crate::platform::gpui::MessagePresentation,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let colors = palette(cx);
         let title = message.title.as_deref().unwrap_or("Tool");
         let summary = message
@@ -509,7 +509,7 @@ impl DesktopApp {
             .tab_index(0)
             .on_click(cx.listener(move |this, _, window, cx| this.toggle_tool(index, window, cx)))
             .on_key_down(
-                cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
+                cx.listener(move |this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if matches!(event.keystroke.key.as_str(), "enter" | "space") {
                         this.toggle_tool(index, window, cx);
                     }
@@ -639,7 +639,7 @@ impl DesktopApp {
     }
 }
 
-fn transcript_content_column(content_max_width: f32) -> gpui::Div {
+fn transcript_content_column(content_max_width: f32) -> gpui_kit::Div {
     div()
         .flex()
         .flex_col()
@@ -655,7 +655,7 @@ fn assistant_body(
     selection: &crate::platform::gpui::SelectionFrame,
     window: &mut Window,
     cx: &mut Context<DesktopApp>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     dsh_markdown::render_markdown(
         message.key.0,
         &presentation.markdown,
@@ -673,8 +673,8 @@ fn tab(
     label: &'static str,
     active: bool,
     colors: TrajectoryPalette,
-    cx: &gpui::App,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    cx: &gpui_kit::App,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 ) -> impl IntoElement {
     div()
         .flex()
@@ -704,8 +704,8 @@ fn conversation_tab_button(
     label: &'static str,
     active: bool,
     colors: TrajectoryPalette,
-    cx: &gpui::App,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    cx: &gpui_kit::App,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
 ) -> Button {
     Button::new(id)
         .role(AxRole::Tab)
@@ -731,12 +731,12 @@ fn tool_description(payload: &str) -> Option<String> {
 }
 
 fn detail_code_block(
-    id: impl Into<gpui::ElementId>,
+    id: impl Into<gpui_kit::ElementId>,
     label: &'static str,
     value: String,
     language: &'static str,
     colors: UiPalette,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let fence = if value.contains("```") { "````" } else { "```" };
     let markdown = format!("{fence}{language}\n{value}\n{fence}");
     div()
@@ -815,7 +815,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use gpui::{
+    use gpui_kit::{
         AppContext, Context, InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle,
         StatefulInteractiveElement, Styled, TestAppContext, Window, div, px, size,
     };
@@ -827,7 +827,7 @@ mod tests {
     use crate::platform::gpui::measured_container;
     use crate::ui_theme::metrics;
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn transcript_scroll_range_covers_its_content(cx: &mut TestAppContext) {
         let scroll = ScrollHandle::new();
 
@@ -889,7 +889,7 @@ mod tests {
         assert!(scroll.max_offset().y >= px(expected - 1.0));
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn resolved_reading_width_is_definite_before_markdown_height_measurement(
         cx: &mut TestAppContext,
     ) {
@@ -959,7 +959,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn non_selectable_messages_do_not_allocate_selection_state(cx: &mut TestAppContext) {
         fn message(id: u64, role: Role) -> Arc<Message> {
             Arc::new(Message {
@@ -1002,7 +1002,7 @@ mod tests {
             app.core
                 .transient_messages
                 .push_back(message(903, Role::Tool));
-            window.blur();
+            window.blur(cx);
             app
         });
         cx.simulate_resize(size(px(900.0), px(700.0)));

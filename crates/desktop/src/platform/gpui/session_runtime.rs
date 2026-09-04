@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{Context, Window};
+use gpui_kit::{Context, Window};
 use kcastle_agent::{
     Agent, AgentEvent, CommitReceipt, Model, ReasoningEffort, RunControl, RunFailure, Session,
     SessionConfig, SessionInfo,
