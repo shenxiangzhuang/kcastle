@@ -126,7 +126,9 @@ fn desktop_startup(root: PathBuf) -> Result<(DesktopStartup, Appearance), Box<dy
     let mut settings = SettingsStore::load(app_store.clone())?;
     let mut models = models_from_profiles(settings.provider_profiles());
     for configured in &mut models {
-        settings.apply(&configured.id, &mut configured.model);
+        if let Some(effort) = settings.reasoning_effort(&configured.id, &configured.model) {
+            configured.reasoning_effort = Some(effort);
+        }
     }
     let preferred_model = settings.selected_model().and_then(|selected| {
         models

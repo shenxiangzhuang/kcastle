@@ -65,12 +65,18 @@ pub(crate) fn build_model(
     .with_max_output_tokens(profile.max_output_tokens);
     match provider.provider_id.as_str() {
         DEEPSEEK_PROVIDER_ID | "deepseek" => {
-            model.with_reasoning(DEEPSEEK_REASONING_EFFORTS, ReasoningEffort::High)
+            model.with_reasoning_efforts(DEEPSEEK_REASONING_EFFORTS)
         }
-        OPENAI_PROVIDER_ID => {
-            model.with_reasoning(OPENAI_REASONING_EFFORTS, ReasoningEffort::Medium)
-        }
+        OPENAI_PROVIDER_ID => model.with_reasoning_efforts(OPENAI_REASONING_EFFORTS),
         _ => model,
+    }
+}
+
+pub(crate) fn default_reasoning_effort(provider_id: &str) -> Option<ReasoningEffort> {
+    match provider_id {
+        DEEPSEEK_PROVIDER_ID | "deepseek" => Some(ReasoningEffort::High),
+        OPENAI_PROVIDER_ID => Some(ReasoningEffort::Medium),
+        _ => None,
     }
 }
 

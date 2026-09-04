@@ -1307,7 +1307,12 @@ impl DesktopApp {
                     .with_max_output_tokens(model_profile.max_output_tokens);
                 let mut configured =
                     crate::app::ConfiguredModel::new(provider_id, model_profile, model);
-                self.settings.apply(&configured.id, &mut configured.model);
+                if let Some(effort) = self
+                    .settings
+                    .reasoning_effort(&configured.id, &configured.model)
+                {
+                    configured.reasoning_effort = Some(effort);
+                }
                 configured
             })
             .collect::<Vec<_>>();

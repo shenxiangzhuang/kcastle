@@ -56,11 +56,17 @@ impl SessionError {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionConfig {
+pub struct SessionModelConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionConfig {
+    #[serde(flatten)]
+    pub model: SessionModelConfig,
     #[serde(default)]
     pub allow_all_tools: bool,
 }
@@ -647,6 +653,31 @@ mod tests {
     use super::*;
     use crate::InputOrigin;
     use std::fs;
+
+    #[test]
+    fn session_model_config_preserves_the_existing_json_contract() {
+        let config = SessionConfig {
+            model: SessionModelConfig {
+                model_id: Some("openai/gpt-5.6-sol".into()),
+                reasoning_effort: Some("high".into()),
+            },
+            allow_all_tools: true,
+        };
+
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "model_id": "openai/gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "allow_all_tools": true,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionConfig>(json).unwrap(),
+            config
+        );
+    }
 
     fn temp_directory(label: &str) -> PathBuf {
         let directory =

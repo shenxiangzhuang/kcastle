@@ -99,17 +99,17 @@ impl SettingsStore {
         Ok(Self { store, stored })
     }
 
-    pub(crate) fn apply(&self, model_id: &str, model: &mut Model) {
-        let Some(selected) = self.stored.reasoning_efforts.get(model_id) else {
-            return;
-        };
-        if let Some(effort) = model
+    pub(crate) fn reasoning_effort(
+        &self,
+        model_id: &str,
+        model: &Model,
+    ) -> Option<ReasoningEffort> {
+        let selected = self.stored.reasoning_efforts.get(model_id)?;
+        model
             .reasoning_efforts()
             .iter()
             .find(|effort| reasoning_key(effort) == selected)
-        {
-            model.set_reasoning_effort(effort.clone());
-        }
+            .cloned()
     }
 
     pub(crate) fn selected_model(&self) -> Option<&str> {
@@ -504,15 +504,14 @@ mod tests {
             )
             .unwrap();
 
-        let mut model = Model::new("test", "key", "http://localhost", "model", 10_000)
-            .with_reasoning(
-                &[ReasoningEffort::None, ReasoningEffort::Low],
-                ReasoningEffort::None,
-            );
+        let model = Model::new("test", "key", "http://localhost", "model", 10_000)
+            .with_reasoning_efforts(&[ReasoningEffort::None, ReasoningEffort::Low]);
         drop(store);
         let store = SettingsStore::load(root.clone()).unwrap();
-        store.apply("test/model", &mut model);
-        assert_eq!(model.reasoning_effort(), Some(&ReasoningEffort::Low));
+        assert_eq!(
+            store.reasoning_effort("test/model", &model),
+            Some(ReasoningEffort::Low)
+        );
         assert_eq!(store.selected_model(), Some("test/model"));
         assert_eq!(store.appearance(), Appearance::Dark);
         assert_eq!(store.enter_behavior(), EnterBehavior::Queue);

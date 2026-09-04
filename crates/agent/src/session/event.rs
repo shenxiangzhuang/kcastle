@@ -270,6 +270,12 @@ pub enum SessionEvent {
         run_id: RunId,
         tokens_before: usize,
         first_kept_id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_output_tokens: Option<u32>,
     },
     CompactionFinished {
         compaction_id: CompactionId,

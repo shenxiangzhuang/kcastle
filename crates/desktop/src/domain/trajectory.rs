@@ -2292,6 +2292,9 @@ mod tests {
                     run_id: RunId::from("run"),
                     tokens_before: 10_000,
                     first_kept_id: 42,
+                    model: None,
+                    reasoning_effort: None,
+                    max_output_tokens: None,
                 },
             ),
             crate::domain::session_document::tests::recorded(

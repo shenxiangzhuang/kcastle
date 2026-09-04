@@ -3031,8 +3031,10 @@ mod tests {
         store.append(&request, &permit).unwrap();
 
         let config = SessionConfig {
-            model_id: Some("provider/model".into()),
-            reasoning_effort: Some("high".into()),
+            model: crate::SessionModelConfig {
+                model_id: Some("provider/model".into()),
+                reasoning_effort: Some("high".into()),
+            },
             allow_all_tools: true,
         };
         let updated = store
