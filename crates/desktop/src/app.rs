@@ -796,10 +796,20 @@ impl DesktopApp {
             Ok(document) => document,
             Err(_) => return None,
         };
-        let config = session.config().clone();
-        let model_index = active_model_index(&self.models, config.model.model_id.as_deref())
-            .unwrap_or(self.selected_model);
+        let is_draft = session.info().path.as_os_str().is_empty();
+        let mut config = session.config().clone();
+        let preferred_model = if is_draft {
+            Some(self.models[self.selected_model].id.as_str())
+        } else {
+            config.model.model_id.as_deref()
+        };
+        let model_index =
+            active_model_index(&self.models, preferred_model).unwrap_or(self.selected_model);
         let configured = &self.models[model_index];
+        if is_draft {
+            config = config_for_model(configured, self.settings.allow_all_tools());
+        }
+        let needs_model_selection = config.model.model_id.as_deref() != Some(&configured.id);
         let agent = Agent::new(
             configured.model.clone(),
             crate::INSTRUCTIONS,
@@ -815,6 +825,9 @@ impl DesktopApp {
                 config,
             )
         });
+        if needs_model_selection {
+            runtime.update(cx, |runtime, cx| runtime.select_model(configured, cx));
+        }
         self.register_runtime(project.id, runtime.clone(), cx);
         Some(runtime)
     }
@@ -2989,7 +3002,19 @@ mod tests {
         id: SessionId,
         title: Option<&str>,
     ) -> SessionInfo {
-        create_v2_session_with_config(directory, project_id, id, title, SessionConfig::default())
+        create_v2_session_with_config(
+            directory,
+            project_id,
+            id,
+            title,
+            SessionConfig {
+                model: SessionModelConfig {
+                    model_id: Some("test/test-model".into()),
+                    reasoning_effort: None,
+                },
+                allow_all_tools: false,
+            },
+        )
     }
 
     fn create_v2_session_with_config(
@@ -3572,6 +3597,146 @@ mod tests {
         assert!(!documents.contains_key(&first_path));
         assert!(documents.contains_key(&second_path));
         assert_eq!(indices.get(&(project_id, second.id)), Some(&0));
+    }
+
+    #[gpui_kit::test]
+    fn runtime_creation_preserves_defaults_and_persists_model_fallback(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use kcastle_agent::ReasoningEffort;
+
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let _entered = executor.enter();
+        cx.background_executor.allow_parking();
+        let root =
+            std::env::temp_dir().join(format!("kcastle-runtime-config-{}", SessionId::new()));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let (project_store, active_project) =
+            ProjectStore::load(root.join("state"), Some(workspace.clone())).unwrap();
+        let project = project_store.project(active_project).unwrap().clone();
+        let mut settings = SettingsStore::load(root.join("settings")).unwrap();
+        settings.set_allow_all_tools(true).unwrap();
+        let first = ConfiguredModel::new(
+            "first",
+            ProviderModel::new("first-model", "First", 10_000, None),
+            Model::new("first", "key", "http://127.0.0.1:1", "first-model", 10_000),
+        );
+        let (model, server) = text_stream_model("done");
+        let mut selected = ConfiguredModel::new(
+            "selected",
+            ProviderModel::new("test-model", "Selected", 10_000, None),
+            model.with_reasoning_efforts(&[ReasoningEffort::High]),
+        );
+        selected.reasoning_effort = Some(ReasoningEffort::High);
+        let expected = config_for_model(&selected, true);
+        let agent = Agent::new(
+            selected.model.clone(),
+            "test",
+            Session::memory(),
+            &workspace,
+        );
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let app = DesktopApp::new(
+                DesktopStartup {
+                    agent,
+                    models: vec![first, selected],
+                    selected_model: 1,
+                    project_store,
+                    active_project,
+                    settings,
+                },
+                window,
+                cx,
+            );
+            window.blur(cx);
+            app
+        });
+
+        // Exercise the creation route used after the startup draft has been submitted.
+        let draft = cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                this.create_runtime(active_project, Session::memory(), cx)
+                    .unwrap()
+            })
+        });
+        cx.read_entity(&draft, |runtime, _| {
+            assert_eq!(runtime.snapshot().config, expected)
+        });
+        cx.update(|window, app| {
+            draft.update(app, |runtime, cx| {
+                runtime.submit("hello".into(), EnterBehavior::Steer, window, cx);
+            });
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while cx.read_entity(&draft, |runtime, _| runtime.is_active()) {
+            assert!(Instant::now() < deadline, "draft submission did not settle");
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        server.join().unwrap();
+        let snapshot = cx.read_entity(&draft, |runtime, _| runtime.snapshot());
+        assert_eq!(snapshot.status, SessionRuntimeStatus::Idle);
+        let stored = Session::inspect(&snapshot.session.path).unwrap();
+        assert_eq!(stored.config(), &expected);
+        assert!(stored.events().iter().any(|recorded| matches!(
+            &recorded.event,
+            kcastle_agent::SessionEvent::RequestSnapshot { model, reasoning_effort, session_config, .. }
+                if model == "test-model"
+                    && *reasoning_effort == Some(ReasoningEffort::High)
+                    && session_config == &expected
+        )));
+        drop(stored);
+
+        // Missing model IDs must be repaired durably without inheriting global permissions.
+        let unavailable = SessionConfig {
+            model: SessionModelConfig {
+                model_id: Some("removed/model".into()),
+                reasoning_effort: Some(ReasoningEffort::High),
+            },
+            allow_all_tools: false,
+        };
+        let info = create_v2_session_with_config(
+            &project.sessions_dir,
+            project.id.as_str(),
+            SessionId::new(),
+            None,
+            unavailable,
+        );
+        let loaded = Session::open_writable_in_project(&info.path, project.id.as_str()).unwrap();
+        let fallback = cx.update(|_, app| {
+            view.update(app, |this, cx| {
+                this.create_runtime(active_project, loaded, cx).unwrap()
+            })
+        });
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while cx.read_entity(&fallback, |runtime, _| runtime.is_active()) {
+            assert!(
+                Instant::now() < deadline,
+                "fallback configuration did not settle"
+            );
+            cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let repaired = Session::open_writable_in_project(&info.path, project.id.as_str()).unwrap();
+        cx.read_entity(&fallback, |runtime, _| {
+            let snapshot = runtime.snapshot();
+            assert_eq!(snapshot.status, SessionRuntimeStatus::Idle);
+            assert_eq!(
+                snapshot.config.model.model_id.as_deref(),
+                Some("first/first-model")
+            );
+            assert_eq!(snapshot.config.model.reasoning_effort, None);
+            assert!(!snapshot.config.allow_all_tools);
+            assert_eq!(&snapshot.config, repaired.config());
+            assert!(runtime.matches_loaded_session(&repaired));
+        });
+        drop(repaired);
+        drop(fallback);
+        drop(draft);
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui_kit::test]

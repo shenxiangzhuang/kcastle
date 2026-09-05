@@ -982,7 +982,7 @@ fn millis_to_seconds(millis: i64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::AppContext;
+    use gpui_kit::AppContext;
 
     use crate::settings::ProviderModel;
 
@@ -1010,8 +1010,8 @@ mod tests {
         )
     }
 
-    #[gpui::test]
-    fn refreshing_a_model_does_not_change_session_config(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn refreshing_a_model_does_not_change_session_config(cx: &mut gpui_kit::TestAppContext) {
         let runtime = cx.new(|_| runtime());
         let configured = ConfiguredModel::new(
             "provider",
