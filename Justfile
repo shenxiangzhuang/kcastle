@@ -30,6 +30,10 @@ test:
 test-agent:
     cargo test -p kcastle-agent
 
+# Measure Chat source publication/first draw and progressive preparation separately.
+bench-chat:
+    cargo test -p kcastle-desktop --release --locked conversation::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
+
 # Check all TLA+ models or one named model (requires Java 11+).
 tla-check model="all":
     docs/architecture/tla/check check {{quote(model)}}

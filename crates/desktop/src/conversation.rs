@@ -1,7 +1,5 @@
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::clipboard::Clipboard;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, IconName, Selectable, Sizable};
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -14,10 +12,11 @@ use crate::application::conversation_view_model;
 use crate::domain::{Message, Role, Surface};
 use crate::dsh_markdown;
 use crate::layout::SidebarMode;
-use crate::platform::gpui::MessagePresentation;
-use crate::platform::gpui::measured_container;
 use crate::ui_automation::ids;
-use crate::ui_theme::{TrajectoryPalette, UiPalette, metrics, palette, trajectory_palette};
+use crate::ui_theme::{TrajectoryPalette, metrics, palette, trajectory_palette};
+
+#[cfg(test)]
+mod performance;
 
 impl DesktopApp {
     pub(crate) fn conversation_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -116,13 +115,21 @@ impl DesktopApp {
         }
     }
 
-    fn chat_timeline(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn chat_timeline(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_kit::component::{ActiveTheme, scroll::ScrollableElement};
         let colors = palette(cx);
-        // TODO(responsive-chat): GPUI can retain a stale scroll extent after window/fullscreen
-        // reflow, leaving the final Markdown blocks unreachable behind the composer. Narrow
-        // layouts can also produce inconsistent table columns because each row flexes
-        // independently. Revisit this with a layout-aware tail anchor and shared table tracks.
-        let transcript_owner = cx.entity().downgrade();
+        let state = {
+            let mut chat = self.chat.borrow_mut();
+            chat.sync(
+                &self.core.session_view.conversation.messages,
+                &self.core.transient_messages,
+                &self.message_presentations.borrow(),
+                self.core.session_view.trajectory.projection_lineage(),
+                cx.theme().is_dark(),
+            );
+            chat.begin_frame();
+            chat.list.clone()
+        };
         div()
             .id("chat-panel")
             .role(AxRole::TabPanel)
@@ -133,51 +140,27 @@ impl DesktopApp {
             .flex_col()
             .flex_1()
             .min_h(px(0.0))
+            .overflow_hidden()
             .child(
                 div()
                     .id("transcript")
                     .role(AxRole::Log)
                     .accessibility_id(ids::TRANSCRIPT)
                     .aria_label("Conversation transcript")
-                    .relative()
-                    .flex()
-                    .flex_col()
                     .flex_1()
                     .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .on_scroll_wheel(cx.listener(
-                        |this, event: &gpui_kit::ScrollWheelEvent, window, cx| {
-                            this.handle_chat_scroll(event, window, cx)
-                        },
-                    ))
-                    .px(px(self.core.layout.chat_side_padding))
-                    .pt(px(self.core.layout.transcript_top_inset))
-                    .pb(px(self.core.layout.tail_inset))
-                    .child(measured_container(
-                        transcript_owner,
-                        |bounds, this: &mut DesktopApp, cx| {
-                            this.observe_transcript_bounds(bounds, cx)
-                        },
-                        |this: &mut DesktopApp, window, cx| {
-                            this.apply_pending_chat_anchor(window, cx)
-                        },
-                    ))
+                    .vertical_scrollbar(&state)
                     .child(
-                        transcript_content_column(self.core.layout.content_max_width)
-                            .gap_4()
-                            .children(
-                                self.core
-                                    .session_view
-                                    .conversation
-                                    .messages
-                                    .iter()
-                                    .chain(self.core.transient_messages.iter())
-                                    .enumerate()
-                                    .map(|(index, message)| {
-                                        self.message_view(index, message, window, cx)
-                                    }),
-                            ),
+                        gpui_kit::list(
+                            state,
+                            cx.processor(|this, index, window, cx| {
+                                this.render_chat_row(index, window, cx)
+                            }),
+                        )
+                        .w_full()
+                        .h_full()
+                        .pt(px(self.core.layout.transcript_top_inset))
+                        .pb(px(self.core.layout.tail_inset)),
                     ),
             )
             .children((!self.chat_at_bottom()).then(|| {
@@ -208,6 +191,97 @@ impl DesktopApp {
             }))
     }
 
+    fn render_chat_row(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let row = self.chat.borrow_mut().row(index, window, cx);
+        if !self.chat.borrow().demand_scheduled {
+            self.chat.borrow_mut().demand_scheduled = true;
+            let owner = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |this, cx| this.finish_chat_frame(cx));
+            });
+        }
+        let Some((row, selection, prepared)) = row else {
+            return div().into_any_element();
+        };
+        let colors = palette(cx);
+        let body = if let Some(selection) = selection {
+            #[cfg(test)]
+            let plain_selector = prepared
+                .is_none()
+                .then(|| format!("chat-plain:{}", row.message.key.0));
+            let content = if let Some(prepared) = prepared {
+                dsh_markdown::render_prepared_markdown(
+                    row.message.key.0,
+                    &prepared,
+                    self.core.layout.content_max_width,
+                    &selection,
+                    window,
+                    cx,
+                )
+            } else {
+                dsh_markdown::plain_text(row.plain().to_owned().into(), Some(&selection))
+                    .into_any_element()
+            };
+            let content = selection.wrap(content);
+            div()
+                .map(|body| {
+                    #[cfg(test)]
+                    let body = body.when_some(plain_selector, |body, selector| {
+                        body.debug_selector(move || selector)
+                    });
+                    body
+                })
+                .w_full()
+                .min_h(px(24.0))
+                .text_color(colors.text)
+                .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
+                .when(row.message.role == Role::Assistant, |body| {
+                    body.text_size(px(16.0))
+                })
+                .pb(px(4.0))
+                .when(row.message.role == Role::User, |body| {
+                    body.flex().justify_end()
+                })
+                .child(
+                    div()
+                        .when(row.message.role != Role::User, |body| body.w_full())
+                        .when(row.message.role == Role::User, |body| {
+                            body.max_w(px(525.0))
+                                .px_4()
+                                .py(px(10.0))
+                                .rounded(px(22.0))
+                                .line_height(px(metrics::BODY_LINE_HEIGHT))
+                                .bg(colors.user_bubble)
+                        })
+                        .when(row.message.role == Role::Reasoning, |body| {
+                            body.ml(px(22.0))
+                                .pl_3()
+                                .border_l_1()
+                                .border_color(colors.border)
+                                .text_sm()
+                                .text_color(colors.muted_text)
+                        })
+                        .child(content),
+                )
+                .into_any_element()
+        } else {
+            self.message_view(row.message_index, &row.message, window, cx)
+        };
+        div()
+            .id(gpui_kit::SharedString::from(format!(
+                "chat-row-{}-{}-{}",
+                row.key.message, row.key.field, row.key.start
+            )))
+            .w_full()
+            .child(transcript_content_column(self.core.layout.content_max_width).child(body))
+            .into_any_element()
+    }
+
     #[allow(
         clippy::unreachable,
         reason = "notice messages return before presentation rendering"
@@ -232,132 +306,91 @@ impl DesktopApp {
                 .into_any_element()
         } else {
             let mut presentations = self.message_presentations.borrow_mut();
-            let presentation = presentations.sync_message(
-                message.key,
-                self.core.session_view.trajectory.projection_lineage(),
-                message.revision,
-                &message.text,
-                message.role == Role::Assistant,
-            );
+            let presentation = presentations.sync_message(message.key);
             match message.role {
-                Role::User => {
-                    let selection = presentation.selection(index as u64, window, cx);
-                    div()
-                        .id(("user-message-row", index))
-                        .group(SharedString::from(format!("user-message-{index}")))
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .w_full()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .max_w(px(525.0))
-                                .px_4()
-                                .py(px(10.0))
-                                .rounded(px(22.0))
-                                .bg(colors.user_bubble)
-                                .line_height(px(metrics::BODY_LINE_HEIGHT))
-                                .child(selection.clone().wrap(dsh_markdown::plain_text(
-                                    presentation.render_text.clone(),
-                                    Some(&selection),
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .h(px(28.0))
-                                .gap(px(10.0))
-                                .child(
-                                    div()
-                                        .invisible()
-                                        .group_hover(
-                                            SharedString::from(format!("user-message-{index}")),
-                                            |time| time.visible(),
-                                        )
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(message_time_label(message)),
-                                )
-                                .child(
-                                    Clipboard::new(("copy-user", index))
-                                        .value(presentation.render_text.clone()),
-                                ),
-                        )
-                        .into_any_element()
-                }
-                Role::Assistant => {
-                    let selection = presentation.selection(index as u64, window, cx);
-                    div()
-                        .id(("assistant-message-row", index))
-                        .group(SharedString::from(format!("assistant-message-{index}")))
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .gap(px(metrics::ASSISTANT_ACTIONS_TOP_GAP))
-                        .text_color(colors.text)
-                        .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
-                        .child(selection.clone().wrap(assistant_body(
-                            message,
-                            presentation,
-                            self.core.layout.content_max_width,
-                            &selection,
-                            window,
-                            cx,
-                        )))
-                        .children((!message.pending).then(|| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .h(px(28.0))
-                                .gap(px(10.0))
-                                .child(
-                                    Clipboard::new(("copy-assistant", index))
-                                        .value(presentation.render_text.clone()),
-                                )
-                                .child(
-                                    Button::new(("good-response", index))
-                                        .icon(IconName::ThumbsUp)
-                                        .ghost()
-                                        .compact()
-                                        .when(presentation.rating() == Some(true), |button| {
-                                            button.primary()
-                                        })
-                                        .tooltip("Good response")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.rate_message(index, true, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new(("bad-response", index))
-                                        .icon(IconName::ThumbsDown)
-                                        .ghost()
-                                        .compact()
-                                        .when(presentation.rating() == Some(false), |button| {
-                                            button.danger()
-                                        })
-                                        .tooltip("Bad response")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.rate_message(index, false, cx)
-                                        })),
-                                )
-                                .child(
-                                    div()
-                                        .invisible()
-                                        .group_hover(
-                                            SharedString::from(format!(
-                                                "assistant-message-{index}"
-                                            )),
-                                            |time| time.visible(),
-                                        )
-                                        .text_xs()
-                                        .text_color(colors.muted_text)
-                                        .child(message_time_label(message)),
-                                )
-                        }))
-                        .into_any_element()
-                }
+                Role::User => div()
+                    .id(("user-message-row", index))
+                    .group(SharedString::from(format!("user-message-{index}")))
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .w_full()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("user-message-{index}")),
+                                        |time| time.visible(),
+                                    )
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(message_time_label(message)),
+                            )
+                            .child(copy_message_button("copy-user", index, message, cx)),
+                    )
+                    .into_any_element(),
+                Role::Assistant => div()
+                    .id(("assistant-message-row", index))
+                    .group(SharedString::from(format!("assistant-message-{index}")))
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap(px(metrics::ASSISTANT_ACTIONS_TOP_GAP))
+                    .text_color(colors.text)
+                    .line_height(px(metrics::MESSAGE_LINE_HEIGHT))
+                    .children((!message.pending).then(|| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .h(px(28.0))
+                            .gap(px(10.0))
+                            .child(copy_message_button("copy-assistant", index, message, cx))
+                            .child(
+                                Button::new(("good-response", index))
+                                    .icon(IconName::ThumbsUp)
+                                    .ghost()
+                                    .compact()
+                                    .when(presentation.rating() == Some(true), |button| {
+                                        button.primary()
+                                    })
+                                    .tooltip("Good response")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rate_message(index, true, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("bad-response", index))
+                                    .icon(IconName::ThumbsDown)
+                                    .ghost()
+                                    .compact()
+                                    .when(presentation.rating() == Some(false), |button| {
+                                        button.danger()
+                                    })
+                                    .tooltip("Bad response")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rate_message(index, false, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("assistant-message-{index}")),
+                                        |time| time.visible(),
+                                    )
+                                    .text_xs()
+                                    .text_color(colors.muted_text)
+                                    .child(message_time_label(message)),
+                            )
+                    }))
+                    .into_any_element(),
                 Role::Reasoning => {
                     let expanded = presentation.expanded();
                     let preview = reasoning_preview(&message.text, message.pending);
@@ -447,41 +480,15 @@ impl DesktopApp {
                                         .into_any_element()
                                 }),
                         )
-                        .when(expanded, |row| {
-                            let selection = presentation.selection(index as u64, window, cx);
-                            row.child(
-                                div()
-                                    .ml(px(22.0))
-                                    .pl_3()
-                                    .border_l_1()
-                                    .border_color(colors.border)
-                                    .text_sm()
-                                    .line_height(px(24.0))
-                                    .text_color(colors.muted_text)
-                                    .child(selection.clone().wrap(dsh_markdown::plain_text(
-                                        presentation.render_text.clone(),
-                                        Some(&selection),
-                                    ))),
-                            )
-                        })
                         .into_any_element()
                 }
                 Role::Tool => self.tool_row(index, message, presentation, cx),
                 Role::Notice => unreachable!("notice rendering is handled without presentation"),
             }
         };
-        let owner = cx.entity().downgrade();
-        let message_id = message.key;
         div()
-            .relative()
             .w_full()
-            .child(measured_container(
-                owner,
-                move |bounds, this: &mut DesktopApp, cx| {
-                    this.observe_message_bounds(message_id, bounds, cx)
-                },
-                |this: &mut DesktopApp, window, cx| this.apply_pending_chat_anchor(window, cx),
-            ))
+            .pb(px(12.0))
             .child(content)
             .into_any_element()
     }
@@ -499,7 +506,7 @@ impl DesktopApp {
             .payload
             .as_deref()
             .and_then(tool_description)
-            .or_else(|| message.text.lines().next().map(str::to_owned))
+            .or_else(|| Some(reasoning_preview(&message.text, false)))
             .unwrap_or_default();
         div()
             .id(("tool-row", index))
@@ -569,70 +576,15 @@ impl DesktopApp {
             )
             .when(presentation.expanded(), |element| {
                 element.child(
-                    div()
-                        .ml(px(22.0))
-                        .mt_1()
-                        .flex()
-                        .flex_col()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.subtle)
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .h(px(34.0))
-                                .px_3()
-                                .border_b_1()
-                                .border_color(colors.border)
-                                .text_xs()
-                                .text_color(colors.muted_text)
-                                .child(if message.pending { "Running" } else { "Done" })
-                                .child(
-                                    Button::new(("inspect-tool", index))
-                                        .icon(IconName::Inspector)
-                                        .label("Inspect")
-                                        .ghost()
-                                        .compact()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.inspect_tool(index, window, cx)
-                                        })),
-                                ),
-                        )
-                        .children(message.payload.clone().map(|payload| {
-                            detail_code_block(
-                                SharedString::from(format!("tool-payload-{}", message.key)),
-                                "Payload",
-                                pretty_json(&payload),
-                                "json",
-                                colors,
-                            )
-                        }))
-                        .child(detail_code_block(
-                            SharedString::from(format!(
-                                "tool-result-{}-{}",
-                                message.key,
-                                if message.pending {
-                                    "pending"
-                                } else {
-                                    "settled"
-                                }
-                            )),
-                            "Result",
-                            if message.pending {
-                                "Waiting for tool result…".into()
-                            } else if message.text.is_empty() {
-                                "(no output)".into()
-                            } else {
-                                message.text.clone()
-                            },
-                            tool_language(title),
-                            colors,
-                        )),
+                    Button::new(("inspect-tool", index))
+                        .icon(IconName::Inspector)
+                        .label("Inspect")
+                        .ghost()
+                        .compact()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.inspect_tool(index, window, cx);
+                        })),
                 )
             })
             .into_any_element()
@@ -648,23 +600,31 @@ fn transcript_content_column(content_max_width: f32) -> gpui_kit::Div {
         .mx_auto()
 }
 
-fn assistant_body(
+fn copy_message_button(
+    id: &'static str,
+    index: usize,
     message: &Message,
-    presentation: &MessagePresentation,
-    available_width: f32,
-    selection: &crate::platform::gpui::SelectionFrame,
-    window: &mut Window,
-    cx: &mut Context<DesktopApp>,
-) -> gpui_kit::AnyElement {
-    dsh_markdown::render_markdown(
-        message.key.0,
-        &presentation.markdown,
-        message.pending,
-        available_width,
-        selection,
-        window,
-        cx,
-    )
+    cx: &Context<DesktopApp>,
+) -> Button {
+    let key = message.key;
+    Button::new((id, index))
+        .icon(IconName::Copy)
+        .ghost()
+        .compact()
+        .tooltip("Copy message")
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if let Some(message) = this
+                .core
+                .session_view
+                .conversation
+                .messages
+                .iter()
+                .chain(this.core.transient_messages.iter())
+                .find(|message| message.key == key)
+            {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(message.text.clone()));
+            }
+        }))
 }
 
 fn tab(
@@ -726,47 +686,12 @@ fn conversation_tab_button(
 }
 
 fn tool_description(payload: &str) -> Option<String> {
+    // Header work is bounded; the complete payload remains available in the expanded rows.
+    if payload.len() > 16 * 1024 {
+        return None;
+    }
     let value: serde_json::Value = serde_json::from_str(payload).ok()?;
     value.get("description")?.as_str().map(str::to_owned)
-}
-
-fn detail_code_block(
-    id: impl Into<gpui_kit::ElementId>,
-    label: &'static str,
-    value: String,
-    language: &'static str,
-    colors: UiPalette,
-) -> gpui_kit::AnyElement {
-    let fence = if value.contains("```") { "````" } else { "```" };
-    let markdown = format!("{fence}{language}\n{value}\n{fence}");
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .border_b_1()
-        .border_color(colors.border)
-        .child(div().text_xs().text_color(colors.muted_text).child(label))
-        .child(TextView::markdown(id, markdown))
-        .into_any_element()
-}
-
-fn pretty_json(value: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(value)
-        .ok()
-        .and_then(|value| serde_json::to_string_pretty(&value).ok())
-        .unwrap_or_else(|| value.to_owned())
-}
-
-fn tool_language(title: &str) -> &'static str {
-    let title = title.to_ascii_lowercase();
-    if title.contains("shell") || title.contains("bash") || title.contains("terminal") {
-        "bash"
-    } else if title.contains("json") {
-        "json"
-    } else {
-        "text"
-    }
 }
 
 fn message_time_label(message: &Message) -> String {
@@ -804,7 +729,7 @@ fn reasoning_preview(text: &str, running: bool) -> String {
     if line.is_empty() {
         "Thinking…".into()
     } else {
-        line.to_owned()
+        line[..line.floor_char_boundary(line.len().min(512))].to_owned()
     }
 }
 
@@ -938,6 +863,139 @@ mod tests {
         assert_eq!(metrics::MESSAGE_LINE_HEIGHT, 28.0);
     }
 
+    #[gpui_kit::test]
+    fn chat_only_prepares_the_viewport(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-chat-viewport-{}",
+            kcastle_agent::SessionId::new()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut app = DesktopApp::new(startup, window, cx);
+            for id in 0..1000 {
+                app.core.transient_messages.push_back(Arc::new(Message {
+                    key: MessageId(10000 + id),
+                    revision: 0,
+                    role: Role::Assistant,
+                    text: format!("Message {id}\n\n{}", "A readable paragraph. ".repeat(40)),
+                    tool_call_id: None,
+                    title: None,
+                    payload: None,
+                    schema: None,
+                    pending: false,
+                    failed: false,
+                    started_at_ms: None,
+                    duration_ms: None,
+                    turn: 0,
+                    step: 0,
+                    request_id: None,
+                }));
+            }
+            window.blur(cx);
+            app
+        });
+        cx.simulate_resize(size(px(1180.0), px(720.0)));
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(
+                app.chat.borrow().prepared_chunks() > 0,
+                "visible content must progress beyond plain text"
+            );
+            assert!(
+                app.message_presentations.borrow().retained_messages() < 30
+                    && app.chat.borrow().retained_chunks() < 30,
+                "offscreen messages must not allocate presentations or parse Markdown"
+            );
+        });
+        let viewport = view.read_with(cx, |app, _| app.chat.borrow().list.viewport_bounds());
+        for (delta, follows) in [(200.0, false), (-100000.0, true)] {
+            cx.simulate_event(gpui_kit::ScrollWheelEvent {
+                position: viewport.center(),
+                delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.0), px(delta))),
+                ..Default::default()
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |app, _| assert_eq!(app.core.follow_chat_tail, follows));
+        }
+        view.update(cx, |app, cx| {
+            let chat = app.chat.borrow();
+            chat.list.set_follow_mode(gpui_kit::FollowMode::Normal);
+            chat.list.scroll_to(gpui_kit::ListOffset {
+                item_ix: 800,
+                offset_in_item: px(10.0),
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(app.chat.borrow().retained_chunks() < 30);
+            assert!(
+                !app.chat.borrow().selection_initialized(MessageId(10999)),
+                "old viewport must be evicted"
+            );
+            assert!(app.chat.borrow().prepared_chunks() > 0);
+        });
+        let anchor = view.read_with(cx, |app, _| app.chat.borrow().anchor());
+        cx.simulate_resize(size(px(900.0), px(720.0)));
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| match (anchor, app.chat.borrow().anchor()) {
+            (
+                crate::layout::ScrollAnchor::Block {
+                    id: a,
+                    field: af,
+                    source_offset: ao,
+                    ..
+                },
+                crate::layout::ScrollAnchor::Block {
+                    id: b,
+                    field: bf,
+                    source_offset: bo,
+                    ..
+                },
+            ) => assert_eq!((a, af, ao), (b, bf, bo)),
+            other => panic!("resize lost source anchor: {other:?}"),
+        });
+        let starts_before_huge = view.read_with(cx, |app, _| {
+            app.chat
+                .borrow()
+                .worker_starts
+                .load(std::sync::atomic::Ordering::Relaxed)
+        });
+        view.update(cx, |app, cx| {
+            let mut huge = (**app.core.transient_messages.front().unwrap()).clone();
+            huge.text = "A **long** message paragraph.\n\n".repeat(20000);
+            huge.revision += 1;
+            app.core.transient_messages = im::Vector::unit(Arc::new(huge));
+            app.chat
+                .borrow()
+                .list
+                .set_follow_mode(gpui_kit::FollowMode::Tail);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert!(app.chat.borrow().rows.len() > 1000);
+            assert!(
+                app.chat.borrow().retained_chunks() < 60,
+                "one huge message must also be virtualized"
+            );
+            assert!(
+                app.chat
+                    .borrow()
+                    .worker_starts
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    - starts_before_huge
+                    < 60,
+                "one huge message must not prepare every chunk and then evict the results"
+            );
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn assistant_text_column_matches_the_composer_inset() {
         let layout = resolve_layout(LayoutInput::default());
@@ -1010,10 +1068,10 @@ mod tests {
         cx.run_until_parked();
 
         view.read_with(cx, |app, _| {
-            let presentations = app.message_presentations.borrow();
-            assert!(presentations.selection_initialized(MessageId(901)));
-            assert!(!presentations.selection_initialized(MessageId(902)));
-            assert!(!presentations.selection_initialized(MessageId(903)));
+            let chat = app.chat.borrow();
+            assert!(chat.selection_initialized(MessageId(901)));
+            assert!(!chat.selection_initialized(MessageId(902)));
+            assert!(!chat.selection_initialized(MessageId(903)));
         });
 
         view.update(cx, |app, cx| {
@@ -1027,11 +1085,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.read_with(cx, |app, _| {
-            assert!(
-                app.message_presentations
-                    .borrow()
-                    .selection_initialized(MessageId(902))
-            );
+            assert!(app.chat.borrow().selection_initialized(MessageId(902)));
         });
 
         drop(view);

@@ -1,3 +1,5 @@
+#[cfg(test)]
+use gpui_kit::ScrollWheelEvent;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -9,8 +11,7 @@ use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{
     AppContext, Bounds, Context, Entity, FocusHandle, ListAlignment, ListOffset, ListState,
-    PathPromptOptions, Pixels, Point, ScrollHandle, ScrollWheelEvent, Subscription, Window, point,
-    px,
+    PathPromptOptions, Pixels, Point, ScrollHandle, Subscription, Window, point, px,
 };
 use kcastle_agent::{Agent, Session, SessionConfig, SessionError, SessionId, SessionInfo};
 #[cfg(test)]
@@ -35,11 +36,11 @@ use crate::domain::{
     Message, Role, RunState, ScrollIntent, Surface, TimelineMode, TrajectoryItemId,
     TrajectoryRequestKey, next_message_id, reduce,
 };
-use crate::layout::{LayoutInput, ScrollAnchor, ScrollRestore, resolve_scroll_restore};
+use crate::layout::{LayoutInput, ScrollAnchor};
 use crate::platform::NativeTitlebarController;
 use crate::platform::gpui::{
-    DeferredScrollAlignment, GpuiLayoutRuntime, MeasuredBounds, MessagePresentationStore,
-    SessionRuntime, SessionRuntimeSnapshot, SessionRuntimeStatus, run_effects,
+    ChatViewport, MessagePresentationStore, SessionRuntime, SessionRuntimeSnapshot,
+    SessionRuntimeStatus, run_effects,
 };
 use crate::project::{ProjectId, ProjectStore};
 #[cfg(test)]
@@ -225,7 +226,7 @@ pub(crate) enum SidebarSessionStatus {
 
 pub(crate) struct DesktopApp {
     pub(crate) core: AppState,
-    pub(crate) layout_runtime: GpuiLayoutRuntime,
+    pub(crate) chat: RefCell<ChatViewport>,
     pub(crate) message_presentations: RefCell<MessagePresentationStore>,
     pub(crate) selected_runtime: Entity<SessionRuntime>,
     project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
@@ -236,8 +237,6 @@ pub(crate) struct DesktopApp {
     pub(crate) modal: Option<Modal>,
     pub(crate) modal_focus: FocusHandle,
     pub(crate) composer_menu_focus: FocusHandle,
-    pub(crate) scroll: ScrollHandle,
-    chat_tail_alignment: DeferredScrollAlignment,
     pub(crate) trajectory_scroll: ListState,
     pub(crate) trajectory_scroll_restore: Cell<Option<ListOffset>>,
     pub(crate) trajectory_follow_tail: Cell<bool>,
@@ -441,7 +440,7 @@ impl DesktopApp {
         });
         let app = Self {
             core,
-            layout_runtime: GpuiLayoutRuntime::default(),
+            chat: RefCell::new(ChatViewport::default()),
             message_presentations: RefCell::new(MessagePresentationStore::default()),
             selected_runtime: runtime,
             project_runtimes,
@@ -452,8 +451,6 @@ impl DesktopApp {
             modal: None,
             modal_focus: cx.focus_handle(),
             composer_menu_focus: cx.focus_handle(),
-            scroll: ScrollHandle::new(),
-            chat_tail_alignment: DeferredScrollAlignment::default(),
             trajectory_scroll,
             trajectory_scroll_restore: Cell::new(None),
             trajectory_follow_tail,
@@ -1184,13 +1181,9 @@ impl DesktopApp {
 
     fn transition(&mut self, action: Action) -> Vec<Effect> {
         let previous_generation = self.core.layout_generation;
-        let anchor = self
-            .layout_runtime
-            .capture_chat_anchor(previous_generation, self.core.follow_chat_tail);
         let mut effects = reduce(&mut self.core, action);
         if self.core.layout_generation != previous_generation {
-            self.layout_runtime.pending_chat_anchor = Some((self.core.layout_generation, anchor));
-            self.layout_runtime.restore_scheduled = false;
+            self.chat.borrow().list.remeasure();
             effects.retain(|effect| !matches!(effect, Effect::ApplyChatTail));
         }
         effects
@@ -1199,7 +1192,7 @@ impl DesktopApp {
     pub(crate) fn dispatch_local(&mut self, action: Action, cx: &mut Context<Self>) {
         for effect in self.transition(action) {
             let Effect::ApplyChatTail = effect;
-            self.layout_runtime.request_tail_realign();
+            self.chat.borrow().list.scroll_to_end();
         }
         cx.notify();
     }
@@ -1271,93 +1264,6 @@ impl DesktopApp {
         }
     }
 
-    pub(crate) fn observe_transcript_bounds(
-        &mut self,
-        bounds: MeasuredBounds,
-        _cx: &mut Context<Self>,
-    ) -> bool {
-        self.layout_runtime
-            .observe_transcript(self.core.layout_generation, bounds);
-        let restore_anchor = self.can_restore_pending_chat_anchor();
-        let realign_tail =
-            self.core.follow_chat_tail && self.layout_runtime.schedule_tail_realign();
-        restore_anchor || realign_tail
-    }
-
-    pub(crate) fn observe_message_bounds(
-        &mut self,
-        id: crate::domain::MessageId,
-        bounds: MeasuredBounds,
-        _cx: &mut Context<Self>,
-    ) -> bool {
-        let layout_changed =
-            self.layout_runtime
-                .observe_message(self.core.layout_generation, id, bounds);
-        if self.core.follow_chat_tail && layout_changed {
-            self.layout_runtime.request_tail_realign();
-        }
-        let restore_anchor = self.can_restore_pending_chat_anchor();
-        let realign_tail =
-            self.core.follow_chat_tail && self.layout_runtime.schedule_tail_realign();
-        restore_anchor || realign_tail
-    }
-
-    fn can_restore_pending_chat_anchor(&mut self) -> bool {
-        if self.layout_runtime.restore_scheduled {
-            return false;
-        }
-        let Some((generation, anchor)) = self.layout_runtime.pending_chat_anchor else {
-            return false;
-        };
-        let can_restore =
-            match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
-                ScrollRestore::Tail => self
-                    .layout_runtime
-                    .has_current_transcript(self.core.layout_generation),
-                ScrollRestore::Message { .. } => self
-                    .layout_runtime
-                    .restored_offset_y(generation, anchor, f32::from(self.scroll.offset().y))
-                    .is_some(),
-                ScrollRestore::IgnoreStale => true,
-            };
-        if can_restore {
-            self.layout_runtime.restore_scheduled = true;
-        }
-        can_restore
-    }
-
-    pub(crate) fn apply_pending_chat_anchor(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.layout_runtime.restore_scheduled = false;
-        if let Some((generation, anchor)) = self.layout_runtime.pending_chat_anchor {
-            match resolve_scroll_restore(generation, self.core.layout_generation, anchor) {
-                ScrollRestore::Tail => {
-                    self.schedule_chat_tail(window);
-                    self.layout_runtime.pending_chat_anchor = None;
-                }
-                ScrollRestore::Message { .. } => {
-                    if let Some(offset_y) = self.layout_runtime.restored_offset_y(
-                        generation,
-                        anchor,
-                        f32::from(self.scroll.offset().y),
-                    ) {
-                        let offset = self.scroll.offset();
-                        self.scroll.set_offset(point(offset.x, px(offset_y)));
-                        self.layout_runtime.pending_chat_anchor = None;
-                    }
-                }
-                ScrollRestore::IgnoreStale => self.layout_runtime.pending_chat_anchor = None,
-            }
-        }
-        if self.layout_runtime.take_tail_realign() && self.core.follow_chat_tail {
-            self.schedule_chat_tail(window);
-        }
-        cx.notify();
-    }
-
     pub(crate) fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.selection_pending() {
             return;
@@ -1410,7 +1316,10 @@ impl DesktopApp {
             .runtime_location(&self.selected_runtime)
             .map(|(project_id, session_id)| presentation_namespace(&project_id, &session_id))
             .unwrap_or_else(|| "unregistered-session".to_owned());
-        self.message_presentations.get_mut().activate(namespace);
+        self.message_presentations
+            .get_mut()
+            .activate(namespace.clone());
+        self.chat.get_mut().activate(namespace);
     }
 
     pub(crate) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1435,6 +1344,9 @@ impl DesktopApp {
             window,
             cx,
         );
+        if trajectory {
+            self.chat.borrow_mut().release();
+        }
         self.restore_current_view_state(cx);
         cx.notify();
     }
@@ -1481,9 +1393,7 @@ impl DesktopApp {
                 .visible_range
                 .map(SavedTimelineRange::capture);
         } else {
-            state.chat_anchor = self
-                .layout_runtime
-                .capture_chat_anchor(self.core.layout_generation, self.core.follow_chat_tail);
+            state.chat_anchor = self.chat.borrow().anchor();
         }
     }
 
@@ -1543,9 +1453,7 @@ impl DesktopApp {
                 details_tab_history: state.details_tab_history,
                 follow_chat_tail: matches!(state.chat_anchor, ScrollAnchor::Tail),
             });
-            self.layout_runtime.pending_chat_anchor =
-                Some((self.core.layout_generation, state.chat_anchor));
-            self.layout_runtime.restore_scheduled = false;
+            self.chat.borrow_mut().pending_anchor = Some(state.chat_anchor);
         }
     }
 
@@ -1678,7 +1586,7 @@ impl DesktopApp {
             .toggle_expanded(message_id)
             .is_some_and(|expanded| expanded && self.core.follow_chat_tail)
         {
-            self.layout_runtime.request_tail_realign();
+            self.chat.borrow().list.scroll_to_end();
         }
         cx.notify();
     }
@@ -2743,47 +2651,19 @@ impl DesktopApp {
     }
 
     pub(crate) fn chat_at_bottom(&self) -> bool {
-        within_bottom_threshold(self.scroll.max_offset().y, self.scroll.offset().y)
+        let chat = self.chat.borrow();
+        chat.list.is_following_tail() || chat.list.is_scrolled_to_end() == Some(true)
     }
 
-    fn schedule_chat_tail(&mut self, window: &mut Window) {
-        let leading_inset = px(self.core.layout.transcript_top_inset);
-        let trailing_inset = px(self.core.layout.tail_inset);
-        let short_transcript_max = leading_inset + trailing_inset + px(0.5);
-        self.chat_tail_alignment.schedule_vertical_end(
-            self.scroll.clone(),
-            short_transcript_max,
-            window,
-        );
+    fn schedule_chat_tail(&mut self, _window: &mut Window) {
+        self.chat
+            .borrow()
+            .list
+            .set_follow_mode(gpui_kit::FollowMode::Tail);
     }
 
     pub(crate) fn request_chat_tail(&mut self, window: &mut Window) {
-        self.layout_runtime.request_tail_realign();
         self.schedule_chat_tail(window);
-    }
-
-    pub(crate) fn handle_chat_scroll(
-        &mut self,
-        event: &ScrollWheelEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let delta_y = event.delta.pixel_delta(window.line_height()).y;
-        let action = if delta_y > px(0.0) && self.core.follow_chat_tail {
-            Some(Action::Scroll(ScrollIntent::Away))
-        } else if delta_y < px(0.0) {
-            Some(Action::Scroll(ScrollIntent::Toward {
-                at_tail: self.chat_at_bottom(),
-            }))
-        } else {
-            None
-        };
-        if let Some(action) = action {
-            self.dispatch(action, window, cx);
-            if !self.core.follow_chat_tail {
-                self.chat_tail_alignment.cancel();
-            }
-        }
     }
 
     pub(crate) fn scroll_chat_to_bottom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2848,6 +2728,7 @@ fn safe_file_name(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn within_bottom_threshold(max_offset: gpui_kit::Pixels, offset_y: gpui_kit::Pixels) -> bool {
     max_offset + offset_y <= px(24.0)
 }
@@ -3214,20 +3095,6 @@ mod tests {
         assert_eq!(
             active_model_index(&models, Some("deepseek-official/deepseek-test")),
             Some(1)
-        );
-    }
-
-    #[test]
-    fn assistant_messages_use_the_semantic_markdown_renderer() {
-        let message = message(Role::Assistant, "## Result\n\nbody".into());
-        let mut presentations = MessagePresentationStore::default();
-        presentations.activate("test-session");
-        assert!(
-            !presentations
-                .sync_message(message.key, 1, message.revision, &message.text, true)
-                .markdown
-                .tail_blocks()
-                .is_empty()
         );
     }
 

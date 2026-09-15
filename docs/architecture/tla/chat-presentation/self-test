@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Sourced by ../check in its isolated run directory.
+for case in stale:CurrentOnly keep-offscreen:CurrentOnly parallel:BoundedWorker none:NoReady; do
+    fault=${case%:*}
+    invariant=${case#*:}
+    name="probe-$fault"
+    cat > "$name.cfg" <<CFG
+CONSTANT Fault = "$fault"
+SPECIFICATION Spec
+INVARIANT $invariant
+CFG
+    result=0
+    run_tlc "$name" > "$name.log" 2>&1 || result=$?
+    if [[ $result -ne 12 ]] || ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
+        cat "$name.log"
+        echo "FAIL: expected $invariant counterexample for $fault" >&2
+        exit 1
+    fi
+    echo "PASS: $fault produces $invariant counterexample"
+done
