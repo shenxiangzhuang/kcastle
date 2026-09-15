@@ -23,7 +23,6 @@ pub(crate) struct UiPalette {
     pub(crate) markdown_text: Hsla,
     pub(crate) markdown_inline_code: Hsla,
     pub(crate) markdown_code_block: Hsla,
-    pub(crate) markdown_code_banner: Hsla,
     pub(crate) markdown_link: Hsla,
     pub(crate) markdown_quote: Hsla,
 }
@@ -107,15 +106,13 @@ pub(crate) fn palette(cx: &App) -> UiPalette {
         markdown_text: markdown_text_color(theme.is_dark()),
         markdown_inline_code: rgb(0xebeef2).into(),
         markdown_code_block: rgb(0xf4f4f4).into(),
-        markdown_code_banner: rgb(0xf4f4f4).into(),
         markdown_link: rgb(0x4176e6).into(),
         markdown_quote: rgb(0xadb2b8).into(),
     };
     if theme.is_dark() {
         palette.user_bubble = rgb(0x2c2c2e).into();
         palette.markdown_inline_code = rgb(0x2c2c2e).into();
-        palette.markdown_code_block = rgb(0x202020).into();
-        palette.markdown_code_banner = rgb(0x202020).into();
+        palette.markdown_code_block = rgb(0x202326).into();
         palette.markdown_link = rgb(0x679efe).into();
         palette.markdown_quote = rgb(0x81858c).into();
     }
@@ -141,41 +138,42 @@ fn code_highlight_theme(dark: bool) -> Arc<HighlightTheme> {
         "Kcastle Markdown Light"
     }
     .into();
+    theme.style.editor_foreground = Some(rgb(if dark { 0xe2e4e7 } else { 0x1c2024 }).into());
     let syntax = serde_json::from_value(if dark {
         serde_json::json!({
-            "attribute": { "color": "#79C0FF" },
-            "boolean": { "color": "#E0A05B" },
-            "comment": { "color": "#8B949E" },
-            "comment.doc": { "color": "#8B949E" },
-            "constant": { "color": "#E0A05B" },
-            "constructor": { "color": "#D2A8FF" },
-            "function": { "color": "#7AA7FF" },
-            "keyword": { "color": "#D783E7" },
-            "number": { "color": "#E0A05B" },
-            "property": { "color": "#79C0FF" },
-            "string": { "color": "#76C893" },
-            "string.escape": { "color": "#76C893" },
-            "string.regex": { "color": "#76C893" },
-            "type": { "color": "#D2A8FF" },
-            "variable.special": { "color": "#D783E7" }
+            "attribute": { "color": "#83BDD5" },
+            "boolean": { "color": "#F0A06B" },
+            "comment": { "color": "#9BA1AA" },
+            "comment.doc": { "color": "#9BA1AA" },
+            "constant": { "color": "#F0A06B" },
+            "constructor": { "color": "#B69AF4" },
+            "function": { "color": "#B69AF4" },
+            "keyword": { "color": "#E080AD" },
+            "number": { "color": "#F0A06B" },
+            "property": { "color": "#83BDD5" },
+            "string": { "color": "#82BD98" },
+            "string.escape": { "color": "#82BD98" },
+            "string.regex": { "color": "#82BD98" },
+            "type": { "color": "#B69AF4" },
+            "variable.special": { "color": "#E080AD" }
         })
     } else {
         serde_json::json!({
-            "attribute": { "color": "#0F6CBD" },
-            "boolean": { "color": "#A05A00" },
-            "comment": { "color": "#6B7280" },
-            "comment.doc": { "color": "#6B7280" },
-            "constant": { "color": "#A05A00" },
-            "constructor": { "color": "#7357C0" },
-            "function": { "color": "#3478F6" },
-            "keyword": { "color": "#B31DAD" },
-            "number": { "color": "#A05A00" },
-            "property": { "color": "#0F6CBD" },
-            "string": { "color": "#16803B" },
-            "string.escape": { "color": "#16803B" },
-            "string.regex": { "color": "#16803B" },
-            "type": { "color": "#7357C0" },
-            "variable.special": { "color": "#B31DAD" }
+            "attribute": { "color": "#245C78" },
+            "boolean": { "color": "#AF4317" },
+            "comment": { "color": "#666B73" },
+            "comment.doc": { "color": "#666B73" },
+            "constant": { "color": "#AF4317" },
+            "constructor": { "color": "#6639BA" },
+            "function": { "color": "#6639BA" },
+            "keyword": { "color": "#B23A73" },
+            "number": { "color": "#AF4317" },
+            "property": { "color": "#245C78" },
+            "string": { "color": "#26734D" },
+            "string.escape": { "color": "#26734D" },
+            "string.regex": { "color": "#26734D" },
+            "type": { "color": "#6639BA" },
+            "variable.special": { "color": "#B23A73" }
         })
     });
     let Ok(syntax) = syntax else {
@@ -239,15 +237,15 @@ mod tests {
 
         assert_eq!(
             theme.style("keyword").and_then(|style| style.color),
-            Some(rgb(0xb31dad).into())
+            Some(rgb(0xb23a73).into())
         );
         assert_eq!(
             theme.style("function").and_then(|style| style.color),
-            Some(rgb(0x3478f6).into())
+            Some(rgb(0x6639ba).into())
         );
         assert_eq!(
             theme.style("number").and_then(|style| style.color),
-            Some(rgb(0xa05a00).into())
+            Some(rgb(0xaf4317).into())
         );
     }
 
