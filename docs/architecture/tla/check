@@ -96,7 +96,7 @@ for model_dir in "${models[@]}"; do
         if [[ "$mode" == check ]]; then
             run_tlc "$module" 2>&1 | tee check.log
             # Reject an incomplete tool run even if its exit code was zero.
-            rg -Fq 'Model checking completed. No error has been found.' check.log
+            grep -Fq 'Model checking completed. No error has been found.' check.log
         else
             source "$model_dir/self-test"
         fi

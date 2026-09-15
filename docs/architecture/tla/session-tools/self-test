@@ -16,7 +16,7 @@ EOF
     # TLC exit 12 is an invariant violation. Parse/runtime errors must fail
     # this self-test, as must a mutation whose expected invariant still holds.
     if [[ $result -ne 12 ]] ||
-       ! rg -Fq "Invariant $invariant is violated." "$name.log"; then
+       ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
         cat "$name.log"
         echo "FAIL: $name did not produce the expected $invariant violation" >&2
         exit 1
@@ -47,7 +47,7 @@ EOF
 result=0
 run_tlc no-fairness > no-fairness.log 2>&1 || result=$?
 if [[ $result -ne 13 ]] ||
-   ! rg -Fq 'Temporal properties were violated.' no-fairness.log; then
+   ! grep -Fq 'Temporal properties were violated.' no-fairness.log; then
     cat no-fairness.log
     echo "FAIL: removing fairness did not produce the expected liveness violation" >&2
     exit 1

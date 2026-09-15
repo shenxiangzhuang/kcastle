@@ -33,7 +33,7 @@ and invocation under the ignored `.local/` directory.
 ## Run
 
 Assume Java 11+ is already available in the environment (CI uses Java 21).
-Bash, `curl`, `shasum`, and `rg` are also required; `just` is optional.
+Bash, `curl`, `shasum`, and `grep` are also required; `just` is optional.
 Run these commands from the repository root:
 
 ```sh
