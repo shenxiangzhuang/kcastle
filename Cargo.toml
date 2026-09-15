@@ -41,3 +41,8 @@ codegen-units = 1
 lto = "thin"
 opt-level = 3
 strip = "symbols"
+
+# Local RaTeX 0.1.14 font-memory fixes; see vendor/README.md.
+[patch.crates-io]
+ratex-font-loader = { path = "vendor/ratex-font-loader" }
+ratex-unicode-font = { path = "vendor/ratex-unicode-font" }

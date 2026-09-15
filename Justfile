@@ -25,6 +25,7 @@ clippy:
 # Run all workspace tests.
 test:
     cargo test --workspace --locked
+    cargo test --locked -p ratex-font-loader -p ratex-unicode-font
 
 # Run the focused agent test suite.
 test-agent:
