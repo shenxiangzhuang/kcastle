@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -18,18 +18,38 @@ const CLOCK_PATH: &str = "icons/clock.svg";
 static GENERATED_ASSETS: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
 static NEXT_GENERATED_ASSET: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn register_generated_asset(bytes: Vec<u8>) -> SharedString {
+#[derive(Debug)]
+pub(crate) struct GeneratedAsset {
+    pub(crate) path: SharedString,
+    pub(crate) bytes: usize,
+}
+
+impl Drop for GeneratedAsset {
+    fn drop(&mut self) {
+        GENERATED_ASSETS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(self.path.as_ref());
+    }
+}
+
+pub(crate) fn register_generated_asset(bytes: Vec<u8>) -> Arc<GeneratedAsset> {
     let path = format!(
         "generated/{}.svg",
         NEXT_GENERATED_ASSET.fetch_add(1, Ordering::Relaxed)
     );
+    let len = bytes.len();
     GENERATED_ASSETS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(path.clone())
         .or_insert(bytes);
-    path.into()
+    Arc::new(GeneratedAsset {
+        path: path.into(),
+        bytes: len,
+    })
 }
 
 pub(crate) struct DesktopAssets;
@@ -102,5 +122,20 @@ impl IconNamed for DesktopIconName {
             Self::SquarePen => SQUARE_PEN_PATH,
         }
         .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generated_asset_lives_only_as_long_as_its_presentation() {
+        let asset = register_generated_asset(b"<svg/>".to_vec());
+        let path = asset.path.clone();
+        let frame = asset.clone();
+        drop(asset);
+        assert!(DesktopAssets.load(&path).unwrap().is_some());
+        drop(frame);
+        assert!(DesktopAssets.load(&path).ok().flatten().is_none());
     }
 }

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     ops::Range,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::platform::gpui::{SelectionFragment, SelectionFrame};
@@ -15,12 +18,131 @@ use gpui_kit::{
 };
 use markdown::mdast::Node;
 
-use crate::assets::register_generated_asset;
+use crate::assets::{GeneratedAsset, register_generated_asset};
 use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
 use crate::ui_theme::{UiPalette, markdown_highlight_theme, metrics, palette};
+use gpui_kit::component::{
+    highlighter::{HighlightTheme, SyntaxHighlighter},
+    input::Rope,
+};
 
 const CODE_FONT_FAMILY: &str = ".SF NS Mono";
+const TABLE_FONT_SIZE: f32 = 15.0;
+
+type CodeStyles = HashMap<(String, String), Vec<(Range<usize>, HighlightStyle)>>;
+
+/// Only source data crosses the worker boundary; no GPUI entities, selections or layouts do.
+#[derive(Debug)]
+pub(crate) struct PreparedMarkdown {
+    state: StreamingMarkdownState,
+    code: CodeStyles,
+    math: HashMap<(String, bool, u32), Result<RenderedMath, String>>,
+}
+
+impl PreparedMarkdown {
+    pub(crate) fn bytes(&self) -> usize {
+        self.state.source().len() * 8
+            + self
+                .code
+                .iter()
+                .map(|((language, code), styles)| {
+                    language.len()
+                        + code.len()
+                        + styles.len() * std::mem::size_of::<(Range<usize>, HighlightStyle)>()
+                })
+                .sum::<usize>()
+            + self
+                .math
+                .values()
+                .filter_map(|value| value.as_ref().ok())
+                .map(|value| value.asset.bytes)
+                .sum::<usize>()
+    }
+}
+
+pub(crate) fn prepare_markdown(
+    source: &str,
+    theme: &HighlightTheme,
+    cancelled: &AtomicBool,
+) -> Option<PreparedMarkdown> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut state = StreamingMarkdownState::default();
+    state.update(source);
+    let mut code = HashMap::new();
+    let mut math = HashMap::new();
+    let mut nodes = state
+        .frozen()
+        .iter()
+        .chain(state.tail_blocks())
+        .map(|block| (&block.node, 16.0_f32))
+        .collect::<Vec<_>>();
+    while let Some((node, font_size)) = nodes.pop() {
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        match node {
+            Node::Code(block) => {
+                let language = block.lang.as_deref().unwrap_or_default();
+                let mut highlighter = SyntaxHighlighter::new(language);
+                if cancelled.load(Ordering::Relaxed) {
+                    return None;
+                }
+                if highlighter.update(None, &Rope::from(block.value.as_str()), None) {
+                    code.insert(
+                        (language.to_owned(), block.value.clone()),
+                        highlighter.styles(&(0..block.value.len()), theme),
+                    );
+                }
+            }
+            Node::Math(block) => {
+                math.insert(
+                    (block.value.clone(), true, 20.0_f32.to_bits()),
+                    prepare_math_at_size(&block.value, true, 20.0).and_then(render_prepared_math),
+                );
+            }
+            Node::InlineMath(block) => {
+                math.insert(
+                    (block.value.clone(), false, font_size.to_bits()),
+                    prepare_math_at_size(&block.value, false, font_size)
+                        .and_then(render_prepared_math),
+                );
+            }
+            _ => {}
+        }
+        let font_size = match node {
+            Node::Heading(heading) => heading_style(heading.depth).0,
+            Node::TableCell(_) => TABLE_FONT_SIZE,
+            _ => font_size,
+        };
+        if let Some(children) = node.children() {
+            nodes.extend(children.iter().map(|child| (child, font_size)));
+        }
+    }
+    Some(PreparedMarkdown { state, code, math })
+}
+
+pub(crate) fn render_prepared_markdown(
+    message_key: u64,
+    prepared: &PreparedMarkdown,
+    available_width: f32,
+    selection: &SelectionFrame,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    render_markdown_inner(
+        message_key,
+        &prepared.state,
+        false,
+        available_width,
+        selection,
+        Some(prepared),
+        window,
+        cx,
+    )
+}
 
 pub(crate) fn render_markdown(
     message_key: u64,
@@ -28,6 +150,29 @@ pub(crate) fn render_markdown(
     streaming: bool,
     available_width: f32,
     selection: &SelectionFrame,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    render_markdown_inner(
+        message_key,
+        state,
+        streaming,
+        available_width,
+        selection,
+        None,
+        window,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_markdown_inner(
+    message_key: u64,
+    state: &StreamingMarkdownState,
+    streaming: bool,
+    available_width: f32,
+    selection: &SelectionFrame,
+    prepared: Option<&PreparedMarkdown>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -80,6 +225,7 @@ pub(crate) fn render_markdown(
             colors,
             available_width,
             selection: Some(selection),
+            prepared,
         };
         selection.separate("\n\n");
         root = root.child(
@@ -103,6 +249,7 @@ struct BlockContext<'a> {
     colors: UiPalette,
     available_width: f32,
     selection: Option<&'a SelectionFrame>,
+    prepared: Option<&'a PreparedMarkdown>,
 }
 
 fn render_node(
@@ -303,7 +450,7 @@ fn render_table(
     context: &BlockContext<'_>,
     _path: &str,
     window: &mut Window,
-    _cx: &mut App,
+    cx: &mut App,
 ) -> AnyElement {
     let columns = table
         .children
@@ -366,7 +513,7 @@ fn render_table(
                     .when(cell_index + 1 == row.children.len(), |element| {
                         element.pr(px(0.0))
                     })
-                    .text_size(px(15.0))
+                    .text_size(px(TABLE_FONT_SIZE))
                     .line_height(px(25.0))
                     .font_weight(if row_index == 0 {
                         FontWeight::MEDIUM
@@ -375,7 +522,7 @@ fn render_table(
                     })
                     .child(inline_block(
                         &cell.children,
-                        15.0,
+                        TABLE_FONT_SIZE,
                         25.0,
                         if row_index == 0 {
                             FontWeight::MEDIUM
@@ -384,7 +531,7 @@ fn render_table(
                         },
                         context,
                         window,
-                        _cx,
+                        cx,
                     )),
             );
         }
@@ -436,7 +583,13 @@ fn render_code_block(
         );
 
     let highlight_theme = markdown_highlight_theme(cx.theme().is_dark());
-    let highlights = if !context.streaming {
+    let highlights = if let Some(prepared) = context.prepared {
+        prepared
+            .code
+            .get(&(language.to_owned(), code.to_owned()))
+            .cloned()
+            .unwrap_or_default()
+    } else if !context.streaming {
         context
             .selection
             .map(|selection| {
@@ -597,7 +750,7 @@ fn contains_inline_math(nodes: &[Node]) -> bool {
 
 #[derive(Clone, Debug)]
 struct RenderedMath {
-    asset: SharedString,
+    asset: Arc<GeneratedAsset>,
     width: f32,
     height: f32,
     baseline: f32,
@@ -655,7 +808,18 @@ fn render_math(
     let font_size = inline_text_metrics
         .map(|(_, _, font_size)| font_size)
         .unwrap_or(20.0);
-    let requested = cached_math(source, display, font_size, window, cx).ok()?;
+    let requested = if let Some(prepared) = context.prepared {
+        MathRequest::Ready(
+            prepared
+                .math
+                .get(&(source.to_owned(), display, font_size.to_bits()))?
+                .as_ref()
+                .ok()?
+                .clone(),
+        )
+    } else {
+        cached_math(source, display, font_size, window, cx).ok()?
+    };
     let metrics = match &requested {
         MathRequest::Pending(metrics) => metrics.clone(),
         MathRequest::Ready(rendered) => rendered.metrics(),
@@ -669,7 +833,7 @@ fn render_math(
     let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
     let formula = match requested {
         MathRequest::Ready(rendered) => svg()
-            .path(rendered.asset)
+            .path(rendered.asset.path.clone())
             .flex_none()
             .w(px(width))
             .h(px(rendered.height))
@@ -1555,6 +1719,7 @@ mod tests {
                 colors: test_palette(),
                 available_width,
                 selection: Some(&selection),
+                prepared: None,
             };
             div()
                 .size_full()
@@ -1579,6 +1744,7 @@ mod tests {
     struct MarkdownSelectionHarness {
         source: String,
         streaming: bool,
+        prepared: Option<super::PreparedMarkdown>,
         markdown: crate::streaming_markdown::StreamingMarkdownState,
         selection: crate::platform::gpui::MessageSelection,
         frame: Option<crate::platform::gpui::SelectionFrame>,
@@ -1588,15 +1754,26 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.markdown.update(&self.source);
             let selection = self.selection.frame(0);
-            let body = super::render_markdown(
-                0,
-                &self.markdown,
-                self.streaming,
-                f32::from(window.viewport_size().width),
-                &selection,
-                window,
-                cx,
-            );
+            let body = if let Some(prepared) = &self.prepared {
+                super::render_prepared_markdown(
+                    0,
+                    prepared,
+                    f32::from(window.viewport_size().width),
+                    &selection,
+                    window,
+                    cx,
+                )
+            } else {
+                super::render_markdown(
+                    0,
+                    &self.markdown,
+                    self.streaming,
+                    f32::from(window.viewport_size().width),
+                    &selection,
+                    window,
+                    cx,
+                )
+            };
             self.frame = Some(selection.clone());
             div()
                 .size_full()
@@ -1616,6 +1793,7 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| MarkdownSelectionHarness {
             source: source.to_owned(),
             streaming: false,
+            prepared: None,
             markdown: Default::default(),
             selection: crate::platform::gpui::MessageSelection::new(window, cx),
             frame: None,
@@ -1656,6 +1834,65 @@ mod tests {
         );
         cx.run_until_parked();
         cx.update(gpui_kit::base::TextSelection::selected_text)
+    }
+
+    #[gpui_kit::test]
+    fn prepared_table_math_uses_cell_typography(cx: &mut TestAppContext) {
+        let source = "| Step | Cost |
+| --- | --- |
+| Total | **$\\sum_t O(t^2) = O(T^3)$** |";
+        let (view, cx) = markdown_selection_harness(source, cx);
+        let prepared = super::prepare_markdown(
+            source,
+            crate::ui_theme::markdown_highlight_theme(false),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        view.update(cx, |view, cx| {
+            view.prepared = Some(prepared);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(r"math:\sum_t O(t^2) = O(T^3)").is_some(),
+            "prepared formulas in table cells must render as SVG"
+        );
+        assert!(
+            cx.debug_bounds(r"math-fallback:\sum_t O(t^2) = O(T^3)")
+                .is_none()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn prepared_markdown_preserves_code_math_and_selection(cx: &mut TestAppContext) {
+        let source = "Start **bold** $x^2$\n\n```rust\nlet x = 42;\n```\n\nEnd";
+        let (view, cx) = markdown_selection_harness(source, cx);
+        let prepared = super::prepare_markdown(
+            source,
+            crate::ui_theme::markdown_highlight_theme(false),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(prepared.code.values().any(|styles| !styles.is_empty()));
+        assert!(prepared.math.values().all(Result::is_ok));
+        assert_eq!(prepared.math.len(), 1);
+        assert!(
+            super::prepare_markdown(
+                source,
+                crate::ui_theme::markdown_highlight_theme(false),
+                &std::sync::atomic::AtomicBool::new(true)
+            )
+            .is_none()
+        );
+        view.update(cx, |view, cx| {
+            view.prepared = Some(prepared);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            select_markdown(&view, "Start", "End", cx),
+            "Start bold $x^2$\n\nlet x = 42;\n\nEnd"
+        );
     }
 
     #[gpui_kit::test]
@@ -1794,6 +2031,7 @@ mod tests {
                 colors: test_palette(),
                 available_width: f32::from(window.viewport_size().width),
                 selection: None,
+                prepared: None,
             };
             div()
                 .size_full()
@@ -1880,7 +2118,7 @@ mod tests {
     fn latex_is_rendered_to_a_nonempty_embedded_svg() {
         let rendered = build_math(r"\frac{-b \pm \sqrt{b^2-4ac}}{2a}", true).unwrap();
         let asset = DesktopAssets
-            .load(rendered.asset.as_ref())
+            .load(rendered.asset.path.as_ref())
             .unwrap()
             .unwrap();
 
@@ -1933,7 +2171,7 @@ mod tests {
                     "{source}"
                 );
                 let asset = DesktopAssets
-                    .load(rendered.asset.as_ref())
+                    .load(rendered.asset.path.as_ref())
                     .unwrap()
                     .unwrap();
                 assert!(asset.starts_with(b"<svg "), "{source}");
