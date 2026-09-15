@@ -5826,8 +5826,6 @@ dependencies = [
 [[package]]
 name = "ratex-font-loader"
 version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6542b55c6273b2ca3eb66021da061dfc84bc8303b434e1332218b63728742b7e"
 dependencies = [
  "ab_glyph",
  "ratex-font",
@@ -5913,8 +5911,6 @@ dependencies = [
 [[package]]
 name = "ratex-unicode-font"
 version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c460464b7fba27343b2b391179ac6c86fcffac5116455158e2b08ce80866fd8"
 dependencies = [
  "fontdb",
  "system-fonts",
