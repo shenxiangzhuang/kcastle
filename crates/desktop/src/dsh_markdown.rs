@@ -27,7 +27,6 @@ use gpui_kit::component::{
     input::Rope,
 };
 
-const CODE_FONT_FAMILY: &str = ".SF NS Mono";
 const TABLE_FONT_SIZE: f32 = 15.0;
 
 type CodeStyles = HashMap<(String, String), Vec<(Range<usize>, HighlightStyle)>>;
@@ -571,12 +570,11 @@ fn render_code_block(
                 .justify_between()
                 .w_full()
                 .px(px(16.0))
-                .py(px(10.0))
-                .bg(context.colors.markdown_code_banner)
+                .py(px(8.0))
                 .border_b_1()
                 .border_color(context.colors.border)
                 .text_color(context.colors.muted_text)
-                .text_size(px(16.0))
+                .text_size(px(12.0))
                 .line_height(px(20.0))
                 .child(language_label)
                 .child(Clipboard::new(clipboard_id).value(code.to_owned())),
@@ -605,10 +603,15 @@ fn render_code_block(
                 .min_w_full()
                 .p_4()
                 .whitespace_nowrap()
-                .font_family(CODE_FONT_FAMILY)
-                .text_color(context.colors.markdown_text)
-                .text_size(px(16.0))
-                .line_height(px(24.0))
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(
+                    highlight_theme
+                        .style
+                        .editor_foreground
+                        .unwrap_or(context.colors.markdown_text),
+                )
+                .text_size(px(14.0))
+                .line_height(px(22.0))
                 .child(
                     InlineText::new(InlineOutput {
                         text: code.to_owned(),
@@ -1670,7 +1673,6 @@ mod tests {
             markdown_text: color,
             markdown_inline_code: color,
             markdown_code_block: color,
-            markdown_code_banner: color,
             markdown_link: color,
             markdown_quote: color,
         }
@@ -1802,6 +1804,36 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui_kit::test]
+    fn code_block_background_has_four_uncovered_rounded_corners(cx: &mut TestAppContext) {
+        let (_view, cx) = markdown_selection_harness("```rust\nlet value = 42;\n```", cx);
+        let backgrounds = cx.update(|window, cx| {
+            let background = crate::ui_theme::palette(cx).markdown_code_block.into();
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == background)
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            backgrounds.len(),
+            1,
+            "a header fill must not cover the outer corners"
+        );
+        let corners = backgrounds[0].corner_radii;
+        for radius in [
+            corners.top_left,
+            corners.top_right,
+            corners.bottom_left,
+            corners.bottom_right,
+        ] {
+            assert!(
+                radius > gpui_kit::ScaledPixels::default(),
+                "all four code block corners must be rounded"
+            );
+        }
     }
 
     fn select_markdown(
