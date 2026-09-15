@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+shopt -s nullglob
+
+tla_dir=$(cd "$(dirname "$0")" && pwd)
+mode=${1:-check}
+selection=${2:-all}
+if [[ $# -gt 2 || ( "$mode" != check && "$mode" != self-test ) ]]; then
+    echo "usage: $0 [check|self-test] [model|all]" >&2
+    exit 2
+fi
+
+if [[ "$selection" == all ]]; then
+    models=("$tla_dir"/*/)
+elif [[ "$selection" =~ ^[a-z0-9][a-z0-9_-]*$ && -d "$tla_dir/$selection" ]]; then
+    models=("$tla_dir/$selection")
+else
+    echo "Unknown model: $selection. See $tla_dir/README.md." >&2
+    exit 2
+fi
+if [[ ${#models[@]} -eq 0 ]]; then
+    echo "No TLA+ models found in $tla_dir" >&2
+    exit 2
+fi
+
+# Validate the selection before downloading tools or starting any checks.
+for model_dir in "${models[@]}"; do
+    configs=("$model_dir"/*.cfg)
+    if [[ ${#configs[@]} -ne 1 ]]; then
+        echo "Expected one default .cfg in $model_dir" >&2
+        exit 2
+    fi
+    if [[ ! -f "${configs[0]%.cfg}.tla" ]]; then
+        echo "Missing root module: ${configs[0]%.cfg}.tla" >&2
+        exit 2
+    fi
+    if [[ "$mode" == self-test && ! -f "$model_dir/self-test" ]]; then
+        echo "Missing model sensitivity checks: $model_dir/self-test" >&2
+        exit 2
+    fi
+done
+
+java_bin=${TLA_JAVA:-${JAVA_HOME:+$JAVA_HOME/bin/}java}
+if ! "$java_bin" -version >/dev/null 2>&1; then
+    echo "Java 11+ is required. Make java available in the environment." >&2
+    echo "See docs/architecture/tla/README.md." >&2
+    exit 2
+fi
+# Resolve a caller-relative executable before changing to the model directory.
+if [[ "$java_bin" == */* ]]; then
+    java_bin=$(cd "$(dirname "$java_bin")" && pwd)/$(basename "$java_bin")
+fi
+
+version=1.7.4
+checksum=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+tools="$tla_dir/.local/tools"
+jar="$tools/tla2tools-$version.jar"
+mkdir -p "$tools"
+if [[ ! -f "$jar" ]]; then
+    download=$(mktemp "$tools/download.XXXXXX")
+    trap 'rm -f "$download"' EXIT
+    curl --fail --location --retry 2 \
+        "https://github.com/tlaplus/tlaplus/releases/download/v$version/tla2tools.jar" \
+        --output "$download"
+    actual=$(shasum -a 256 "$download")
+    [[ "${actual%% *}" == "$checksum" ]] || {
+        echo "TLC download checksum mismatch" >&2
+        exit 1
+    }
+    mv "$download" "$jar"
+fi
+actual=$(shasum -a 256 "$jar")
+[[ "${actual%% *}" == "$checksum" ]] || {
+    echo "TLC cache checksum mismatch: $jar" >&2
+    exit 1
+}
+
+for model_dir in "${models[@]}"; do
+    (
+        model_dir=$(cd "$model_dir" && pwd)
+        model_name=$(basename "$model_dir")
+        configs=("$model_dir"/*.cfg)
+        module=$(basename "${configs[0]}" .cfg)
+        results="$tla_dir/.local/$model_name"
+        mkdir -p "$results"
+        work=$(mktemp -d "$results/$mode.XXXXXX")
+        cp "$model_dir"/*.tla "${configs[0]}" "$work/"
+        cd "$work"
+        echo "[$model_name] TLC logs and counterexamples: $work"
+
+        run_tlc() {
+            "$java_bin" -Xmx2g -XX:+UseParallelGC -cp "$jar" tlc2.TLC \
+                -workers 1 -seed 1 -fp 0 -cleanup -config "$1.cfg" "$module.tla"
+        }
+
+        if [[ "$mode" == check ]]; then
+            run_tlc "$module" 2>&1 | tee check.log
+            # Reject an incomplete tool run even if its exit code was zero.
+            rg -Fq 'Model checking completed. No error has been found.' check.log
+        else
+            source "$model_dir/self-test"
+        fi
+    )
+done
