@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Sourced by ../check in an isolated run directory, with run_tlc available.
+
+expect_counterexample() {
+    local name=$1 fault=$2 invariant=$3
+    cat > "$name.cfg" <<EOF
+CONSTANTS
+    ToolCount = 2
+    MaxCrashes = 2
+    Fault = "$fault"
+SPECIFICATION Spec
+INVARIANT $invariant
+EOF
+    local result=0
+    run_tlc "$name" > "$name.log" 2>&1 || result=$?
+    # TLC exit 12 is an invariant violation. Parse/runtime errors must fail
+    # this self-test, as must a mutation whose expected invariant still holds.
+    if [[ $result -ne 12 ]] ||
+       ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
+        cat "$name.log"
+        echo "FAIL: $name did not produce the expected $invariant violation" >&2
+        exit 1
+    fi
+    echo "PASS: $name produced the expected $invariant counterexample"
+}
+
+expect_counterexample early-dispatch early-dispatch AuthorizedEffects
+expect_counterexample retry-unknown retry-unknown NoRepeatedExecution
+expect_counterexample forget-finish forget-finish PreserveDurableOutcomes
+expect_counterexample partial-terminal partial-terminal TerminalClosed
+
+# Deliberately false invariants establish reachability, not design failures.
+expect_counterexample lost-receipt none NoLostReceipt
+expect_counterexample parallel-finish-gap none NoParallelFinishGap
+expect_counterexample uncertain-completion none NoUncertainCompletion
+expect_counterexample normal-completion none NoNormalCompletion
+
+# With no fairness, an owner may stop taking steps forever after cancellation.
+cat > no-fairness.cfg <<EOF
+CONSTANTS
+    ToolCount = 2
+    MaxCrashes = 2
+    Fault = "none"
+SPECIFICATION Spec
+PROPERTY StopSettles
+EOF
+result=0
+run_tlc no-fairness > no-fairness.log 2>&1 || result=$?
+if [[ $result -ne 13 ]] ||
+   ! grep -Fq 'Temporal properties were violated.' no-fairness.log; then
+    cat no-fairness.log
+    echo "FAIL: removing fairness did not produce the expected liveness violation" >&2
+    exit 1
+fi
+echo "PASS: removing fairness produced the expected StopSettles counterexample"

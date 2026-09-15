@@ -30,6 +30,14 @@ test:
 test-agent:
     cargo test -p kcastle-agent
 
+# Check all TLA+ models or one named model (requires Java 11+).
+tla-check model="all":
+    docs/architecture/tla/check check {{quote(model)}}
+
+# Verify model sensitivity and reachability with expected counterexamples.
+tla-self-test model="all":
+    docs/architecture/tla/check self-test {{quote(model)}}
+
 # Build optimized workspace binaries.
 build:
     cargo build --workspace --release --locked

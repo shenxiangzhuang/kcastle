@@ -19,6 +19,9 @@ cargo test -p kcastle-desktop
 cargo check -p kcastle-desktop
 ```
 
+Run TLA+ model checks with `just tla-check` and `just tla-self-test`.
+See [TLA+ model checking](../architecture/tla/README.md) for prerequisites and model scope.
+
 Use Rust edition 2024 on the stable toolchain. Deny Clippy warnings and use Rust's built-in test
 harness.
 

@@ -17,5 +17,6 @@ to the desktop crate.
 The core uses Tokio, the async-openai Responses API, Serde, and rusqlite/SQLite WAL. The desktop
 uses GPUI. Use `async-openai` directly rather than adding a provider abstraction.
 
-See [Session v2](session-v2.md) for session transactions and replay semantics, and
+See [Session v2](session.md) for session transactions and replay semantics,
+[Desktop architecture](desktop.md) for projection and presentation, and
 [Desktop app storage](app-storage.md) for product-level persistence.
