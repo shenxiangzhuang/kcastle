@@ -34,8 +34,17 @@ Finish ==
                 THEN ready \cup {work} ELSE ready
     /\ busy' = FALSE /\ cancelled' = FALSE /\ liveJobs' = liveJobs - 1
     /\ UNCHANGED <<generation, wanted, work>>
+\* Semantic index publication rekeys rows and clears demand until the next frame.
+FinishIndex ==
+    /\ busy
+    /\ wanted' = IF ~cancelled /\ work.generation = generation /\ work.block \in wanted
+                  THEN {} ELSE wanted
+    /\ ready' = IF ~cancelled /\ work.generation = generation /\ work.block \in wanted
+                 THEN {} ELSE ready
+    /\ busy' = FALSE /\ cancelled' = FALSE /\ liveJobs' = liveJobs - 1
+    /\ UNCHANGED <<generation, work>>
 Next == (\E next \in SUBSET Blocks : Demand(next)) \/ Invalidate
-        \/ (\E block \in Blocks : Start(block)) \/ Finish
+        \/ (\E block \in Blocks : Start(block)) \/ Finish \/ FinishIndex
 Spec == Init /\ [][Next]_vars /\ WF_vars(Finish)
 CurrentOnly == \A r \in ready : r.generation = generation /\ r.block \in wanted
 BoundedWorker == liveJobs <= 1

@@ -40,6 +40,14 @@ pub(crate) struct SourceChunk {
     body: Range<usize>,
     fence: Option<String>,
     literal: bool,
+    pub(crate) gap_before: Option<u8>,
+    code: Option<CodeSlice>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodeSlice {
+    source: Range<usize>,
+    visible: Range<usize>,
 }
 
 /// Scan block boundaries without building an AST. Oversized blocks are bounded fragments;
@@ -51,6 +59,8 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
             body: 0..source.len(),
             fence: None,
             literal: false,
+            gap_before: None,
+            code: None,
         }];
     }
     let mut chunks = Vec::new();
@@ -83,6 +93,8 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
                 body: body_start..end,
                 fence: chunk_fence.take(),
                 literal,
+                gap_before: None,
+                code: None,
             });
             start = end;
             lines = 0;
@@ -111,6 +123,8 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
                 body: body_start..body_end,
                 fence: chunk_fence.take(),
                 literal,
+                gap_before: None,
+                code: None,
             });
             start = end;
             body_start = end;
@@ -138,6 +152,8 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
                 body: body_start..split,
                 fence: chunk_fence.clone(),
                 literal,
+                gap_before: None,
+                code: None,
             });
             start = split;
             body_start = split;
@@ -154,6 +170,8 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
                 body: body_start..end,
                 fence: chunk_fence.clone(),
                 literal,
+                gap_before: None,
+                code: None,
             });
             start = end;
             body_start = end;
@@ -167,9 +185,144 @@ fn source_chunks(source: &str) -> Vec<SourceChunk> {
             body: body_start.min(end)..end,
             fence: chunk_fence,
             literal,
+            gap_before: None,
+            code: None,
         });
     }
     chunks
+}
+
+/// The worker discovers real block boundaries. Only byte ranges survive publication.
+fn semantic_chunks(source: &str, cancel: &AtomicBool) -> Option<Vec<SourceChunk>> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut state = crate::streaming_markdown::StreamingMarkdownState::default();
+    state.update(source);
+    let blocks = state
+        .frozen()
+        .iter()
+        .chain(state.tail_blocks())
+        .collect::<Vec<_>>();
+    fn has_definition(node: &markdown::mdast::Node) -> bool {
+        matches!(node, markdown::mdast::Node::Definition(_))
+            || node
+                .children()
+                .is_some_and(|children| children.iter().any(has_definition))
+    }
+    // Keep the original small-message parsing boundary when references depend on it.
+    // ponytail: definitions across larger fragments still require shared document context.
+    if source.len() <= CHUNK_BYTES && blocks.iter().any(|block| has_definition(&block.node)) {
+        let mut chunks = source_chunks(source);
+        chunks[0].gap_before = Some(0);
+        return Some(chunks);
+    }
+    // A fenced node's position starts after its indentation. Keep the entire line
+    // in both the source partition and reparse input so code offsets stay identical.
+    let block_start = |block: &crate::streaming_markdown::MarkdownBlock| {
+        if matches!(block.node, markdown::mdast::Node::Code(_)) {
+            source[..block.key].rfind(['\n', '\r']).map_or(0, |i| i + 1)
+        } else {
+            block.key
+        }
+    };
+    let mut chunks = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let gap = dsh_markdown::block_gap(
+            index.checked_sub(1).map(|i| &blocks[i].node),
+            &block.node,
+            blocks.get(index + 1).map(|b| &b.node),
+        ) as u8;
+        let end = blocks
+            .get(index + 1)
+            .map_or(source.len(), |b| block_start(b));
+        if let markdown::mdast::Node::Code(code) = &block.node {
+            let code_start = block_start(block);
+            let mut start = 0;
+            let mut pieces = Vec::new();
+            let mut offset = 0;
+            let mut lines = 0;
+            for line in code.value.split_inclusive('\n') {
+                offset += line.len();
+                lines += 1;
+                while offset - start > CHUNK_BYTES {
+                    let end = code.value.floor_char_boundary(start + CHUNK_BYTES);
+                    pieces.push(start..end);
+                    start = end;
+                    lines = 0;
+                }
+                if lines >= CHUNK_LINES || offset - start >= CHUNK_BYTES {
+                    pieces.push(start..offset);
+                    start = offset;
+                    lines = 0;
+                }
+            }
+            if start < code.value.len() || pieces.is_empty() {
+                pieces.push(start..code.value.len());
+            }
+            let mut range_start = if index == 0 { 0 } else { code_start };
+            let count = pieces.len();
+            for (i, visible) in pieces.into_iter().enumerate() {
+                let range_end = if i + 1 == count {
+                    end
+                } else {
+                    source.floor_char_boundary(block.key + visible.end)
+                };
+                chunks.push(SourceChunk {
+                    range: range_start..range_end,
+                    body: range_start..range_end,
+                    fence: None,
+                    literal: false,
+                    gap_before: Some(if i == 0 { gap } else { 0 }),
+                    code: Some(CodeSlice {
+                        source: code_start..block.key + block.source.len(),
+                        visible,
+                    }),
+                });
+                range_start = range_end;
+            }
+        } else if block.source.len() <= MAX_PROSE_BYTES {
+            chunks.push(SourceChunk {
+                range: if index == 0 { 0 } else { block.key }..end,
+                body: block.key..block.key + block.source.len(),
+                fence: None,
+                literal: false,
+                gap_before: Some(gap),
+                code: None,
+            });
+        } else {
+            // ponytail: oversized blocks retain the existing bounded fallback; the
+            // semantic index still prevents neighbouring lists/quotes from being severed.
+            let mut pieces = source_chunks(&source[block.key..end]);
+            for (piece_index, piece) in pieces.iter_mut().enumerate() {
+                piece.range = piece.range.start + block.key..piece.range.end + block.key;
+                piece.body = piece.body.start + block.key..piece.body.end + block.key;
+                piece.gap_before = Some(if piece_index == 0 { gap } else { 0 });
+                piece.literal = true;
+                piece.fence = None;
+                piece.body = piece.range.clone();
+            }
+            chunks.extend(pieces);
+        }
+    }
+    if chunks.is_empty() {
+        chunks = source_chunks(source);
+        for chunk in &mut chunks {
+            chunk.gap_before = Some(0);
+        }
+    }
+    Some(chunks)
+}
+
+fn paragraph_only(source: &str) -> bool {
+    source.len() > 64 * 1024
+        && source.lines().all(|line| {
+            line.is_empty()
+                || (line.chars().next().is_some_and(char::is_alphabetic) && !line.contains('|'))
+        })
 }
 
 fn text_chunks(source: &str) -> Vec<SourceChunk> {
@@ -182,6 +335,8 @@ fn text_chunks(source: &str) -> Vec<SourceChunk> {
             body: start..end,
             fence: None,
             literal: false,
+            gap_before: None,
+            code: None,
         });
         start = end;
     }
@@ -213,6 +368,9 @@ impl ChatRow {
         let Some(chunk) = &self.chunk else {
             return String::new();
         };
+        if let Some(code) = &chunk.code {
+            return self.source()[code.source.clone()].to_owned();
+        }
         let source = &self.source()[chunk.body.clone()];
         if self.message.role == Role::Tool {
             let count = source
@@ -252,6 +410,20 @@ impl ChatRow {
             source.to_owned()
         }
     }
+    pub(crate) fn code_visible(&self) -> Option<Range<usize>> {
+        self.chunk
+            .as_ref()?
+            .code
+            .as_ref()
+            .map(|code| code.visible.clone())
+    }
+    fn preparation_range(&self) -> Option<Range<usize>> {
+        self.chunk.as_ref().map(|c| {
+            c.code
+                .as_ref()
+                .map_or_else(|| c.body.clone(), |code| code.source.clone())
+        })
+    }
     fn rich(&self) -> bool {
         matches!(self.message.role, Role::Assistant | Role::Tool)
             && self.chunk.as_ref().is_some_and(|chunk| !chunk.literal)
@@ -259,6 +431,7 @@ impl ChatRow {
 }
 
 struct Presentation {
+    source: Option<Range<usize>>,
     revision: u64,
     dark: bool,
     selection: MessageSelection,
@@ -266,6 +439,7 @@ struct Presentation {
     settled: bool,
 }
 struct InFlight {
+    source_revision: Option<u64>,
     key: RowKey,
     epoch: u64,
     revision: u64,
@@ -378,7 +552,9 @@ impl ChatViewport {
         for (index, message) in messages.iter().chain(notices).enumerate() {
             let previous_rows = indexed.remove(&message.key).unwrap_or_default();
             if !lineage_changed
-                && self.overlays_revision == overlays.revision()
+                // Assistant content does not expand/collapse. Keep its semantic row
+                // boundaries and matching presentations when another message toggles.
+                && (self.overlays_revision == overlays.revision() || message.role == Role::Assistant)
                 && previous_rows
                     .first()
                     .is_some_and(|row| row.message.revision == message.revision)
@@ -421,11 +597,54 @@ impl ChatViewport {
                             ..chrome.clone()
                         }));
                 }
-                let chunks = if message.role == Role::Tool {
+                let mut chunks = if message.role == Role::Tool {
                     text_chunks(&message.text)
                 } else {
                     source_chunks(&message.text)
                 };
+                if !lineage_changed
+                    && message.role == Role::Assistant
+                    && previous_rows
+                        .first()
+                        .is_some_and(|old| message.text.starts_with(&old.message.text))
+                {
+                    let mut stable = previous_rows
+                        .iter()
+                        .filter_map(|row| row.chunk.as_ref())
+                        .take_while(|chunk| chunk.gap_before.is_some())
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    // Match StreamingMarkdownState: the final two logical blocks
+                    // can still absorb new list items, fences or paragraph text.
+                    let mut starts = stable
+                        .iter()
+                        .map(|c| {
+                            c.code
+                                .as_ref()
+                                .map_or(c.body.start, |code| code.source.start)
+                        })
+                        .collect::<Vec<_>>();
+                    starts.dedup();
+                    if let Some(tail_start) = starts.len().checked_sub(2).map(|i| starts[i]) {
+                        stable.retain(|c| c.range.end <= tail_start);
+                        let mut tail = source_chunks(&message.text[tail_start..]);
+                        for chunk in &mut tail {
+                            chunk.range =
+                                chunk.range.start + tail_start..chunk.range.end + tail_start;
+                            chunk.body = chunk.body.start + tail_start..chunk.body.end + tail_start;
+                        }
+                        stable.extend(tail);
+                        chunks = stable;
+                    }
+                }
+                // A large document containing only paragraph lines needs no global AST.
+                // Reject every possible container opener/setext/table delimiter before
+                // taking this fast path; mixed Markdown still uses the semantic worker.
+                if message.role == Role::Assistant && paragraph_only(&message.text) {
+                    for (i, chunk) in chunks.iter_mut().enumerate() {
+                        chunk.gap_before = Some(if i == 0 { 0 } else { 16 });
+                    }
+                }
                 self.rows.extend(chunks.into_iter().map(|chunk| ChatRow {
                     key: RowKey {
                         field: 1,
@@ -480,6 +699,59 @@ impl ChatViewport {
             prefix..old_rows.len() - suffix,
             new_rows.len() - prefix - suffix,
         );
+        self.pending_anchor = Some(anchor);
+        self.restore_pending();
+    }
+    fn install_index(&mut self, row: &ChatRow, chunks: Vec<SourceChunk>) {
+        let anchor = self.anchor();
+        let Some(start) = self
+            .rows
+            .iter()
+            .position(|r| r.key.message == row.key.message && r.chunk.is_some())
+        else {
+            return;
+        };
+        let end = start
+            + self.rows[start..]
+                .iter()
+                .take_while(|r| r.key.message == row.key.message && r.chunk.is_some())
+                .count();
+        let count = chunks.len();
+        let previous = self.rows[start..end]
+            .iter()
+            .map(|r| (r.key, r))
+            .collect::<HashMap<_, _>>();
+        let replacement = chunks
+            .into_iter()
+            .map(|chunk| {
+                let mut replacement = ChatRow {
+                    key: RowKey {
+                        start: chunk.range.start,
+                        ..row.key
+                    },
+                    chunk: Some(chunk),
+                    revision: row.message.revision,
+                    ..row.clone()
+                };
+                if let Some(old) = previous.get(&replacement.key)
+                    && old.chunk == replacement.chunk
+                    && old.plain() == replacement.plain()
+                {
+                    replacement.revision = old.revision;
+                }
+                replacement
+            })
+            .collect::<Vec<_>>();
+        let revisions = replacement
+            .iter()
+            .map(|r| (r.key, r.revision))
+            .collect::<HashMap<_, _>>();
+        self.rows.splice(start..end, replacement);
+        self.presentations.retain(|key, entry| {
+            key.message != row.key.message || revisions.get(key) == Some(&entry.revision)
+        });
+        self.requested.clear();
+        self.list.splice(start..end, count);
         self.pending_anchor = Some(anchor);
         self.restore_pending();
     }
@@ -548,10 +820,19 @@ impl ChatViewport {
         if row.chunk.is_none() {
             return Some((row, None, None));
         }
+        let shared = self.presentations.iter().find_map(|(key, entry)| {
+            (key.message == row.key.message
+                && entry.source == row.preparation_range()
+                && entry.revision == row.revision
+                && entry.dark == self.dark)
+                .then(|| entry.prepared.clone())
+                .flatten()
+        });
         let entry = self
             .presentations
             .entry(row.key)
             .or_insert_with(|| Presentation {
+                source: row.preparation_range(),
                 revision: row.revision,
                 dark: self.dark,
                 selection: MessageSelection::new(window, cx),
@@ -559,10 +840,15 @@ impl ChatViewport {
                 settled: !row.rich(),
             });
         if entry.revision != row.revision || entry.dark != self.dark {
+            entry.source = row.preparation_range();
             entry.revision = row.revision;
             entry.dark = self.dark;
             entry.prepared = None;
             entry.settled = !row.rich();
+        }
+        if entry.prepared.is_none() && shared.is_some() {
+            entry.prepared = shared;
+            entry.settled = true;
         }
         Some((
             row,
@@ -586,6 +872,13 @@ impl ChatViewport {
                 .get(*index)
                 .is_some_and(|row| row.key == key && row.revision == revision)
         })
+    }
+    #[cfg(test)]
+    pub(crate) fn unsettled_chunks(&self) -> usize {
+        self.presentations
+            .values()
+            .filter(|entry| !entry.settled)
+            .count()
     }
     #[cfg(test)]
     pub(crate) fn prepared_chunks(&self) -> usize {
@@ -652,7 +945,12 @@ impl DesktopApp {
                 || !requested
                     .get(&work.key)
                     .and_then(|index| chat.rows.get(*index))
-                    .is_some_and(|row| row.revision == work.revision)
+                    .is_some_and(|row| {
+                        row.revision == work.revision
+                            && work
+                                .source_revision
+                                .is_none_or(|revision| row.message.revision == revision)
+                    })
             {
                 work.cancel.store(true, Ordering::Relaxed);
             }
@@ -682,7 +980,16 @@ impl DesktopApp {
         let epoch = chat.epoch;
         let revision = row.revision;
         let dark = chat.dark;
-        let source = row.markdown_source();
+        let needs_index = row.message.role == Role::Assistant
+            && row
+                .chunk
+                .as_ref()
+                .is_some_and(|chunk| chunk.gap_before.is_none());
+        let source = if needs_index {
+            row.message.text.clone()
+        } else {
+            row.markdown_source()
+        };
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let completion_cancel = cancel.clone();
@@ -694,8 +1001,9 @@ impl DesktopApp {
             chat.worker_starts.clone(),
             executor.clone(),
         );
+        let source_revision = needs_index.then_some(row.message.revision);
         let task = cx.spawn(async move |this, cx| {
-            let prepared = executor
+            let (indexed, prepared) = executor
                 .spawn(async move {
                     #[cfg(test)]
                     {
@@ -708,7 +1016,14 @@ impl DesktopApp {
                             let _ = gate.await;
                         }
                     }
-                    dsh_markdown::prepare_markdown(&source, &theme, &worker_cancel)
+                    if needs_index {
+                        (semantic_chunks(&source, &worker_cancel), None)
+                    } else {
+                        (
+                            None,
+                            dsh_markdown::prepare_markdown(&source, &theme, &worker_cancel),
+                        )
+                    }
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -721,27 +1036,76 @@ impl DesktopApp {
                     dark,
                     completion_cancel.load(Ordering::Relaxed),
                 ) {
+                    if needs_index && chat.rows[index].message.revision != row.message.revision {
+                        cx.notify();
+                        return;
+                    }
+                    if let Some(chunks) = indexed {
+                        chat.install_index(&row, chunks);
+                        cx.notify();
+                        return;
+                    }
+                    let mut counted = std::collections::HashSet::new();
                     let current_bytes: usize = chat
                         .presentations
                         .values()
                         .filter_map(|entry| entry.prepared.as_ref())
+                        .filter(|value| counted.insert(Arc::as_ptr(value)))
                         .map(|value| value.bytes())
                         .sum();
                     if let Some(entry) = chat.presentations.get_mut(&key) {
                         entry.prepared = prepared
                             .filter(|value| {
-                                value.bytes() <= MAX_CHUNK_PRESENTATION_BYTES
+                                value.bytes()
+                                    <= if row.code_visible().is_some() {
+                                        PRESENTATION_BYTES
+                                    } else {
+                                        MAX_CHUNK_PRESENTATION_BYTES
+                                    }
                                     && current_bytes + value.bytes() <= PRESENTATION_BYTES
                             })
                             .map(Arc::new);
                         entry.settled = true;
                         chat.list.remeasure_items(index..index + 1);
                     }
+                    // Publish shared code to all demanded slices before advancing the
+                    // queue; they must not each start a whole-block syntax parse.
+                    if row.code_visible().is_some() {
+                        let shared = chat
+                            .presentations
+                            .get(&key)
+                            .and_then(|e| e.prepared.clone());
+                        let siblings = chat
+                            .requested
+                            .iter()
+                            .filter_map(|(candidate, index)| {
+                                let other = chat.rows.get(*index)?;
+                                (candidate != &key
+                                    && candidate.message == key.message
+                                    && other.revision == revision
+                                    && other.preparation_range() == row.preparation_range())
+                                .then_some((*candidate, *index))
+                            })
+                            .collect::<Vec<_>>();
+                        for (sibling, index) in siblings {
+                            if let Some(entry) = chat.presentations.get_mut(&sibling) {
+                                entry.prepared = shared.clone();
+                                entry.settled = true;
+                            }
+                            chat.list.remeasure_items(index..index + 1);
+                        }
+                    }
                 }
+                // A cached/throttled native window need not redraw immediately on
+                // notify. Drain already-declared demand without waiting for another
+                // render callback (or for the user to resize the window).
+                drop(chat);
+                this.finish_chat_frame(cx);
                 cx.notify();
             });
         });
         chat.in_flight = Some(InFlight {
+            source_revision,
             key,
             epoch,
             revision,
@@ -755,6 +1119,231 @@ impl DesktopApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexed_row(source: &str, chunk: SourceChunk) -> ChatRow {
+        ChatRow {
+            key: RowKey {
+                message: MessageId(1),
+                field: 1,
+                start: chunk.range.start,
+            },
+            message: message(source.to_owned(), 1),
+            message_index: 0,
+            revision: 1,
+            chunk: Some(chunk),
+        }
+    }
+
+    #[test]
+    fn semantic_code_ranges_match_reparsed_indented_fences() {
+        for indent in 0..=3 {
+            let pad = " ".repeat(indent);
+            for value in ["中文\n".to_owned(), "let 中文 = 1;\n".repeat(80)] {
+                let source = format!(
+                    "Introduction.\n\n{pad}```rust\n{}{pad}```\n\nEnding.",
+                    value
+                        .lines()
+                        .map(|line| format!("{pad}{line}\n"))
+                        .collect::<String>()
+                );
+                let chunks = semantic_chunks(&source, &AtomicBool::new(false)).unwrap();
+                let mut chat = ChatViewport::default();
+                let overlays = MessagePresentationStore::default();
+                chat.sync(
+                    &Vector::unit(message(source.clone(), 1)),
+                    &Vector::new(),
+                    &overlays,
+                    1,
+                    false,
+                );
+                let row = chat.rows[0].clone();
+                chat.install_index(&row, chunks.clone());
+                let updated = format!("{source} More text.");
+                chat.sync(
+                    &Vector::unit(message(updated.clone(), 2)),
+                    &Vector::new(),
+                    &overlays,
+                    1,
+                    false,
+                );
+                assert_eq!(
+                    chat.rows.iter().map(ChatRow::plain).collect::<String>(),
+                    updated,
+                    "streaming must retain the paragraph before an indented code block"
+                );
+                let mut displayed = String::new();
+                for chunk in chunks {
+                    let row = indexed_row(&source, chunk);
+                    let Some(visible) = row.code_visible() else {
+                        continue;
+                    };
+                    let mut parsed = crate::streaming_markdown::StreamingMarkdownState::default();
+                    parsed.update(&row.markdown_source());
+                    let markdown::mdast::Node::Code(code) = &parsed.tail_blocks()[0].node else {
+                        panic!("code fragment must remain code");
+                    };
+                    assert_eq!(code.value, value.trim_end_matches('\n'), "indent={indent}");
+                    displayed.push_str(&code.value[visible]);
+                }
+                assert_eq!(displayed, value.trim_end_matches('\n'));
+            }
+        }
+    }
+
+    #[test]
+    fn semantic_short_messages_preserve_reference_context() {
+        fn references(node: &markdown::mdast::Node) -> usize {
+            usize::from(matches!(
+                node,
+                markdown::mdast::Node::LinkReference(_) | markdown::mdast::Node::ImageReference(_)
+            )) + node
+                .children()
+                .map_or(0, |children| children.iter().map(references).sum())
+        }
+        for source in [
+            "[label][id]\n\n[id]: https://example.com",
+            "[label][id]\n\n> [id]: https://example.com",
+            "![image][id]\n\n[id]: https://example.com/image.png",
+        ] {
+            let count: usize = semantic_chunks(source, &AtomicBool::new(false))
+                .unwrap()
+                .into_iter()
+                .map(|chunk| {
+                    let row = indexed_row(source, chunk);
+                    let mut parsed = crate::streaming_markdown::StreamingMarkdownState::default();
+                    parsed.update(&row.markdown_source());
+                    parsed
+                        .frozen()
+                        .iter()
+                        .chain(parsed.tail_blocks())
+                        .map(|block| references(&block.node))
+                        .sum::<usize>()
+                })
+                .sum();
+            assert_eq!(count, 1, "{source}");
+        }
+    }
+
+    #[test]
+    fn semantic_chunks_preserve_loose_lists_and_section_spacing() {
+        let source = "**5. Browser**\n- first\n\n**6. Ecosystem**\n- second\n\n- third\n\n    nested paragraph\n\n> quote\n>\n> continuation";
+        let chunks = semantic_chunks(source, &AtomicBool::new(false)).unwrap();
+        assert_eq!(chunks.len(), 5);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| c.gap_before.unwrap())
+                .collect::<Vec<_>>(),
+            vec![0, 8, 24, 8, 16]
+        );
+        assert!(source[chunks[3].body.clone()].contains("nested paragraph"));
+        assert!(source[chunks[4].body.clone()].contains("continuation"));
+        let padded = format!("{}\n\n{source}", "intro ".repeat(400));
+        let indexed = semantic_chunks(&padded, &AtomicBool::new(false)).unwrap();
+        assert_eq!(indexed.len(), chunks.len() + 1);
+        for (original, shifted) in chunks.iter().zip(&indexed[1..]) {
+            assert_eq!(
+                &source[original.body.clone()],
+                &padded[shifted.body.clone()]
+            );
+        }
+        assert_eq!(
+            indexed[2..]
+                .iter()
+                .map(|c| c.gap_before)
+                .collect::<Vec<_>>(),
+            chunks[1..].iter().map(|c| c.gap_before).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn streaming_retains_completed_semantic_rows() {
+        let source = "A paragraph with **emphasis**.\n\n".repeat(200);
+        let mut chat = ChatViewport::default();
+        let overlays = MessagePresentationStore::default();
+        chat.sync(
+            &Vector::unit(message(source.clone(), 1)),
+            &Vector::new(),
+            &overlays,
+            1,
+            false,
+        );
+        let row = chat.rows[0].clone();
+        chat.install_index(
+            &row,
+            semantic_chunks(&source, &AtomicBool::new(false)).unwrap(),
+        );
+        let stable = chat.rows[50].chunk.clone();
+        let updated = format!("{source}New tail");
+        chat.sync(
+            &Vector::unit(message(updated.clone(), 2)),
+            &Vector::new(),
+            &overlays,
+            1,
+            false,
+        );
+        assert_eq!(
+            chat.rows[50].chunk, stable,
+            "streaming must not turn settled prose back into raw Markdown"
+        );
+        let row = chat
+            .rows
+            .iter()
+            .find(|r| r.chunk.as_ref().is_some_and(|c| c.gap_before.is_none()))
+            .unwrap()
+            .clone();
+        chat.install_index(
+            &row,
+            semantic_chunks(&updated, &AtomicBool::new(false)).unwrap(),
+        );
+        assert_eq!(
+            chat.rows[50].revision, 1,
+            "publishing the new index must preserve unchanged presentations"
+        );
+    }
+
+    #[test]
+    fn semantic_code_slices_share_the_full_source_and_preserve_bytes() {
+        let value = format!(
+            "/* open\n{}close */\nlet value = 42;",
+            "中文 comment\n".repeat(80)
+        );
+        let source = format!("```rust\n{value}\n```");
+        let chunks = semantic_chunks(&source, &AtomicBool::new(false)).unwrap();
+        assert!(chunks.len() > 2);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| &source[c.range.clone()])
+                .collect::<String>(),
+            source
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| &value[c.code.as_ref().unwrap().visible.clone()])
+                .collect::<String>(),
+            value
+        );
+        for chunk in chunks {
+            let row = indexed_row(&source, chunk);
+            assert_eq!(row.markdown_source(), source);
+        }
+        let paragraphs = "A **long** paragraph.\n\n".repeat(4000);
+        assert!(paragraph_only(&paragraphs));
+        for container in [
+            "- item",
+            "> quote",
+            "    code",
+            "---",
+            "1. item",
+            "| cell |",
+            "```",
+            "[id]: /url",
+        ] {
+            assert!(!paragraph_only(&format!("{paragraphs}{container}")));
+        }
+    }
+
     #[test]
     fn chunks_bound_long_messages_and_preserve_source_and_fences() {
         for source in [

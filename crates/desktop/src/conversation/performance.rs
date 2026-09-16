@@ -134,7 +134,35 @@ fn chat_switch_and_scroll_do_not_wait_for_markdown(cx: &mut TestAppContext) {
     view.read_with(cx, |app, _| {
         let chat = app.chat.borrow();
         assert!(chat.prepared_chunks() > 0, "the current viewport must eventually render Markdown");
+        assert_eq!(chat.unsettled_chunks(), 0, "all demanded blocks must finish without resize/input");
         assert!(chat.worker_starts.load(Ordering::Relaxed) < 30, "count all preparation starts, including evicted/cancelled work, not just retained results");
+    });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn long_code_rows_share_one_preparation(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let source = format!(
+        "```rust\n/* open\n{}close */\nlet value = 42;\n```",
+        "comment\n".repeat(100)
+    );
+    let snapshot = fixture(50000, 1, &source);
+    view.update(cx, |app, cx| publish(app, &snapshot, "code", cx));
+    cx.run_until_parked();
+    view.read_with(cx, |app, _| {
+        let chat = app.chat.borrow();
+        assert!(
+            chat.prepared_chunks() > 1,
+            "multiple visible code slices must be rich"
+        );
+        assert!(
+            chat.worker_starts.load(Ordering::Relaxed) == 2,
+            "one index and one shared code parse for the tail viewport"
+        );
     });
     drop(view);
     cx.update(|window, _| window.remove_window());
@@ -156,6 +184,7 @@ fn chat_presentation_benchmark(cx: &mut TestAppContext) {
             fixture(20000, 1, &"A **long** message paragraph.\n\n".repeat(20000)),
         ),
         ("code_and_math", fixture(30000, 1, &RICH_TEXT.repeat(40))),
+        ("chinese_prose", fixture(40000, 1, &"中文正文与 English 混排，包含 **加粗内容** 和 `Ord + Clone`，检查段落布局、标点换行与复制。".repeat(60))),
     ];
     println!(
         "CHAT_BENCH os={} arch={} viewport=1180x720 samples=20 units=ms",
@@ -212,6 +241,43 @@ fn chat_presentation_benchmark(cx: &mut TestAppContext) {
         println!(
             "CHAT_SUMMARY fixture={name} first_frame_p50_ms={:.3} first_frame_p95_ms={:.3} settle_p50_ms={:.3} settle_p95_ms={:.3}",
             first_frames[9], first_frames[18], settles[9], settles[18]
+        );
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn expanding_reasoning_preserves_assistant_content(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let mut snapshot = fixture(80000, 1, "First paragraph.\n\nLast paragraph $x$.");
+    let mut reasoning = (*snapshot.conversation.messages[0]).clone();
+    reasoning.key = MessageId(79999);
+    reasoning.role = Role::Reasoning;
+    reasoning.text = "Some reasoning".into();
+    Arc::make_mut(&mut snapshot)
+        .conversation
+        .messages
+        .push_front(Arc::new(reasoning));
+    view.update(cx, |app, cx| publish(app, &snapshot, "expansion", cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("math:x").is_some());
+    for expanded in [true, false] {
+        view.update(cx, |app, cx| app.toggle_reasoning(0, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.message_presentations
+                    .borrow()
+                    .expanded(MessageId(79999)),
+                expanded
+            );
+        });
+        assert!(
+            cx.debug_bounds("math:x").is_some(),
+            "toggling reasoning must not erase the assistant's final paragraph"
         );
     }
     drop(view);
