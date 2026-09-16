@@ -690,6 +690,10 @@ pub(crate) fn block_gap(previous: Option<&Node>, node: &Node, next: Option<&Node
     {
         return 24.0;
     }
+    // A filled code container needs the normal block separation even after a heading.
+    if matches!(node, Node::Code(_)) {
+        return metrics::MARKDOWN_BLOCK_GAP;
+    }
     if matches!(previous, Node::Heading(_))
         || (standalone_strong(previous) && matches!(node, Node::List(_)))
     {

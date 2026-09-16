@@ -119,6 +119,9 @@ per visual line instead of per word/character. Selection stores original logical
 projects visual line segments onto them, preserving copy and selection across reflow. Inline
 formula SVGs retain the existing baseline-aware mixed-object flow. Body text is 16/26 px;
 section/heading-following gaps are 24/8 px and tight/loose list-item gaps are 6/12 px.
+Code containers keep the normal 16 px block separation even after headings, balanced with
+following prose. Semantic partitioning excludes inter-block blank lines and preserves the
+original fenced source, so those separators cannot become empty rows or extra code lines.
 
 Prepared data and reusable semantic indices share an estimated 8 MiB cache budget across all
 sessions in the window. This is not 8 MiB per session and not a process RSS limit. Cache keys
