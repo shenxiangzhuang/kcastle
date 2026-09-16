@@ -49,15 +49,23 @@ preserve stable record arcs.
 
 The native GPUI `ListState` owns variable-height row layout and scroll anchoring. On session
 selection, the desktop restores `(message ID, source field, byte offset, offset within row)`
-or tail-follow mode. Only visible rows plus 600 px of overscan in each direction allocate
-selection/layout/presentation objects. History keeps source locators, not parsed documents.
+or tail-follow mode. Visible rows plus approximately 600 px of overscan in each direction
+form the preparation working set. Native layout callbacks are not the source of truth for
+demand: GPUI can reuse an offscreen row's measured height without rendering it again.
+After layout, `ChatViewport::refresh_demand` adds geometric neighbours explicitly. Above
+the scroll top GPUI exposes no item bounds, so this uses recently observed heights or a
+bounded source-line estimate. Selection/layout entities stay local to this working set;
+history keeps cheap source locators, not one parsed document per message.
 
 Rows first display source text. A single background task prepares Markdown ASTs, code syntax
 styles, and formula layout/SVGs. GPUI element creation, text shaping, and painting remain on the
 UI thread, bounded by the working set. Completion remeasures the affected row; native list
 anchoring preserves the top item's offset while heights above it change. Width changes use
-native proportional remeasurement. Switching away discards presentations; only scroll anchors
-and expansion/rating interactions survive. These are transient UI state, never journal facts.
+native proportional remeasurement. Switching away discards GPUI presentations and cancels
+their preparation demand, but retains reusable results in one cache shared by sessions in
+the window. Scroll anchors and expansion/rating interactions survive separately. These are
+transient UI state, never journal facts. Inactive sessions can still receive and persist
+runtime events; they do not start Chat parsing, highlighting or layout work.
 
 Work is tagged with session/projection epoch, source-fragment revision, and theme. Publication
 also requires current viewport demand and an uncancelled task. Offscreen work is cancelled;
@@ -80,8 +88,11 @@ and presentations, so settled content does not revert to raw Markdown on every t
 Expanding or collapsing reasoning/tool output retains unchanged assistant indices and
 presentations; overlay-only changes cannot redefine their cached source fragments.
 Large paragraph-only messages use the existing scan without a global AST, but only after ruling
-out container openers, indentation, setext headings and tables. Mixed documents still require
-one whole-message background parse; their initial plain frame remains independent of parsing.
+out container openers, indentation, setext headings and tables. Mixed documents up to 1 MiB
+still require one whole-message background parse; their initial plain frame remains independent
+of parsing. Larger mixed messages keep bounded, lossless plain-text fragments rather than starting
+an unbounded whole-message parse. Logical code blocks above 256 KiB also stay readable source;
+the limit is checked before cloning/parsing the entire code block for highlighting.
 
 Code rows preserve the opening fence's indentation so reparsing retains the indexed code offsets.
 They are slices of one logical block: they share the whole block's prepared AST/highlights,
@@ -100,9 +111,26 @@ projects visual line segments onto them, preserving copy and selection across re
 formula SVGs retain the existing baseline-aware mixed-object flow. Body text is 16/26 px;
 section/heading-following gaps are 24/8 px and tight/loose list-item gaps are 6/12 px.
 
-Prepared data has an estimated 8 MiB working-set budget and a 1 MiB per-prose-fragment admission limit (shared logical code can use the 8 MiB budget);
-over-budget fragments remain readable plain text. Eviction drops ASTs, syntax spans, selections,
-and reference-counted generated SVG leases. Current frames can briefly hold an extra lease.
+Prepared data and reusable semantic indices share an estimated 8 MiB cache budget across all
+sessions in the window. This is not 8 MiB per session and not a process RSS limit. Cache keys
+include namespace, projection lineage, message/fragment revision, source field/range, result
+kind and (for prepared Markdown) theme. Whole-block code allocations are charged once across
+their slices. Index vectors and cache-entry/key metadata are charged as well; AST sizing is
+still estimated. Prose results above 1 MiB are not admitted; logical code may use the overall
+budget. Allocation during preparation and current-frame leases can exceed the retained estimate.
+
+Admission evicts non-demanded entries first, then nearby entries for visible work, using least
+recent use within each priority. It never evicts a result still held by a visible presentation
+or current frame. Equal-priority demanded entries do not evict each other and repeatedly reparse.
+If admission cannot fit, the fragment stays readable source for that demand interval. GPU/layout
+entities are never stored in the shared cache. Leaving the viewport releases their references;
+only reusable ASTs, syntax spans, formula images/SVG leases and indices may survive.
+
+Unused entries expire after five minutes, swept every 30 seconds even without input. After five
+minutes without Chat frames, offscreen presentation references are released too; currently
+visible content remains ready while the user reads. The sweep starts no preparation. Switching
+away clears active protection immediately. Both the budget and expiry are initial internal
+defaults, not user settings; tune them from the repeatable browsing benchmark below.
 Formula vectors use GPUI's themed SVG alpha mask. RaTeX's embedded raster glyphs (color Emoji)
 are excluded from that mask and decoded once on the preparation worker into a transparent
 color layer sharing the vector layer's viewBox and coordinates. Bounds expand to include color
@@ -111,7 +139,7 @@ to both layers. The presentation owns its `RenderImage`
 directly and includes the decoded BGRA bytes in the budget; it does not enter the global image
 resource cache. Theme changes still tint vector symbols without recoloring Emoji.
 This budget does not include canonical session data, native GPU/font resources, or the separate
-Trajectory details renderer. There is no cross-session Chat presentation cache.
+Trajectory details renderer. The shared Chat cache is window-owned, not process-global.
 
 RaTeX font data is process-wide and outside the preparation budget. The local
 [font patches](../../vendor/README.md) check primary Unicode outlines before
@@ -145,7 +173,7 @@ Run `just bench-chat` for a release-mode, headless GPUI timing baseline using on
 harness and `std::time::Instant`. Generated fixtures cover 1,000 rich messages, a single message
 with 20,000 paragraphs, repeated Haskell code/formula tables, and Chinese/English prose with
 bold text and inline code. Every sample changes the
-presentation namespace and discards Chat presentations. Sample 0 is reported separately; the
+presentation namespace and explicitly clears the shared cache. Sample 0 is reported separately; the
 next 20 samples report nearest-rank p50/p95 with process-wide fonts/libraries warmed.
 
 - `first_frame_ms`: publish an already projected snapshot and synchronously draw source text,
@@ -161,7 +189,7 @@ benchmark is ignored by ordinary tests. Compare logs from the same machine, tool
 and build profile; no machine-dependent timing threshold gates CI yet. Use the deterministic
 test to guard scheduling/demand invariants, and native profiling for end-to-end interaction.
 
-Local typography acceptance baseline (2026-09-16): Apple M4 Pro, macOS 26.5.2, rustc 1.97.1,
+Typography acceptance baseline before shared caching (2026-09-16): Apple M4 Pro, macOS 26.5.2, rustc 1.97.1,
 workspace release profile, 1180 × 720 headless viewport. Times are milliseconds for the
 20 warmed samples; these are reference measurements, not CI limits.
 
@@ -171,6 +199,65 @@ workspace release profile, 1180 × 720 headless viewport. Times are milliseconds
 | One 20,000-paragraph message | 620,011 | 2.383 / 2.536 | 16.664 / 17.130 |
 | Haskell and formula tables | 10,371 | 0.564 / 0.606 | 124.422 / 125.258 |
 | Chinese/English prose | 7,331 | 0.440 / 0.509 | 3.437 / 3.612 |
+
+#### Syntax highlighter reuse
+
+Code preparation and direct settled-code rendering share a process-wide pool of at
+most four idle `SyntaxHighlighter` objects (`syntax.rs`). Each task takes exclusive
+ownership; the mutex covers only taking/returning objects, never parsing or style
+resolution. An unavailable language object is constructed outside the lock, so UI
+work never waits for a background parse. Entries match the complete registered
+language configuration, including aliases; styles are resolved against the caller's
+theme each time. A complete source deletion clears text and host/injection trees
+before return. Host-language queries are reused; injected-language query lifetimes
+remain managed by the upstream highlighter. Inputs above 256 KiB are not returned, limiting retained parser scratch
+space. Unknown/plain languages do not occupy slots. The four-entry bound applies to
+idle objects, while borrowed objects follow existing rendering/worker concurrency.
+This source-free grammar/parser pool is separate from the 8 MiB presentation budget;
+it stores neither sessions nor highlighted outputs. Cancelled work still passes the
+existing freshness gate before publication.
+
+#### Shared-cache comparison
+
+Run `just bench-chat-cache 8`, `just bench-chat-cache 16`, and `just bench-chat-cache 32`.
+The budget override exists only in this ignored test, not in production configuration.
+The same fixture has three sessions of 100 messages, each containing 400 lines of Rust.
+Each pass performs 39 operations: session switches and jumps to twelve positions per
+session. The second pass revisits positions in reverse order. It reports preparation
+starts (including indices), settle p50/p95, peak retained estimate, and retained bytes
+after six minutes of simulated inactivity. As above, settle time is headless executor
+drain time, not native wheel-to-display latency or a frame-time measurement.
+
+Initial local comparison (2026-09-16, release, 1180 × 720; one run per budget):
+
+| Budget | Revisit starts | Revisit settle p50 / p95 (ms) | Peak cache estimate (MiB) | Process peak RSS (MiB) |
+| --- | ---: | ---: | ---: | ---: |
+| 8 MiB | 166 | 34.278 / 36.141 | 7.84 | 62.17 |
+| 16 MiB | 131 | 32.310 / 34.945 | 15.69 | 80.61 |
+| 32 MiB | 98 | 17.322 / 35.734 | 31.35 | 87.62 |
+
+All three retained approximately 0.98 MiB after idle expiry, keeping the visible code.
+RSS was measured with `/usr/bin/time -l` around the already-built release **test binary**
+in separate processes; it includes fixtures/fonts/native resources, excludes compilation,
+and is not the desktop application's memory footprint. The production default stays at
+8 MiB: larger caches help this code-heavy revisit workload, but these single-run results
+do not establish a general latency/memory optimum. Native profiling and repeated runs
+on representative sessions should precede a default change.
+
+Regression tests cover warm-session first-frame reuse, geometry-driven overscan across
+redraws and wheel input, idle expiry without interaction, visible retention while idle,
+cross-session LRU/admission priorities, shared allocation accounting, freshness keys and
+pre-parse source limits. Existing large-history and single-worker tests remain in CI.
+Manual acceptance: use a release app, scroll several screens through code and back, switch
+A → B → A at the saved reading positions, then repeat after more than five minutes away.
+Confirm stable reading position and reduced plain-to-rich transitions on warm content;
+profile native frame times and process memory separately from the headless checks.
+
+The [2026-09-16 native profile](chat-native-profile-2026-09-16.md) records real macOS
+wheel input, A → B → A restoration, stack sampling and process memory. It confirms
+lower CPU cost on return scrolling in one paired run, while identifying repeated
+highlighter construction and native text/layout work. Its screenshots do not establish
+display-frame latency or the absence of transient highlighting flashes.
 
 ### Timeline
 

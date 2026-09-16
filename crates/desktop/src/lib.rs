@@ -40,6 +40,7 @@ mod project;
 mod settings;
 mod sidebar;
 mod streaming_markdown;
+mod syntax;
 mod trajectory;
 mod ui;
 mod ui_automation;
