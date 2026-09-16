@@ -15,6 +15,8 @@ theme. In Rust, an unchanged source fragment keeps its revision during streaming
 Mapping: `ChatViewport::sync/activate/release` invalidate state; list callbacks collect
 `requested`; `finish_chat_frame` prunes and starts work; `current_result` guards publication.
 `Task` ownership retains the slot until completion. SVG leases follow presentation lifetime.
+Decoded formula Emoji images share that lifetime and count toward the Rust byte budget;
+their preparation does not add another worker or change publication/cancellation transitions.
 
 Assumptions: a worker eventually returns; cancellation is cooperative between CPU stages.
 The model abstracts GPUI layout, Markdown semantics, pixel anchors, byte budgets, session I/O,

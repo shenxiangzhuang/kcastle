@@ -14,7 +14,7 @@ use gpui_kit::{
     AnyElement, App, Bounds, Element, ElementId, FontStyle, FontWeight, GlobalElementId,
     HighlightStyle, Hsla, InspectorElementId, InteractiveElement, IntoElement, LayoutId,
     ParentElement, Pixels, SharedString, StrikethroughStyle, Styled, StyledText, Window, div, fill,
-    point, prelude::FluentBuilder, px, size, svg,
+    img, point, prelude::FluentBuilder, px, size, svg,
 };
 use markdown::mdast::Node;
 
@@ -55,7 +55,7 @@ impl PreparedMarkdown {
                 .math
                 .values()
                 .filter_map(|value| value.as_ref().ok())
-                .map(|value| value.asset.bytes)
+                .map(RenderedMath::bytes)
                 .sum::<usize>()
     }
 }
@@ -754,12 +754,22 @@ fn contains_inline_math(nodes: &[Node]) -> bool {
 #[derive(Clone, Debug)]
 struct RenderedMath {
     asset: Arc<GeneratedAsset>,
+    color: Option<Arc<gpui_kit::RenderImage>>,
     width: f32,
     height: f32,
     baseline: f32,
 }
 
 impl RenderedMath {
+    fn bytes(&self) -> usize {
+        self.asset.bytes
+            + self
+                .color
+                .as_ref()
+                .and_then(|image| image.as_bytes(0))
+                .map_or(0, <[u8]>::len)
+    }
+
     fn metrics(&self) -> MathMetrics {
         MathMetrics {
             width: self.width,
@@ -835,14 +845,25 @@ fn render_math(
     // centered SVG by half their difference while preserving the line's bounds.
     let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
     let formula = match requested {
-        MathRequest::Ready(rendered) => svg()
-            .path(rendered.asset.path.clone())
+        MathRequest::Ready(rendered) => div()
+            .relative()
             .flex_none()
             .w(px(width))
             .h(px(rendered.height))
             .mt(px(margin_top))
             .mb(px(margin_bottom))
-            .text_color(context.colors.markdown_text)
+            .child(
+                svg()
+                    .path(rendered.asset.path.clone())
+                    .absolute()
+                    .size_full()
+                    .text_color(context.colors.markdown_text),
+            )
+            .children(
+                rendered
+                    .color
+                    .map(|image| img(image).absolute().size_full()),
+            )
             .when(cfg!(test), |element| {
                 let source = source.to_owned();
                 element.debug_selector(move || format!("math:{source}"))
@@ -1059,13 +1080,87 @@ fn render_prepared_math(prepared: PreparedMath) -> Result<RenderedMath, String> 
             font_dir: String::new(),
         },
     );
-    let asset = register_generated_asset(svg.into_bytes());
+    let mut metrics = prepared.metrics;
+    let (mask, color) = math_svg_layers(&svg, &mut metrics, prepared.padding as f32)?;
+    let color = color
+        .map(|color| {
+            // Decode once on the preparation worker. Holding RenderImage directly
+            // avoids an additional global image-resource cache; its bytes belong to
+            // the same bounded presentation as the vector asset.
+            gpui_kit::SvgRenderer::new(Arc::new(()))
+                .render_single_frame(color.as_bytes(), 1.0)
+                .map_err(|error| error.to_string())
+        })
+        .transpose()?;
+    let asset = register_generated_asset(mask.into_bytes());
     Ok(RenderedMath {
         asset,
-        width: prepared.metrics.width,
-        height: prepared.metrics.height,
-        baseline: prepared.metrics.baseline,
+        color,
+        width: metrics.width,
+        height: metrics.height,
+        baseline: metrics.baseline,
     })
+}
+
+/// RaTeX emits flat, absolutely positioned SVG children. Keep its geometry and
+/// bitmap opacity verbatim, but exclude raster glyphs from GPUI's tinted mask.
+fn math_svg_layers(
+    svg: &str,
+    metrics: &mut MathMetrics,
+    padding: f32,
+) -> Result<(String, Option<String>), String> {
+    if !svg.contains("<image ") {
+        return Ok((svg.to_owned(), None));
+    }
+    let document = roxmltree::Document::parse(svg).map_err(|error| error.to_string())?;
+    let root = document.root_element();
+    let (mut left, mut top, mut right, mut bottom) =
+        (0.0_f32, 0.0_f32, metrics.width, metrics.height);
+    for image in root.children().filter(|node| node.has_tag_name("image")) {
+        let number = |name| -> Result<f32, String> {
+            image
+                .attribute(name)
+                .and_then(|value| value.parse::<f32>().ok())
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| format!("invalid image {name}"))
+        };
+        let (x, y, width, height) = (
+            number("x")?,
+            number("y")?,
+            number("width")?,
+            number("height")?,
+        );
+        // The fallback layout can report outline ascent/descent shorter than a
+        // color strike. Include that strike, including in small inline formulas.
+        left = left.min(x - padding);
+        top = top.min(y - padding);
+        right = right.max(x + width + padding);
+        bottom = bottom.max(y + height + padding);
+    }
+    metrics.width = right - left;
+    metrics.height = bottom - top;
+    metrics.baseline -= top;
+    let mut mask = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{left} {top} {} {}" width="{}pt" height="{}pt">"#,
+        metrics.width, metrics.height, metrics.width, metrics.height,
+    );
+    let mut color = mask.clone();
+    for child in root.children().filter(roxmltree::Node::is_element) {
+        // Fail visibly if upstream changes this contract, rather than silently
+        // losing a nested image's transform or clipping group.
+        if child.children().any(|node| node.is_element()) {
+            return Err("unexpected nested RaTeX SVG element".to_owned());
+        }
+        let target = if child.has_tag_name("image") {
+            &mut color
+        } else {
+            &mut mask
+        };
+        target.push_str(&svg[child.range()]);
+    }
+    mask.push_str("</svg>");
+    color.push_str("</svg>");
+    Ok((mask, Some(color)))
 }
 
 pub(crate) fn plain_text(
@@ -2144,6 +2239,77 @@ mod tests {
             &inline.text[inline.backgrounds[1].0.clone()],
             "\u{a0}Agent::set_model\u{a0}"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn math_mask_excludes_raster_emoji() {
+        let rendered = build_math(r"\text{中文😀} + \frac{a}{b}", true).unwrap();
+        let mask = DesktopAssets.load(&rendered.asset.path).unwrap().unwrap();
+        assert!(
+            !String::from_utf8_lossy(&mask).contains("<image "),
+            "GPUI svg() discards RGB: raster Emoji must not enter its alpha mask"
+        );
+        let color = rendered.color.as_ref().expect("Emoji has a color layer");
+        let pixels = color.as_bytes(0).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .any(|bgra| { bgra[3] > 128 && bgra[2].abs_diff(bgra[0]) > 50 }),
+            "the painted image must retain colored, opaque pixels"
+        );
+        assert_eq!(rendered.bytes(), mask.len() + pixels.len());
+    }
+
+    #[test]
+    fn math_layers_preserve_bitmap_geometry_and_leave_plain_formulas_unchanged() {
+        let root = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 20" width="100pt" height="20pt">"#;
+        let path = r#"<path d="M0 0L10 10" fill="black"/>"#;
+        let bitmap = r#"<image href="data:image/png;base64,fixture" x="17" y="3" width="12" height="14" opacity="0.5" preserveAspectRatio="none"/>"#;
+        let original = format!("{root}{path}{bitmap}</svg>");
+        let mut metrics = super::MathMetrics {
+            width: 100.0,
+            height: 20.0,
+            baseline: 15.0,
+        };
+        let (mask, color) = super::math_svg_layers(&original, &mut metrics, 1.0).unwrap();
+        assert_eq!(mask, format!("{root}{path}</svg>"));
+        assert_eq!(color.unwrap(), format!("{root}{bitmap}</svg>"));
+        assert_eq!(
+            super::math_svg_layers(&mask, &mut metrics, 1.0).unwrap(),
+            (mask, None)
+        );
+        assert_eq!(
+            (metrics.width, metrics.height, metrics.baseline),
+            (100.0, 20.0, 15.0)
+        );
+        let plain = build_math(r"\frac{a}{b}", false).unwrap();
+        assert!(plain.color.is_none());
+        assert_eq!(plain.bytes(), plain.asset.bytes);
+    }
+
+    #[test]
+    fn color_strikes_expand_short_layout_bounds_without_moving_the_baseline() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><image href="fixture" x="0.9375" y="0.7875" width="15" height="15"/></svg>"#;
+        let mut metrics = super::MathMetrics {
+            width: 16.875,
+            height: 12.975,
+            baseline: 12.0375,
+        };
+        let (mask, _) = super::math_svg_layers(svg, &mut metrics, 0.9375).unwrap();
+        assert_eq!(metrics.width, 16.875);
+        assert!((metrics.height - 16.875).abs() < 0.001);
+        assert!((metrics.baseline - 12.1875).abs() < 0.001);
+        let document = roxmltree::Document::parse(&mask).unwrap();
+        let bounds: Vec<f32> = document
+            .root_element()
+            .attribute("viewBox")
+            .unwrap()
+            .split_whitespace()
+            .map(|value| value.parse().unwrap())
+            .collect();
+        assert!(bounds[1] <= 0.7875);
+        assert!(bounds[1] + bounds[3] >= 15.7875);
     }
 
     #[test]

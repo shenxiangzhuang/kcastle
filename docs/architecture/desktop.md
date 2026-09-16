@@ -77,6 +77,13 @@ existing ownership and are not database-page virtualization.
 Prepared data has an estimated 8 MiB working-set budget and a 1 MiB per-fragment admission limit;
 over-budget fragments remain readable plain text. Eviction drops ASTs, syntax spans, selections,
 and reference-counted generated SVG leases. Current frames can briefly hold an extra lease.
+Formula vectors use GPUI's themed SVG alpha mask. RaTeX's embedded raster glyphs (color Emoji)
+are excluded from that mask and decoded once on the preparation worker into a transparent
+color layer sharing the vector layer's viewBox and coordinates. Bounds expand to include color
+strikes that exceed RaTeX's fallback ascent/descent, preserving the baseline's position relative
+to both layers. The presentation owns its `RenderImage`
+directly and includes the decoded BGRA bytes in the budget; it does not enter the global image
+resource cache. Theme changes still tint vector symbols without recoloring Emoji.
 This budget does not include canonical session data, native GPU/font resources, or the separate
 Trajectory details renderer. There is no cross-session Chat presentation cache.
 
