@@ -18,3 +18,17 @@ CFG
     fi
     echo "PASS: $fault produces $invariant counterexample"
 done
+
+cat > probe-flash.cfg <<CFG
+CONSTANT Fault = "flash"
+SPECIFICATION Spec
+PROPERTY NoIntermediateDowngrade
+CFG
+result=0
+run_tlc probe-flash > probe-flash.log 2>&1 || result=$?
+if [[ $result -ne 13 ]] || ! grep -Fq 'Action property NoIntermediateDowngrade is violated.' probe-flash.log; then
+    cat probe-flash.log
+    echo 'FAIL: expected NoIntermediateDowngrade counterexample for flash' >&2
+    exit 1
+fi
+echo 'PASS: flash produces NoIntermediateDowngrade counterexample'

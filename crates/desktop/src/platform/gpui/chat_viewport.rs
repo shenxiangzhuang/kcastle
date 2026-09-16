@@ -359,6 +359,33 @@ pub(crate) struct ChatRow {
     pub(crate) chunk: Option<SourceChunk>,
 }
 impl ChatRow {
+    fn indexed(&self, chunks: Vec<SourceChunk>, previous: &[ChatRow]) -> Vec<ChatRow> {
+        let previous = previous
+            .iter()
+            .map(|row| (row.key, row))
+            .collect::<HashMap<_, _>>();
+        chunks
+            .into_iter()
+            .map(|chunk| {
+                let mut row = Self {
+                    key: RowKey {
+                        start: chunk.range.start,
+                        ..self.key
+                    },
+                    chunk: Some(chunk),
+                    revision: self.message.revision,
+                    ..self.clone()
+                };
+                if let Some(old) = previous.get(&row.key)
+                    && old.chunk == row.chunk
+                    && old.plain() == row.plain()
+                {
+                    row.revision = old.revision;
+                }
+                row
+            })
+            .collect()
+    }
     fn source(&self) -> &str {
         if self.key.field == 2 {
             self.message.payload.as_deref().unwrap_or_default()
@@ -447,6 +474,7 @@ struct Presentation {
 }
 struct InFlight {
     source_revision: Option<u64>,
+    append_source: Option<Arc<Message>>,
     key: RowKey,
     epoch: u64,
     revision: u64,
@@ -584,6 +612,30 @@ impl ChatViewport {
             {
                 self.rows.extend(previous_rows.into_iter().map(|mut row| {
                     row.message_index = index;
+                    row
+                }));
+                continue;
+            }
+            if !lineage_changed
+                && message.role == Role::Assistant
+                && message.text.len() <= MAX_INDEX_SOURCE_BYTES
+                && previous_rows
+                    .first()
+                    .is_some_and(|old| message.text.starts_with(&old.message.text))
+                && previous_rows.iter().any(|row| {
+                    self.presentations
+                        .get(&row.key)
+                        .is_some_and(|p| p.prepared.is_some())
+                })
+            {
+                // Keep source locators and prepared content from the same snapshot.
+                // The index worker will publish the next demanded presentation atomically.
+                self.rows.extend(previous_rows.into_iter().map(|mut row| {
+                    row.message_index = index;
+                    if row.chunk.is_none() {
+                        row.message = message.clone();
+                        row.revision = message.revision;
+                    }
                     row
                 }));
                 continue;
@@ -750,31 +802,7 @@ impl ChatViewport {
                 .take_while(|r| r.key.message == row.key.message && r.chunk.is_some())
                 .count();
         let count = chunks.len();
-        let previous = self.rows[start..end]
-            .iter()
-            .map(|r| (r.key, r))
-            .collect::<HashMap<_, _>>();
-        let replacement = chunks
-            .into_iter()
-            .map(|chunk| {
-                let mut replacement = ChatRow {
-                    key: RowKey {
-                        start: chunk.range.start,
-                        ..row.key
-                    },
-                    chunk: Some(chunk),
-                    revision: row.message.revision,
-                    ..row.clone()
-                };
-                if let Some(old) = previous.get(&replacement.key)
-                    && old.chunk == replacement.chunk
-                    && old.plain() == replacement.plain()
-                {
-                    replacement.revision = old.revision;
-                }
-                replacement
-            })
-            .collect::<Vec<_>>();
+        let replacement = row.indexed(chunks, &self.rows[start..end]);
         let revisions = replacement
             .iter()
             .map(|r| (r.key, r.revision))
@@ -787,6 +815,16 @@ impl ChatViewport {
         self.list.splice(start..end, count);
         self.pending_anchor = Some(anchor);
         self.restore_pending();
+    }
+    fn latest_message<'a>(&'a self, row: &'a ChatRow) -> &'a Arc<Message> {
+        self.messages
+            .get(row.message_index)
+            .filter(|message| message.key == row.key.message)
+            .unwrap_or(&row.message)
+    }
+    fn pending_index(&self, row: &ChatRow) -> bool {
+        row.message.role == Role::Assistant
+            && row.message.revision != self.latest_message(row).revision
     }
     pub(crate) fn anchor(&self) -> ScrollAnchor {
         if self.list.is_following_tail() {
@@ -951,10 +989,9 @@ impl ChatViewport {
         if row.chunk.is_none() {
             return Some((row, None, None));
         }
-        let cached = match self
-            .cache
-            .get(&self.cache_key(&row, false), cx.background_executor().now())
-        {
+        let cache_key = self.cache_key(&row, false);
+        let rejected = self.rejected.contains(&cache_key);
+        let cached = match self.cache.get(&cache_key, cx.background_executor().now()) {
             Some(Cached::Markdown(prepared)) => Some(prepared.clone()),
             _ => None,
         };
@@ -990,6 +1027,7 @@ impl ChatViewport {
             entry.prepared = shared;
             entry.settled = true;
         }
+        entry.settled |= rejected;
         Some((
             row,
             Some(entry.selection.frame(index as u64)),
@@ -1152,9 +1190,12 @@ impl DesktopApp {
                     .and_then(|index| chat.rows.get(*index))
                     .is_some_and(|row| {
                         row.revision == work.revision
-                            && work
-                                .source_revision
-                                .is_none_or(|revision| row.message.revision == revision)
+                            && work.source_revision.is_none_or(|revision| {
+                                chat.latest_message(row).revision == revision
+                                    || work.append_source.as_ref().is_some_and(|source| {
+                                        chat.latest_message(row).text.starts_with(&source.text)
+                                    })
+                            })
                     })
             {
                 work.cancel.store(true, Ordering::Relaxed);
@@ -1168,9 +1209,10 @@ impl DesktopApp {
             .filter(|(_, index)| {
                 let row = &chat.rows[**index];
                 let cache_key = chat.cache_key(row, false);
-                row.rich()
-                    && !chat.rejected.contains(&cache_key)
-                    && chat.cache.peek(&cache_key).is_none()
+                chat.pending_index(row)
+                    || (row.rich()
+                        && !chat.rejected.contains(&cache_key)
+                        && chat.cache.peek(&cache_key).is_none())
             })
             .min_by_key(|(_, index)| {
                 let visible = chat.list.bounds_for_item(**index).is_some_and(|bounds| {
@@ -1180,18 +1222,55 @@ impl DesktopApp {
             })
             .and_then(|(_, index)| chat.rows.get(*index))
             .cloned();
-        let Some(row) = row else {
+        let Some(mut row) = row else {
             return;
         };
         let key = row.key;
         let epoch = chat.epoch;
         let revision = row.revision;
         let dark = chat.dark;
-        let needs_index = row.message.role == Role::Assistant
-            && row
-                .chunk
-                .as_ref()
-                .is_some_and(|chunk| chunk.gap_before.is_none());
+        let updating = chat.pending_index(&row);
+        let needs_index = updating
+            || (row.message.role == Role::Assistant
+                && row
+                    .chunk
+                    .as_ref()
+                    .is_some_and(|chunk| chunk.gap_before.is_none()));
+        let previous = if updating {
+            chat.rows
+                .iter()
+                .filter(|old| old.key.message == key.message)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut demand = row
+            .chunk
+            .as_ref()
+            .map(|chunk| chunk.range.clone())
+            .unwrap_or_default();
+        let mut reusable = HashMap::new();
+        if updating {
+            for old in previous
+                .iter()
+                .filter(|old| requested.contains_key(&old.key))
+            {
+                if let Some(chunk) = &old.chunk {
+                    demand.start = demand.start.min(chunk.range.start);
+                    demand.end = demand.end.max(chunk.range.end);
+                    if let Some(Cached::Markdown(prepared)) =
+                        chat.cache.peek(&chat.cache_key(old, false))
+                    {
+                        reusable.insert((old.revision, old.preparation_range()), prepared.clone());
+                    }
+                }
+            }
+            if demand.end == row.message.text.len() {
+                demand.end = chat.latest_message(&row).text.len();
+            }
+            row.message = chat.latest_message(&row).clone();
+        }
         let cache_key = chat.cache_key(&row, needs_index);
         // Do not parse an arbitrarily large logical code block just to reject its
         // result afterwards. All visible slices fall back to readable source.
@@ -1228,8 +1307,10 @@ impl DesktopApp {
             executor.clone(),
         );
         let source_revision = needs_index.then_some(row.message.revision);
+        let append_source = updating.then(|| row.message.clone());
         let task = cx.spawn(async move |this, cx| {
-            let (indexed, prepared) = executor
+            let worker_row = row.clone();
+            let (indexed, prepared, replacements) = executor
                 .spawn(async move {
                     #[cfg(test)]
                     {
@@ -1243,11 +1324,62 @@ impl DesktopApp {
                         }
                     }
                     if needs_index {
-                        (semantic_chunks(&source, &worker_cancel), None)
+                        let indexed = semantic_chunks(&source, &worker_cancel);
+                        let mut replacements = Vec::new();
+                        let mut bytes = 0;
+                        if updating && let Some(chunks) = &indexed {
+                            for next in worker_row.indexed(chunks.clone(), &previous) {
+                                if worker_cancel.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let Some(chunk) = &next.chunk else { continue };
+                                if chunk.range.end <= demand.start
+                                    || chunk.range.start >= demand.end
+                                    || !next.rich()
+                                {
+                                    continue;
+                                }
+                                let range = next.preparation_range();
+                                let limit = if next.code_visible().is_some() {
+                                    PRESENTATION_BYTES
+                                } else {
+                                    MAX_CHUNK_PRESENTATION_BYTES
+                                };
+                                let prepared = reusable
+                                    .get(&(next.revision, range.clone()))
+                                    .cloned()
+                                    .or_else(|| {
+                                        if next.code_visible().is_some()
+                                            && range.as_ref().is_some_and(|range| {
+                                                range.len() > MAX_CODE_SOURCE_BYTES
+                                            })
+                                        {
+                                            return None;
+                                        }
+                                        let prepared = dsh_markdown::prepare_markdown(
+                                            &next.markdown_source(),
+                                            &theme,
+                                            &worker_cancel,
+                                        )?;
+                                        if prepared.bytes() > limit
+                                            || bytes + prepared.bytes() > PRESENTATION_BYTES
+                                        {
+                                            return None;
+                                        }
+                                        bytes += prepared.bytes();
+                                        let prepared = Arc::new(prepared);
+                                        reusable.insert((next.revision, range), prepared.clone());
+                                        Some(prepared)
+                                    });
+                                replacements.push((next, prepared));
+                            }
+                        }
+                        (indexed, None, replacements)
                     } else {
                         (
                             None,
                             dsh_markdown::prepare_markdown(&source, &theme, &worker_cancel),
+                            Vec::new(),
                         )
                     }
                 })
@@ -1262,17 +1394,60 @@ impl DesktopApp {
                     dark,
                     completion_cancel.load(Ordering::Relaxed),
                 ) {
-                    if needs_index && chat.rows[index].message.revision != row.message.revision {
+                    if needs_index
+                        && chat.latest_message(&chat.rows[index]).revision != row.message.revision
+                        && !(updating
+                            && chat
+                                .latest_message(&chat.rows[index])
+                                .text
+                                .starts_with(&row.message.text))
+                    {
                         cx.notify();
                         return;
                     }
                     if let Some(chunks) = indexed {
+                        let visible_ranges = chat
+                            .rows
+                            .iter()
+                            .filter(|old| {
+                                old.key.message == key.message && chat.visible.contains(&old.key)
+                            })
+                            .filter_map(|old| old.chunk.as_ref().map(|chunk| chunk.range.clone()))
+                            .collect::<Vec<_>>();
+                        if updating {
+                            // Superseded keys must not protect an obsolete revision against
+                            // admission of the replacement. Live frame leases remain protected.
+                            let namespace = chat.namespace.clone();
+                            chat.cache.priorities.retain(|cached, _| {
+                                cached.namespace != namespace || cached.message != key.message
+                            });
+                        }
                         chat.cache.insert(
                             cache_key.clone(),
                             Cached::Index(chunks.clone()),
                             cx.background_executor().now(),
                         );
                         chat.install_index(&row, chunks);
+                        for (replacement, prepared) in replacements {
+                            let key = chat.cache_key(&replacement, false);
+                            let visible = replacement.chunk.as_ref().is_some_and(|chunk| {
+                                visible_ranges.iter().any(|range| {
+                                    range.start < chunk.range.end && chunk.range.start < range.end
+                                })
+                            });
+                            chat.cache
+                                .priorities
+                                .insert(key.clone(), if visible { 2 } else { 1 });
+                            if !prepared.is_some_and(|prepared| {
+                                chat.cache.insert(
+                                    key.clone(),
+                                    Cached::Markdown(prepared),
+                                    cx.background_executor().now(),
+                                )
+                            }) {
+                                chat.rejected.insert(key);
+                            }
+                        }
                         cx.notify();
                         return;
                     }
@@ -1336,6 +1511,7 @@ impl DesktopApp {
         });
         chat.in_flight = Some(InFlight {
             source_revision,
+            append_source,
             key,
             epoch,
             revision,

@@ -6,10 +6,17 @@ Contract: [Desktop ownership and performance](../../desktop.md#chat-viewport).
 versions, visible rows within a larger preparation demand, a shared cache, one non-preemptible worker slot,
 cancellation and publication. Switching sessions drops active demand but preserves
 reusable entries; a return can reuse only the matching session and version.
-A version abstracts projection lineage, source revision and theme. Rust additionally
-keys by source field/range; unchanged streaming fragments keep their revision.
+A version abstracts projection lineage, source revision and theme. `generation` identifies the
+displayed snapshot; `target` identifies the latest source. `Append` advances only the target,
+preserving rich content until `FinishUpdate` atomically installs the prepared replacement.
+Continued appends may leave work behind the target: a completed append snapshot still advances
+the display, then the next job coalesces the remaining input. `Invalidate` covers non-append
+rewrite/lineage/theme changes and still cancels work. Rust additionally keys by source field/range;
+unchanged streaming fragments keep their revision.
 
-- `CurrentOnly`: active results belong to current demand, session and version.
+- `CurrentOnly`: active results belong to current demand, session and displayed version.
+- `DisplayedVersion`: display cannot advance beyond the latest source.
+- `NoIntermediateDowngrade`: advancing the source alone cannot erase the displayed presentation.
 - `BoundedWorker`: cancellation never frees a running worker slot prematurely.
 - `BoundedReady`: protected presentations cannot outgrow visible demand.
 - `BoundedCache`: all sessions share one capacity, including inactive results.
@@ -21,9 +28,11 @@ render callbacks, independently of GPUI's cached measurements. `activate/release
 clear UI entities/demand and cancel work, while `PreparationCache` keeps reusable
 results. `sync` can restore a cached semantic index and `row` can reuse prepared
 Markdown. `current_result` checks worker freshness before either kind is admitted.
-`FinishIndex` abstracts semantic range-index publication: rows are replaced and
-active demand is collected again. Rust also checks the whole-message revision for
-index publication, since a stable fragment revision does not identify a whole message.
+`FinishIndex` abstracts cold semantic range-index publication: rows are replaced and active
+demand is collected again. `FinishUpdate` instead replaces the demanded index and preparation
+together. Rust checks the whole-message revision for cold index publication; for an already
+displayed append snapshot it also permits publication when the prepared source is still a prefix
+of the latest source. A stable fragment revision alone does not identify a whole message.
 The completion path drains the existing queue directly (`Finish` followed by `Start`),
 without requiring another native draw or freeing the slot early on cancellation.
 
@@ -39,7 +48,11 @@ Assumptions: a worker eventually returns; cancellation is cooperative between CP
 stages. GPUI layout, Markdown semantics, source limits, pixel anchors, session I/O,
 transient allocations and native GPU/font resources are outside the model. SVG and
 formula-image leases follow cached preparation lifetime and count in the Rust estimate;
-process-wide font owners do not. This finite model is not a refinement proof.
+process-wide font owners do not. The atomic-update transition abstracts a batch that fits the
+budget; Rust additionally bounds new batch allocations and retains the existing plain fallback
+when preparation or admission fails. The model does not prove geometry stability or performance
+under unlimited source arrival. GPUI tests check intermediate geometry and advancement to a
+completed prefix while the next append job is suspended. This finite model is not a refinement proof.
 
 `syntax.rs` now reuses at most four idle, source-free highlighters across rendering
 and preparation. Borrowing transfers exclusive ownership under a short mutex; parse,
@@ -51,5 +64,6 @@ alias reuse, theme/document independence and oversized/cancelled inputs. This mo
 does not quantify retained grammar/parser memory or cross-window pool contention.
 
 `self-test` deliberately permits stale publication, unbounded caching, eviction of
-live results and parallel workers; each must violate its invariant. A false `NoReady`
-invariant confirms publication is reachable.
+live results and parallel workers; each must violate its invariant. The `flash` fault clears
+ready content on append and must violate `NoIntermediateDowngrade`. A false `NoReady` invariant
+confirms publication is reachable.
