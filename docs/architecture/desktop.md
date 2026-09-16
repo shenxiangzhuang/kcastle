@@ -82,9 +82,18 @@ rows. Lists (including loose/nested items), quotes and tables retain their block
 inter-block spacing is computed from adjacent AST nodes, including standalone strong lead-ins
 followed by lists. Index publication checks the whole message revision as well as the normal
 fragment/epoch/demand checks, splices rows, and restores the source-byte scroll anchor.
-Append-only streaming retains the completed semantic prefix, leaving the last two logical
-blocks provisional like `StreamingMarkdownState`. Reindexing preserves matching row revisions
-and presentations, so settled content does not revert to raw Markdown on every token.
+Once rich content is displayed, append-only updates within the indexing limit keep its complete
+source/row/presentation snapshot on screen. The same worker indexes the new source and prepares
+replacement blocks overlapping the demanded source range before publishing both together.
+Unchanged blocks reuse their cached preparation; code slices share one preparation. The pending
+batch retains at most another 8 MiB of newly prepared data, subject to the existing per-block
+limits; admission still uses the shared cache budget and its readable-source fallback.
+Continued appends do not cancel this worker: a completed snapshot may advance the display if it
+is still a prefix of the latest source, then one new worker coalesces the remaining appends.
+This prevents fast streams from starving presentation. Rewrites, session/lineage/theme changes
+and leaving demand still reject stale work. Source locators, selection input and rich content
+always refer to the same displayed snapshot. Cold or unprepared content retains the initial
+plain-text path and completed semantic prefix reuse. Reindexing preserves matching row revisions.
 Expanding or collapsing reasoning/tool output retains unchanged assistant indices and
 presentations; overlay-only changes cannot redefine their cached source fragments.
 Large paragraph-only messages use the existing scan without a global AST, but only after ruling
@@ -156,7 +165,13 @@ or freshness transitions. Native file pages remain outside the presentation budg
 
 The [Chat presentation model](tla/chat-presentation/README.md) checks demand/freshness,
 cancellation, and worker bounds. Integration tests exercise viewport-only allocation, progressive
-preparation, scrolling eviction, anchor restoration, and streaming prefix reuse.
+preparation, scrolling eviction, anchor restoration, and streaming prefix reuse. The streaming
+publication regression suspends the real preparation worker between frames and compares native
+list row bounds before/during/after three non-wrapping character appends. A completed 18-line
+Rust block plus trailing paragraph previously moved 49 px and reverted to plain text on every
+append; the regression requires unchanged geometry, rich intermediate frames and one worker per
+append. A second test checks progress during continued appends and rejection after rewrite/switch.
+These are GPUI headless layout checks, not a native display frame-time measurement.
 
 #### Chat performance checks
 

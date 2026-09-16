@@ -529,3 +529,214 @@ fn expanding_reasoning_preserves_assistant_content(cx: &mut TestAppContext) {
     cx.run_until_parked();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[gpui_kit::test]
+fn streaming_publishes_rich_rows_without_intermediate_height_changes(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let source = format!("```rust\n{}```\n\nTail", "let value = 42;\n".repeat(18));
+    let mut snapshot = fixture(90000, 1, &source);
+    Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]).pending = true;
+    view.update(cx, |app, cx| publish(app, &snapshot, "stream", cx));
+    cx.run_until_parked();
+    let inspect = |cx: &mut VisualTestContext| {
+        assert!(cx.debug_bounds("chat-plain:90000").is_none());
+        view.read_with(cx, |app, _| {
+            let chat = app.chat.borrow();
+            assert!(chat.list.is_following_tail());
+            assert!(chat.prepared_chunks() >= 2);
+            chat.rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (row.key, chat.list.bounds_for_item(index)))
+                .collect::<Vec<_>>()
+        })
+    };
+    let initial = inspect(cx);
+    for _ in 0..3 {
+        let starts = view.read_with(cx, |app, _| {
+            app.chat.borrow().worker_starts.load(Ordering::Relaxed)
+        });
+        let (resume, gate) = tokio::sync::oneshot::channel();
+        let message = Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]);
+        message.text.push('x');
+        message.revision += 1;
+        view.update(cx, |app, cx| {
+            app.chat.get_mut().worker_gate = Some(gate);
+            app.core.session_view = snapshot.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            inspect(cx),
+            initial,
+            "pending preparation must preserve the displayed geometry"
+        );
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            inspect(cx),
+            initial,
+            "a non-wrapping character must not move the completed code block"
+        );
+        view.read_with(cx, |app, _| {
+            let chat = app.chat.borrow();
+            assert_eq!(
+                chat.rows.iter().map(|row| row.plain()).collect::<String>(),
+                snapshot.conversation.messages[0].text
+            );
+            assert_eq!(
+                chat.worker_starts.load(Ordering::Relaxed),
+                starts + 1,
+                "index and changed demanded content publish together"
+            );
+            assert_eq!(chat.unsettled_chunks(), 0);
+        });
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn streaming_code_slices_and_closing_fence_publish_together(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let mut snapshot = fixture(
+        93000,
+        1,
+        &format!("```rust\n{}", "let value = 42;\n".repeat(22)),
+    );
+    view.update(cx, |app, cx| publish(app, &snapshot, "code-stream", cx));
+    cx.run_until_parked();
+    for delta in [
+        "let next = 43;\n".repeat(5),
+        "```\n\nA **finished** paragraph.".into(),
+    ] {
+        let displayed = snapshot.conversation.messages[0].text.clone();
+        let (resume, gate) = tokio::sync::oneshot::channel();
+        let message = Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]);
+        message.text.push_str(&delta);
+        message.revision += 1;
+        view.update(cx, |app, cx| {
+            app.chat.get_mut().worker_gate = Some(gate);
+            app.core.session_view = snapshot.clone();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-plain:93000").is_none());
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.chat
+                    .borrow()
+                    .rows
+                    .iter()
+                    .map(|row| row.plain())
+                    .collect::<String>(),
+                displayed
+            )
+        });
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("chat-plain:93000").is_none());
+        view.read_with(cx, |app, _| {
+            let chat = app.chat.borrow();
+            assert_eq!(
+                chat.rows.iter().map(|row| row.plain()).collect::<String>(),
+                snapshot.conversation.messages[0].text
+            );
+            assert_eq!(chat.unsettled_chunks(), 0);
+        });
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
+fn streaming_coalesces_appends_and_rejects_replaced_or_switched_work(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let mut snapshot = fixture(91000, 1, "A **formatted** paragraph.");
+    view.update(cx, |app, cx| publish(app, &snapshot, "stream", cx));
+    cx.run_until_parked();
+    for change in ["append", "replace", "switch"] {
+        let displayed = snapshot.conversation.messages[0].text.clone();
+        let starts = view.read_with(cx, |app, _| {
+            app.chat.borrow().worker_starts.load(Ordering::Relaxed)
+        });
+        let (resume, gate) = tokio::sync::oneshot::channel();
+        view.update(cx, |app, _| app.chat.get_mut().worker_gate = Some(gate));
+        for _ in 0..2 {
+            let message = Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]);
+            message.text.push_str(" More.");
+            message.revision += 1;
+            view.update(cx, |app, cx| {
+                app.core.session_view = snapshot.clone();
+                cx.notify();
+            });
+            cx.run_until_parked();
+            assert!(cx.debug_bounds("chat-plain:91000").is_none());
+            view.read_with(cx, |app, _| {
+                let chat = app.chat.borrow();
+                assert_eq!(
+                    chat.rows.iter().map(|row| row.plain()).collect::<String>(),
+                    displayed
+                );
+                assert_eq!(
+                    chat.worker_starts.load(Ordering::Relaxed),
+                    starts + 1,
+                    "new input must retain the sole worker slot"
+                );
+            });
+        }
+        let (next_resume, next_gate) = tokio::sync::oneshot::channel();
+        if change == "append" {
+            view.update(cx, |app, _| {
+                app.chat.get_mut().worker_gate = Some(next_gate)
+            });
+        } else if change == "replace" {
+            let message = Arc::make_mut(&mut Arc::make_mut(&mut snapshot).conversation.messages[0]);
+            message.text = "Replaced **content**.".into();
+            message.revision += 1;
+            view.update(cx, |app, cx| {
+                app.core.session_view = snapshot.clone();
+                cx.notify();
+            });
+            cx.run_until_parked();
+        } else {
+            snapshot = fixture(92000, 1, "Another **session**.");
+            view.update(cx, |app, cx| publish(app, &snapshot, "other", cx));
+            cx.run_until_parked();
+        }
+        resume.send(()).unwrap();
+        cx.run_until_parked();
+        if change == "append" {
+            // Continued token arrival must not starve publication. Show the completed
+            // snapshot, then coalesce remaining appends into the next sole worker.
+            assert!(cx.debug_bounds("chat-plain:91000").is_none());
+            view.read_with(cx, |app, _| {
+                let chat = app.chat.borrow();
+                assert_eq!(
+                    chat.rows.iter().map(|row| row.plain()).collect::<String>(),
+                    format!("{displayed} More.")
+                );
+                assert_eq!(chat.worker_starts.load(Ordering::Relaxed), starts + 2);
+            });
+            next_resume.send(()).unwrap();
+            cx.run_until_parked();
+        }
+        view.read_with(cx, |app, _| {
+            let chat = app.chat.borrow();
+            assert_eq!(
+                chat.rows.iter().map(|row| row.plain()).collect::<String>(),
+                snapshot.conversation.messages[0].text
+            );
+            assert_eq!(chat.unsettled_chunks(), 0);
+            assert!(chat.cache_bytes() <= 8 * 1024 * 1024);
+        });
+    }
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
