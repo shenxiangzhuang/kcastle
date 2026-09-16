@@ -8,7 +8,7 @@ use ratex_types::display_item::DisplayItem;
 
 pub mod outline_cache;
 
-pub type FontBytes = Arc<Vec<u8>>;
+pub type FontBytes = Arc<ratex_unicode_font::FontData>;
 type CachedFont = Option<FontBytes>;
 
 const FONT_MAP: &[(FontId, &str)] = &[
@@ -73,7 +73,7 @@ impl From<HashMap<FontId, Vec<u8>>> for FontSet {
         Self {
             fonts: fonts
                 .into_iter()
-                .map(|(id, bytes)| (id, Arc::new(bytes)))
+                .map(|(id, bytes)| (id, Arc::new(bytes.into())))
                 .collect(),
         }
     }
@@ -288,7 +288,7 @@ fn load_katex_font(font_dir: &str, font_id: FontId) -> Result<Option<FontBytes>,
         return Ok(None);
     }
     std::fs::read(&path)
-        .map(|bytes| Some(Arc::new(bytes)))
+        .map(|bytes| Some(Arc::new(bytes.into())))
         .map_err(|e| format!("Failed to read {}: {e}", path.display()))
 }
 
@@ -301,7 +301,7 @@ fn load_katex_font(_font_dir: &str, font_id: FontId) -> Result<Option<FontBytes>
     else {
         return Ok(None);
     };
-    Ok(ratex_katex_fonts::ttf_bytes(filename).map(|cow| Arc::new(cow.into_owned())))
+    Ok(ratex_katex_fonts::ttf_bytes(filename).map(|cow| Arc::new(cow.into_owned().into())))
 }
 
 #[cfg(test)]

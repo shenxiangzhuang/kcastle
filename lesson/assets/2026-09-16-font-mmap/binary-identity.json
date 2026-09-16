@@ -1,0 +1,77 @@
+[
+  {
+    "path": "/Users/mathewshen/Workspace/kcastle/target/release/kcastle-desktop",
+    "uuid": "b3891911a27e3330a0cd6cda7bd7fa28",
+    "sections": {
+      "__TEXT,__text": "edc9b044ec38accec898d4e87526cad47f5983694379bd1d5a9798722e7b47d3",
+      "__TEXT,__text_startup": "80d08cbeedbff639103a6f949a2cccad2d6549bc77fbbdc87943793b15fb72f3",
+      "__TEXT,__stubs": "b55f3ab58092eb66bad52f1c732ceac5df1702282779af0645840ac0d94143ba",
+      "__TEXT,__stub_helper": "bc46255dfb05030e771cea17471f8b9846a2092ae77d99e5fc78c7edbec8612b",
+      "__TEXT,__const": "a9faf4343abff36057a793d6e6a59d055e6933a4228965f00b2d68fc8a61858e",
+      "__TEXT,__gcc_except_tab": "2e098aadfdb12896a6cd6abfd691789e4aaead8ca83df9ba17547c54d531ec8d",
+      "__TEXT,__cstring": "351d69b53ba8bfc397a3dffbce45da865abb88ad70f7a195bb7c73120f10ea46",
+      "__TEXT,__unwind_info": "94efc8f6b54c36b1166519a432fca4c6f472cbea985eb31f4e7218c31e140e14",
+      "__TEXT,__eh_frame": "b7a91bad53eff5ccdefede5d5137668c8bebffedd3d8a6f06c396b482488c285",
+      "__DATA_CONST,__got": "f6f71ad502e670724811cf0e05e59aa2a00d363961b1e6d990c0e935a13cda3e",
+      "__DATA_CONST,__mod_init_func": "921b2c68b8f27d00938a7e958199984fa8bdc0238182a2b295472e4386932630",
+      "__DATA_CONST,__const": "0f5f79d1ccab97aa3489bbd8956cb38c2a40a2396d3532b18d136793af3c1358",
+      "__DATA,__la_symbol_ptr": "b1a3b9d03f26435dce7e2d47e6e0d11313fbddc239a0d43184f0f72bb43fbf59",
+      "__DATA,__data": "81a003663b5ba32648a74f35daa0f6393f988676dbded1e95523d612489ca5e7",
+      "__DATA,_CTR0GR_ISIZE_FN": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "__DATA,__ctor_force": "da5ce806d5e3e3b31818f0708e5437779e1dea17d7719d40521794d7ee55e9df",
+      "__DATA,_CTOR0_ISIZE_FN": "700edd667c8d1734901ce99408e9beec7f096ca7b597d2cec172b84ae6c65ffb",
+      "__DATA,__thread_vars": "187741444c3201a0ac287c7f6a4a5acc2faca6efe59c2078ab7dec202375fa7b",
+      "__DATA,__thread_data": "35bbaa172a50229f53594fcd9ca77126d64427ec581612376099d59ccb018726"
+    }
+  },
+  {
+    "path": "/Users/mathewshen/Workspace/kcastle/target/Kcastle.app/Contents/MacOS/kcastle",
+    "uuid": "b3891911a27e3330a0cd6cda7bd7fa28",
+    "sections": {
+      "__TEXT,__text": "edc9b044ec38accec898d4e87526cad47f5983694379bd1d5a9798722e7b47d3",
+      "__TEXT,__text_startup": "80d08cbeedbff639103a6f949a2cccad2d6549bc77fbbdc87943793b15fb72f3",
+      "__TEXT,__stubs": "b55f3ab58092eb66bad52f1c732ceac5df1702282779af0645840ac0d94143ba",
+      "__TEXT,__stub_helper": "bc46255dfb05030e771cea17471f8b9846a2092ae77d99e5fc78c7edbec8612b",
+      "__TEXT,__const": "a9faf4343abff36057a793d6e6a59d055e6933a4228965f00b2d68fc8a61858e",
+      "__TEXT,__gcc_except_tab": "2e098aadfdb12896a6cd6abfd691789e4aaead8ca83df9ba17547c54d531ec8d",
+      "__TEXT,__cstring": "351d69b53ba8bfc397a3dffbce45da865abb88ad70f7a195bb7c73120f10ea46",
+      "__TEXT,__unwind_info": "94efc8f6b54c36b1166519a432fca4c6f472cbea985eb31f4e7218c31e140e14",
+      "__TEXT,__eh_frame": "b7a91bad53eff5ccdefede5d5137668c8bebffedd3d8a6f06c396b482488c285",
+      "__DATA_CONST,__got": "f6f71ad502e670724811cf0e05e59aa2a00d363961b1e6d990c0e935a13cda3e",
+      "__DATA_CONST,__mod_init_func": "921b2c68b8f27d00938a7e958199984fa8bdc0238182a2b295472e4386932630",
+      "__DATA_CONST,__const": "0f5f79d1ccab97aa3489bbd8956cb38c2a40a2396d3532b18d136793af3c1358",
+      "__DATA,__la_symbol_ptr": "b1a3b9d03f26435dce7e2d47e6e0d11313fbddc239a0d43184f0f72bb43fbf59",
+      "__DATA,__data": "81a003663b5ba32648a74f35daa0f6393f988676dbded1e95523d612489ca5e7",
+      "__DATA,_CTR0GR_ISIZE_FN": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "__DATA,__ctor_force": "da5ce806d5e3e3b31818f0708e5437779e1dea17d7719d40521794d7ee55e9df",
+      "__DATA,_CTOR0_ISIZE_FN": "700edd667c8d1734901ce99408e9beec7f096ca7b597d2cec172b84ae6c65ffb",
+      "__DATA,__thread_vars": "187741444c3201a0ac287c7f6a4a5acc2faca6efe59c2078ab7dec202375fa7b",
+      "__DATA,__thread_data": "35bbaa172a50229f53594fcd9ca77126d64427ec581612376099d59ccb018726"
+    }
+  },
+  {
+    "path": "/private/tmp/kcastle-mmap-experiment/Kcastle Latest.app/Contents/MacOS/kcastle-latest",
+    "uuid": "b3891911a27e3330a0cd6cda7bd7fa28",
+    "sections": {
+      "__TEXT,__text": "edc9b044ec38accec898d4e87526cad47f5983694379bd1d5a9798722e7b47d3",
+      "__TEXT,__text_startup": "80d08cbeedbff639103a6f949a2cccad2d6549bc77fbbdc87943793b15fb72f3",
+      "__TEXT,__stubs": "b55f3ab58092eb66bad52f1c732ceac5df1702282779af0645840ac0d94143ba",
+      "__TEXT,__stub_helper": "bc46255dfb05030e771cea17471f8b9846a2092ae77d99e5fc78c7edbec8612b",
+      "__TEXT,__const": "a9faf4343abff36057a793d6e6a59d055e6933a4228965f00b2d68fc8a61858e",
+      "__TEXT,__gcc_except_tab": "2e098aadfdb12896a6cd6abfd691789e4aaead8ca83df9ba17547c54d531ec8d",
+      "__TEXT,__cstring": "351d69b53ba8bfc397a3dffbce45da865abb88ad70f7a195bb7c73120f10ea46",
+      "__TEXT,__unwind_info": "94efc8f6b54c36b1166519a432fca4c6f472cbea985eb31f4e7218c31e140e14",
+      "__TEXT,__eh_frame": "b7a91bad53eff5ccdefede5d5137668c8bebffedd3d8a6f06c396b482488c285",
+      "__DATA_CONST,__got": "f6f71ad502e670724811cf0e05e59aa2a00d363961b1e6d990c0e935a13cda3e",
+      "__DATA_CONST,__mod_init_func": "921b2c68b8f27d00938a7e958199984fa8bdc0238182a2b295472e4386932630",
+      "__DATA_CONST,__const": "0f5f79d1ccab97aa3489bbd8956cb38c2a40a2396d3532b18d136793af3c1358",
+      "__DATA,__la_symbol_ptr": "b1a3b9d03f26435dce7e2d47e6e0d11313fbddc239a0d43184f0f72bb43fbf59",
+      "__DATA,__data": "81a003663b5ba32648a74f35daa0f6393f988676dbded1e95523d612489ca5e7",
+      "__DATA,_CTR0GR_ISIZE_FN": "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+      "__DATA,__ctor_force": "da5ce806d5e3e3b31818f0708e5437779e1dea17d7719d40521794d7ee55e9df",
+      "__DATA,_CTOR0_ISIZE_FN": "700edd667c8d1734901ce99408e9beec7f096ca7b597d2cec172b84ae6c65ffb",
+      "__DATA,__thread_vars": "187741444c3201a0ac287c7f6a4a5acc2faca6efe59c2078ab7dec202375fa7b",
+      "__DATA,__thread_data": "35bbaa172a50229f53594fcd9ca77126d64427ec581612376099d59ccb018726"
+    }
+  }
+]
