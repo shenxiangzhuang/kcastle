@@ -3958,6 +3958,7 @@ dependencies = [
  "ratex-svg",
  "ratex-types",
  "raw-window-handle",
+ "roxmltree 0.21.1",
  "rusqlite",
  "serde",
  "serde_json",
