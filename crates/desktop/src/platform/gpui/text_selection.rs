@@ -7,11 +7,8 @@ use gpui_kit::base::{
     TextSelection, TextSelectionCoverage, TextSelectionEvent, TextSelectionHandle,
     TextSelectionRegistration, TextSelectionRun, TextSelectionSnapshot,
 };
+use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::input::Copy;
-use gpui_kit::component::{
-    highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::Rope,
-};
 use gpui_kit::{
     AnyElement, App, Bounds, Element, ElementId, FocusHandle, GlobalElementId, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels,
@@ -157,10 +154,13 @@ impl SelectionFrame {
         }
         // Settled code used TextView's unbounded parse; keep that contract so a
         // timed-out empty or stale tree can never enter this permanent cache.
-        let mut highlighter = SyntaxHighlighter::new(language);
-        let completed = highlighter.update(None, &Rope::from(source), None);
-        debug_assert!(completed, "an unbounded syntax parse always completes");
-        let styles = highlighter.styles(&(0..source.len()), theme.as_ref());
+        let styles = crate::syntax::highlight_code(
+            language,
+            source,
+            theme,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap_or_default();
         cache.insert(
             key.to_owned(),
             (source.to_owned(), theme.clone(), styles.clone()),

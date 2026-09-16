@@ -3964,6 +3964,7 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "tree-sitter",
  "tree-sitter-haskell",
  "unicode-linebreak",
  "velopack",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sourced by ../check in its isolated run directory.
-for case in stale:CurrentOnly keep-offscreen:CurrentOnly parallel:BoundedWorker none:NoReady; do
+for case in stale:CurrentOnly unbounded-cache:BoundedCache evict-live:CachedReady parallel:BoundedWorker none:NoReady; do
     fault=${case%:*}
     invariant=${case#*:}
     name="probe-$fault"

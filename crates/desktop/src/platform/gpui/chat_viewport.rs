@@ -1,13 +1,17 @@
 //! The chat list owns only the visible/overscan presentation working set. Journal/runtime
 //! ownership stays in SessionRuntime; rows are cheap source locators, never parsed documents.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
+
+mod cache;
+use cache::{CacheKey, Cached, IDLE_TTL, PreparationCache};
 
 use gpui_kit::{Context, ListAlignment, ListOffset, ListState, Task, Window, px};
 use im::Vector;
@@ -26,6 +30,9 @@ const CHUNK_LINES: usize = 24;
 const MAX_PROSE_BYTES: usize = 16 * 1024;
 const PRESENTATION_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNK_PRESENTATION_BYTES: usize = 1024 * 1024;
+const OVERSCAN: f32 = 600.0;
+const MAX_INDEX_SOURCE_BYTES: usize = 1024 * 1024;
+const MAX_CODE_SOURCE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct RowKey {
@@ -458,6 +465,12 @@ pub(crate) struct ChatViewport {
     lineage: u64,
     epoch: u64,
     presentations: HashMap<RowKey, Presentation>,
+    cache: PreparationCache,
+    heights: HashMap<RowKey, f32>,
+    rejected: HashSet<CacheKey>,
+    visible: HashSet<RowKey>,
+    cache_sweeper: Option<Task<()>>,
+    last_frame: Option<Instant>,
     requested: HashMap<RowKey, usize>,
     pub(crate) demand_scheduled: bool,
     in_flight: Option<InFlight>,
@@ -471,7 +484,7 @@ pub(crate) struct ChatViewport {
 
 impl Default for ChatViewport {
     fn default() -> Self {
-        let list = ListState::new(0, ListAlignment::Top, px(600.0));
+        let list = ListState::new(0, ListAlignment::Top, px(OVERSCAN));
         list.set_follow_mode(gpui_kit::FollowMode::Tail);
         Self {
             list,
@@ -483,6 +496,12 @@ impl Default for ChatViewport {
             lineage: 0,
             epoch: 0,
             presentations: HashMap::new(),
+            cache: PreparationCache::new(PRESENTATION_BYTES),
+            heights: HashMap::new(),
+            rejected: HashSet::new(),
+            visible: HashSet::new(),
+            cache_sweeper: None,
+            last_frame: None,
             requested: HashMap::new(),
             demand_scheduled: false,
             in_flight: None,
@@ -510,6 +529,10 @@ impl ChatViewport {
     pub(crate) fn release(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         self.presentations.clear();
+        self.heights.clear();
+        self.rejected.clear();
+        self.visible.clear();
+        self.cache.priorities.clear();
         self.list.remeasure();
         self.requested.clear();
         if let Some(work) = &self.in_flight {
@@ -640,10 +663,20 @@ impl ChatViewport {
                 // A large document containing only paragraph lines needs no global AST.
                 // Reject every possible container opener/setext/table delimiter before
                 // taking this fast path; mixed Markdown still uses the semantic worker.
-                if message.role == Role::Assistant && paragraph_only(&message.text) {
+                let paragraphs = message.role == Role::Assistant && paragraph_only(&message.text);
+                let oversized = message.text.len() > MAX_INDEX_SOURCE_BYTES && !paragraphs;
+                if message.role == Role::Assistant && (paragraphs || oversized) {
                     for (i, chunk) in chunks.iter_mut().enumerate() {
                         chunk.gap_before = Some(if i == 0 { 0 } else { 16 });
+                        // Bound the input to whole-document parsing, not only the retained result.
+                        chunk.literal |= oversized;
                     }
+                }
+                if message.role == Role::Assistant
+                    && let Some(Cached::Index(cached)) =
+                        self.cache.peek(&self.cache_key(&chrome, true))
+                {
+                    chunks = cached.clone();
                 }
                 self.rows.extend(chunks.into_iter().map(|chunk| ChatRow {
                     key: RowKey {
@@ -805,6 +838,104 @@ impl ChatViewport {
     pub(crate) fn begin_frame(&mut self) {
         self.requested.clear();
     }
+
+    fn cache_key(&self, row: &ChatRow, index: bool) -> CacheKey {
+        CacheKey {
+            namespace: self.namespace.clone(),
+            lineage: self.lineage,
+            message: row.key.message,
+            revision: if index {
+                row.message.revision
+            } else {
+                row.revision
+            },
+            field: if index { 1 } else { row.key.field },
+            source: if index {
+                0..row.message.text.len()
+            } else {
+                row.preparation_range().unwrap_or_default()
+            },
+            dark: !index && self.dark,
+            index,
+        }
+    }
+
+    /// Native overdraw may reuse heights without calling our renderer. Declare demand
+    /// from geometry as well, so measured neighbours still get prepared and retained.
+    fn refresh_demand(&mut self, now: Instant) {
+        let top = self.list.logical_scroll_top();
+        let viewport = self.list.viewport_bounds();
+        let previous_visible = std::mem::take(&mut self.visible);
+        let mut y = -f32::from(top.offset_in_item);
+        for index in top.item_ix..self.rows.len() {
+            if y >= f32::from(viewport.size.height) + OVERSCAN {
+                break;
+            }
+            let row = &self.rows[index];
+            let height = if let Some(bounds) = self.list.bounds_for_item(index) {
+                let height = f32::from(bounds.size.height).max(1.0);
+                self.heights.insert(row.key, height);
+                height
+            } else {
+                self.estimated_height(row)
+            };
+            self.requested.insert(row.key, index);
+            if y < f32::from(viewport.size.height) && y + height > 0.0 {
+                self.visible.insert(row.key);
+            }
+            y += height;
+        }
+        let mut above = f32::from(top.offset_in_item);
+        for index in (0..top.item_ix.min(self.rows.len())).rev() {
+            if above >= OVERSCAN {
+                break;
+            }
+            let row = &self.rows[index];
+            above += self.estimated_height(row);
+            self.requested.insert(row.key, index);
+        }
+        self.heights
+            .retain(|key, _| self.requested.contains_key(key));
+        let wanted = self
+            .requested
+            .values()
+            .map(|i| self.cache_key(&self.rows[*i], false))
+            .collect::<HashSet<_>>();
+        let entering = self
+            .visible
+            .difference(&previous_visible)
+            .filter_map(|key| self.requested.get(key))
+            .map(|index| self.cache_key(&self.rows[*index], false))
+            .collect::<HashSet<_>>();
+        // A prefetch rejected under pressure gets another chance on entering the
+        // viewport, where its admission priority is higher.
+        self.rejected
+            .retain(|key| wanted.contains(key) && !entering.contains(key));
+        self.cache.priorities.clear();
+        for index in self.requested.values() {
+            let row = &self.rows[*index];
+            let key = self.cache_key(row, false);
+            let priority = if self.visible.contains(&row.key) {
+                2
+            } else {
+                1
+            };
+            for key in [key, self.cache_key(row, true)] {
+                let entry = self.cache.priorities.entry(key).or_default();
+                *entry = (*entry).max(priority);
+            }
+            self.cache.get(&self.cache_key(row, true), now);
+            self.cache.get(&self.cache_key(row, false), now);
+        }
+    }
+
+    fn estimated_height(&self, row: &ChatRow) -> f32 {
+        // GPUI exposes no bounds above the scroll top. Reuse the last observed height;
+        // unseen rows use a bounded source-line estimate until native layout measures them.
+        self.heights.get(&row.key).copied().unwrap_or_else(|| {
+            (row.plain().lines().take(CHUNK_LINES).count().max(1) as f32 * 26.0).max(24.0)
+        })
+    }
     pub(crate) fn row(
         &mut self,
         index: usize,
@@ -820,13 +951,22 @@ impl ChatViewport {
         if row.chunk.is_none() {
             return Some((row, None, None));
         }
-        let shared = self.presentations.iter().find_map(|(key, entry)| {
-            (key.message == row.key.message
-                && entry.source == row.preparation_range()
-                && entry.revision == row.revision
-                && entry.dark == self.dark)
-                .then(|| entry.prepared.clone())
-                .flatten()
+        let cached = match self
+            .cache
+            .get(&self.cache_key(&row, false), cx.background_executor().now())
+        {
+            Some(Cached::Markdown(prepared)) => Some(prepared.clone()),
+            _ => None,
+        };
+        let shared = cached.or_else(|| {
+            self.presentations.iter().find_map(|(key, entry)| {
+                (key.message == row.key.message
+                    && entry.source == row.preparation_range()
+                    && entry.revision == row.revision
+                    && entry.dark == self.dark)
+                    .then(|| entry.prepared.clone())
+                    .flatten()
+            })
         });
         let entry = self
             .presentations
@@ -895,11 +1035,64 @@ impl ChatViewport {
     pub(crate) fn selection_initialized(&self, id: MessageId) -> bool {
         self.presentations.keys().any(|key| key.message == id)
     }
+
+    #[cfg(test)]
+    pub(crate) fn cache_bytes(&self) -> usize {
+        self.cache.bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cache_budget(&mut self, bytes: usize) {
+        self.release();
+        self.cache = PreparationCache::new(bytes);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn demanded_unprepared(&self) -> usize {
+        self.requested
+            .values()
+            .filter(|i| {
+                let row = &self.rows[**i];
+                let key = self.cache_key(row, false);
+                row.rich() && self.cache.peek(&key).is_none() && !self.rejected.contains(&key)
+            })
+            .count()
+    }
 }
 
 impl DesktopApp {
     /// Called after list layout, never while GPUI holds ListState's mutable borrow.
     pub(crate) fn finish_chat_frame(&mut self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        let now = executor.now();
+        if self.chat.borrow().cache_sweeper.is_none() {
+            self.chat.borrow_mut().cache_sweeper = Some(cx.spawn(async move |this, cx| {
+                loop {
+                    executor.timer(Duration::from_secs(30)).await;
+                    if this
+                        .update(cx, |this, _| {
+                            let mut chat = this.chat.borrow_mut();
+                            let now = executor.now();
+                            // Idle windows keep the text being read, but release offscreen
+                            // entities too so they cannot pin cache entries indefinitely.
+                            if chat
+                                .last_frame
+                                .is_none_or(|last| now.saturating_duration_since(last) >= IDLE_TTL)
+                            {
+                                let visible = chat.visible.clone();
+                                chat.presentations.retain(|key, _| visible.contains(key));
+                                chat.requested.retain(|key, _| visible.contains(key));
+                                chat.cache.priorities.retain(|_, priority| *priority == 2);
+                            }
+                            chat.cache.expire(now);
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         // GPUI has now applied wheel/scrollbar movement and measured the visible rows.
         // Reading here also avoids the mutable ListState borrow held by scroll handlers.
         let follows = {
@@ -931,10 +1124,22 @@ impl DesktopApp {
             );
         }
         let mut chat = self.chat.borrow_mut();
+        // Completion also drains the queue through this method. Only a native frame
+        // changes geometry or counts as viewport activity.
+        if chat.demand_scheduled {
+            chat.last_frame = Some(now);
+            chat.refresh_demand(now);
+        }
         chat.demand_scheduled = false;
         let requested = chat.requested.clone();
         chat.presentations
             .retain(|key, _| requested.contains_key(key));
+        let visible = chat.visible.clone();
+        for (key, entry) in &mut chat.presentations {
+            if !visible.contains(key) {
+                entry.prepared = None;
+            }
+        }
         self.message_presentations
             .borrow_mut()
             .retain_messages(&requested.keys().map(|key| key.message).collect());
@@ -960,10 +1165,12 @@ impl DesktopApp {
         let viewport = chat.list.viewport_bounds();
         let row = requested
             .iter()
-            .filter(|(key, _)| {
-                chat.presentations
-                    .get(key)
-                    .is_some_and(|entry| !entry.settled)
+            .filter(|(_, index)| {
+                let row = &chat.rows[**index];
+                let cache_key = chat.cache_key(row, false);
+                row.rich()
+                    && !chat.rejected.contains(&cache_key)
+                    && chat.cache.peek(&cache_key).is_none()
             })
             .min_by_key(|(_, index)| {
                 let visible = chat.list.bounds_for_item(**index).is_some_and(|bounds| {
@@ -985,6 +1192,25 @@ impl DesktopApp {
                 .chunk
                 .as_ref()
                 .is_some_and(|chunk| chunk.gap_before.is_none());
+        let cache_key = chat.cache_key(&row, needs_index);
+        // Do not parse an arbitrarily large logical code block just to reject its
+        // result afterwards. All visible slices fall back to readable source.
+        if !needs_index
+            && row.code_visible().is_some()
+            && row
+                .preparation_range()
+                .is_some_and(|range| range.len() > MAX_CODE_SOURCE_BYTES)
+        {
+            chat.rejected.insert(cache_key);
+            for (_, entry) in chat.presentations.iter_mut().filter(|(key, entry)| {
+                key.message == row.key.message && entry.source == row.preparation_range()
+            }) {
+                entry.settled = true;
+            }
+            drop(chat);
+            self.finish_chat_frame(cx);
+            return;
+        }
         let source = if needs_index {
             row.message.text.clone()
         } else {
@@ -1041,40 +1267,44 @@ impl DesktopApp {
                         return;
                     }
                     if let Some(chunks) = indexed {
+                        chat.cache.insert(
+                            cache_key.clone(),
+                            Cached::Index(chunks.clone()),
+                            cx.background_executor().now(),
+                        );
                         chat.install_index(&row, chunks);
                         cx.notify();
                         return;
                     }
-                    let mut counted = std::collections::HashSet::new();
-                    let current_bytes: usize = chat
-                        .presentations
-                        .values()
-                        .filter_map(|entry| entry.prepared.as_ref())
-                        .filter(|value| counted.insert(Arc::as_ptr(value)))
-                        .map(|value| value.bytes())
-                        .sum();
-                    if let Some(entry) = chat.presentations.get_mut(&key) {
-                        entry.prepared = prepared
-                            .filter(|value| {
-                                value.bytes()
-                                    <= if row.code_visible().is_some() {
-                                        PRESENTATION_BYTES
-                                    } else {
-                                        MAX_CHUNK_PRESENTATION_BYTES
-                                    }
-                                    && current_bytes + value.bytes() <= PRESENTATION_BYTES
-                            })
-                            .map(Arc::new);
-                        entry.settled = true;
-                        chat.list.remeasure_items(index..index + 1);
+                    let prepared = prepared
+                        .filter(|value| {
+                            value.bytes()
+                                <= if row.code_visible().is_some() {
+                                    PRESENTATION_BYTES
+                                } else {
+                                    MAX_CHUNK_PRESENTATION_BYTES
+                                }
+                        })
+                        .map(Arc::new);
+                    let prepared = prepared.filter(|value| {
+                        chat.cache.insert(
+                            cache_key.clone(),
+                            Cached::Markdown(value.clone()),
+                            cx.background_executor().now(),
+                        )
+                    });
+                    if prepared.is_none() {
+                        chat.rejected.insert(cache_key);
                     }
+                    if let Some(entry) = chat.presentations.get_mut(&key) {
+                        entry.prepared = prepared.clone();
+                        entry.settled = true;
+                    }
+                    chat.list.remeasure_items(index..index + 1);
                     // Publish shared code to all demanded slices before advancing the
                     // queue; they must not each start a whole-block syntax parse.
                     if row.code_visible().is_some() {
-                        let shared = chat
-                            .presentations
-                            .get(&key)
-                            .and_then(|e| e.prepared.clone());
+                        let shared = prepared;
                         let siblings = chat
                             .requested
                             .iter()

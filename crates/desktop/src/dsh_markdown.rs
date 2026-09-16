@@ -22,10 +22,7 @@ use crate::assets::{GeneratedAsset, register_generated_asset};
 use crate::layout::{ColumnSpec, allocate_columns, list_marker_width};
 use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
 use crate::ui_theme::{UiPalette, markdown_highlight_theme, metrics, palette};
-use gpui_kit::component::{
-    highlighter::{HighlightTheme, SyntaxHighlighter},
-    input::Rope,
-};
+use gpui_kit::component::highlighter::HighlightTheme;
 
 const TABLE_FONT_SIZE: f32 = 15.0;
 
@@ -85,16 +82,9 @@ pub(crate) fn prepare_markdown(
         match node {
             Node::Code(block) => {
                 let language = block.lang.as_deref().unwrap_or_default();
-                let mut highlighter = SyntaxHighlighter::new(language);
-                if cancelled.load(Ordering::Relaxed) {
-                    return None;
-                }
-                if highlighter.update(None, &Rope::from(block.value.as_str()), None) {
-                    code.insert(
-                        (language.to_owned(), block.value.clone()),
-                        highlighter.styles(&(0..block.value.len()), theme),
-                    );
-                }
+                let styles =
+                    crate::syntax::highlight_code(language, &block.value, theme, cancelled)?;
+                code.insert((language.to_owned(), block.value.clone()), styles);
             }
             Node::Math(block) => {
                 math.insert(

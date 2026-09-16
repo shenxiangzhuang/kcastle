@@ -35,6 +35,10 @@ test-agent:
 bench-chat:
     cargo test -p kcastle-desktop --release --locked conversation::performance::chat_presentation_benchmark -- --ignored --exact --nocapture --test-threads=1
 
+# Compare a shared cache budget with the same three-session code browsing workload.
+bench-chat-cache mib="8":
+    KCASTLE_CHAT_CACHE_MIB={{quote(mib)}} cargo test -p kcastle-desktop --release --locked conversation::performance::chat_cache_benchmark -- --ignored --exact --nocapture --test-threads=1
+
 # Check all TLA+ models or one named model (requires Java 11+).
 tla-check model="all":
     docs/architecture/tla/check check {{quote(model)}}
