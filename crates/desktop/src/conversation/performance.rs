@@ -77,6 +77,50 @@ fn publish(
 }
 
 #[gpui_kit::test]
+fn code_block_has_balanced_gaps_without_blank_fragment_rows(cx: &mut TestAppContext) {
+    let (root, view, cx) = setup(cx);
+    let source = "## 四、失败后问用户——这里要修正\n\n```rust\nenum AskForApproval {\n    UnlessTrusted, // 除非有显式规则允许\n    OnRequest,     // 默认值\n    Granular(..),  // 细粒度分类\n    Never,\n}\n```\n\n**`on-failure` 现在只是 `on-request` 的别名**，而后者的语义是：";
+    // Exercise the long-message partition that used to introduce empty rows and
+    // an extra newline inside reconstructed fences, not just a single parsed document.
+    let snapshot = fixture(
+        94000,
+        1,
+        &format!("{}{source}", "Introduction.\n\n".repeat(180)),
+    );
+    view.update(cx, |app, cx| publish(app, &snapshot, "spacing", cx));
+    cx.run_until_parked();
+    view.read_with(cx, |app, _| {
+        let chat = app.chat.borrow();
+        let index = chat
+            .rows
+            .iter()
+            .position(|row| row.code_visible().is_some())
+            .unwrap();
+        let code = &chat.rows[index];
+        let following = &chat.rows[index + 1];
+        assert!(
+            following.plain().starts_with("**`on-failure`"),
+            "no blank fragment may separate code and prose"
+        );
+        assert_eq!(code.chunk.as_ref().unwrap().gap_before, Some(16));
+        assert_eq!(following.chunk.as_ref().unwrap().gap_before, Some(16));
+        // 37 px header + 16 px top/bottom padding + exactly six 22 px code lines.
+        assert_eq!(
+            chat.list.bounds_for_item(index).unwrap().size.height,
+            px(16.0 + 37.0 + 32.0 + 6.0 * 22.0)
+        );
+        assert_eq!(
+            chat.list.bounds_for_item(index + 1).unwrap().size.height,
+            px(16.0 + 26.0)
+        );
+    });
+    drop(view);
+    cx.update(|window, _| window.remove_window());
+    cx.run_until_parked();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[gpui_kit::test]
 fn chat_switch_and_scroll_do_not_wait_for_markdown(cx: &mut TestAppContext) {
     let (root, view, cx) = setup(cx);
     let first = fixture(10000, 1000, RICH_TEXT);
