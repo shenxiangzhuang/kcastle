@@ -18,7 +18,11 @@ Mapping: `ChatViewport::sync/activate/release` invalidate state; list callbacks 
 
 Assumptions: a worker eventually returns; cancellation is cooperative between CPU stages.
 The model abstracts GPUI layout, Markdown semantics, pixel anchors, byte budgets, session I/O,
-and asset reclamation. Rust tests cover source partitioning, anchors, progressive rendering,
+and asset reclamation. Process-wide font owners (owned snapshots or immutable system-file
+mappings) are also outside this model: font mapping changes storage, not worker demand,
+cancellation, publication, or SVG lease transitions. Mapping safety assumes the verified
+read-only macOS system volume remains read-only for the process lifetime.
+Rust tests cover source partitioning, anchors, progressive rendering,
 working-set eviction, and SVG lifetime. This finite model is not a refinement proof.
 
 `self-test` deliberately allows stale publication, omits eviction, and admits a second worker;

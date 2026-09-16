@@ -17,6 +17,15 @@ Local changes:
 - `ratex-unicode-font`: without a valid `RATEX_UNICODE_FONT` override, share the
   discovered system font bytes and face index between primary and secondary roles.
   Custom primary fonts retain a separately discovered system fallback.
+- `ratex-unicode-font` / `ratex-font-loader`: share `Arc<FontData>` owners, exposing
+  borrowed byte slices to renderers. On macOS, canonical paths under
+  `/System/Library/Fonts` are mapped only when `fstatfs` on the open descriptor
+  confirms a read-only filesystem. Emoji discovery preserves the selected file
+  and TTC face index instead of copying `fontdb`'s entire font buffer. All other
+  paths/platforms and mapping failures retain owned snapshots. The system volume
+  must remain read-only while mappings live; writable custom fonts are never mapped.
+  `FontBytes` and the Unicode loader return types change locally, but `FontSet`'s
+  slice interface and its `From<HashMap<FontId, Vec<u8>>>` conversion stay intact.
 
 Run regression tests with:
 
@@ -44,7 +53,8 @@ Fresh-process retained Rust heap after dropping the display list and SVG:
 | `\text{中文}` / `\text{⌘}` | 227.92 MiB | 22.49 MiB |
 | `\text{😀}` | 227.91 MiB | 205.71 MiB |
 
-Nine SVGs (ASCII, fraction, Greek letters, Chinese, command symbol, emoji,
+Before the mapping patch, nine SVGs (ASCII, fraction, Greek letters, Chinese, command symbol, emoji,
 mixed Chinese/emoji, summation, and outlined smiley) matched upstream byte for
 byte. These numbers depend on installed fonts and are not a total-app memory
-budget. An actual emoji still retains its source font; file mapping is deferred.
+budget. See the desktop architecture for the subsequent mapping ownership policy;
+native App acceptance measurements are recorded separately in `lesson/`.

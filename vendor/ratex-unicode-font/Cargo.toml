@@ -39,3 +39,9 @@ version = "0.1"
 
 [dependencies.ttf-parser]
 version = "0.25"
+
+[target.'cfg(target_os = "macos")'.dependencies.memmap2]
+version = "=0.9.11"
+
+[target.'cfg(target_os = "macos")'.dependencies.libc]
+version = "0.2"

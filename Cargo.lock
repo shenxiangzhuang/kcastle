@@ -5913,6 +5913,8 @@ name = "ratex-unicode-font"
 version = "0.1.14"
 dependencies = [
  "fontdb",
+ "libc",
+ "memmap2",
  "system-fonts",
  "ttf-parser",
 ]

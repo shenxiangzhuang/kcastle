@@ -84,8 +84,14 @@ RaTeX font data is process-wide and outside the preparation budget. The local
 [font patches](../../vendor/README.md) check primary Unicode outlines before
 loading optional emoji/secondary fonts, and share default primary/secondary
 font bytes. A missing outline retains the existing fallback chain; actual emoji
-can still load a large font until process exit. The patches retain `OnceLock`
-initialization and do not change worker, cancellation, or freshness transitions.
+can still discover a large font. Font bytes are held by `Arc<FontData>`: on macOS,
+canonical system font paths backed by a descriptor-verified read-only filesystem
+use an owned read-only mapping. Writable fonts (including custom fonts), other platforms, and mapping
+failures use owned byte snapshots. The mapping remains alive with its byte owner;
+the OS may reclaim clean file pages without invalidating the cached font. This
+assumes the OS system volume is not remounted writable during process execution.
+The patches retain `OnceLock` initialization and do not change worker, cancellation,
+or freshness transitions. Native file pages remain outside the presentation budget.
 
 The [Chat presentation model](tla/chat-presentation/README.md) checks demand/freshness,
 cancellation, and worker bounds. Integration tests exercise viewport-only allocation, progressive

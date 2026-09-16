@@ -1,0 +1,22 @@
+[
+  {
+    "case": "emoji-bottom",
+    "box": [
+      350,
+      85,
+      1110,
+      565
+    ],
+    "different_pixels": 0
+  },
+  {
+    "case": "trajectory",
+    "box": [
+      345,
+      75,
+      1175,
+      595
+    ],
+    "different_pixels": 0
+  }
+]
