@@ -128,7 +128,7 @@ struct FrameContent {
 struct Run {
     range: Range<usize>,
     text: SharedString,
-    layout: Option<TextLayout>,
+    layouts: Vec<(Range<usize>, TextLayout, Bounds<Pixels>)>,
     bounds: Option<Bounds<Pixels>>,
     atom: bool,
 }
@@ -193,13 +193,14 @@ impl SelectionFrame {
         content.runs.push(Run {
             range: start..end,
             text,
-            layout: None,
+            layouts: Vec::new(),
             bounds: None,
             atom,
         });
         SelectionFragment {
             content: self.content.clone(),
             index,
+            slice: None,
         }
     }
 
@@ -251,12 +252,14 @@ impl SelectionFrame {
         let runs = content
             .runs
             .iter()
-            .filter_map(|run| {
-                Some(TextSelectionRun::new(
-                    run.text.clone(),
-                    run.layout.clone()?,
-                    run.bounds?,
-                ))
+            .flat_map(|run| {
+                run.layouts.iter().map(|(range, layout, bounds)| {
+                    TextSelectionRun::new(
+                        SharedString::from(run.text[range.clone()].to_owned()),
+                        layout.clone(),
+                        *bounds,
+                    )
+                })
             })
             .collect::<Vec<_>>();
         let projection = self.selection.handle.update_runs(&runs, cx);
@@ -274,22 +277,27 @@ impl SelectionFrame {
             let mut projected = projection.ranges().iter();
             let mut range: Option<Range<usize>> = None;
             for run in &content.runs {
-                let selected = if run.atom {
+                let selections = if run.atom {
                     snapshot
-                        .and_then(|snapshot| snapshot.window_points())
+                        .and_then(|s| s.window_points())
                         .and_then(|points| {
-                            let bounds = run.bounds?;
-                            atom_in_selection(bounds, points.anchor(), points.cursor())
-                                .then_some(0..run.text.len())
+                            atom_in_selection(run.bounds?, points.anchor(), points.cursor())
+                                .then_some(run.range.clone())
                         })
-                } else if run.layout.is_some() {
-                    projected.next().cloned().flatten()
+                        .into_iter()
+                        .collect::<Vec<_>>()
                 } else {
-                    None
+                    run.layouts
+                        .iter()
+                        .filter_map(|(segment, _, _)| {
+                            projected.next().cloned().flatten().map(|r| {
+                                run.range.start + segment.start + r.start
+                                    ..run.range.start + segment.start + r.end
+                            })
+                        })
+                        .collect()
                 };
-                if let Some(selected) = selected.filter(|range| !range.is_empty()) {
-                    let selected =
-                        (run.range.start + selected.start)..(run.range.start + selected.end);
+                for selected in selections.into_iter().filter(|r| !r.is_empty()) {
                     if let Some(range) = &mut range {
                         range.end = selected.end;
                     } else {
@@ -330,11 +338,18 @@ impl SelectionFrame {
             .runs
             .iter()
             .find(|run| {
-                run.range.start <= offset && offset <= run.range.end && run.layout.is_some()
+                run.range.start <= offset
+                    && (offset < run.range.end || (end && offset == run.range.end))
+                    && !run.layouts.is_empty()
             })
             .expect("test text has a layout");
-        let layout = run.layout.as_ref().unwrap();
-        let position = layout.position_for_index(offset - run.range.start).unwrap();
+        let local = offset - run.range.start;
+        let (segment, layout, _) = run
+            .layouts
+            .iter()
+            .find(|(r, _, _)| r.start <= local && (local < r.end || (end && local == r.end)))
+            .unwrap();
+        let position = layout.position_for_index(local - segment.start).unwrap();
         point(position.x, position.y + layout.line_height() / 2.0)
     }
 }
@@ -371,9 +386,19 @@ fn atom_in_selection(
 pub(crate) struct SelectionFragment {
     content: Rc<RefCell<FrameContent>>,
     index: usize,
+    slice: Option<Range<usize>>,
 }
 
 impl SelectionFragment {
+    pub(crate) fn slice(&self, range: Range<usize>) -> Self {
+        Self {
+            slice: Some(range),
+            ..self.clone()
+        }
+    }
+    pub(crate) fn clear_layouts(&self) {
+        self.content.borrow_mut().runs[self.index].layouts.clear();
+    }
     pub(crate) fn omit(&self, ranges: &[Range<usize>]) {
         let mut content = self.content.borrow_mut();
         let start = content.runs[self.index].range.start;
@@ -385,8 +410,16 @@ impl SelectionFragment {
     }
     pub(crate) fn layout(&self, layout: TextLayout, bounds: Bounds<Pixels>) {
         let mut content = self.content.borrow_mut();
-        content.runs[self.index].layout = Some(layout);
-        content.runs[self.index].bounds = Some(bounds);
+        let run = &mut content.runs[self.index];
+        if self.slice.is_none() {
+            run.layouts.clear();
+        }
+        run.layouts.push((
+            self.slice.clone().unwrap_or(0..run.text.len()),
+            layout,
+            bounds,
+        ));
+        run.bounds = Some(bounds);
     }
 
     pub(crate) fn paint(&self, color: Hsla, window: &mut Window) {
@@ -400,15 +433,22 @@ impl SelectionFragment {
         if start >= end {
             return;
         }
-        if let Some(layout) = &run.layout {
-            paint_text_selection(
-                layout,
-                (start - run.range.start)..(end - run.range.start),
-                color,
-                window,
-            );
-        } else if let Some(bounds) = run.bounds {
-            window.paint_quad(fill(bounds, color));
+        if run.atom {
+            if let Some(bounds) = run.bounds {
+                window.paint_quad(fill(bounds, color));
+            }
+            return;
+        }
+        for (segment, layout, _) in &run.layouts {
+            if self.slice.as_ref().is_some_and(|slice| slice != segment) {
+                continue;
+            }
+            let base = run.range.start + segment.start;
+            let start = start.max(base);
+            let end = end.min(run.range.start + segment.end);
+            if start < end {
+                paint_text_selection(layout, start - base..end - base, color, window);
+            }
         }
     }
 }
@@ -499,7 +539,13 @@ impl Element for SelectionGroup {
             .borrow()
             .runs
             .iter()
-            .filter_map(|run| run.bounds)
+            .flat_map(|run| {
+                if run.atom {
+                    run.bounds.into_iter().collect::<Vec<_>>()
+                } else {
+                    run.layouts.iter().map(|(_, _, bounds)| *bounds).collect()
+                }
+            })
             .collect();
         self.frame.selection.handle.register(
             TextSelectionRegistration::new(hitbox, bounds)

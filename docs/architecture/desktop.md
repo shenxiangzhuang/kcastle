@@ -63,18 +63,44 @@ Work is tagged with session/projection epoch, source-fragment revision, and them
 also requires current viewport demand and an uncancelled task. Offscreen work is cancelled;
 the worker slot stays occupied until it returns, including after repeated session switches.
 Cancellation is cooperative between parsing, highlighter construction, and formula operations.
-An individual library call cannot be interrupted. Unchanged fragments retain their presentation
+Completion starts the next already-demanded block directly; queue progress does not require
+another native draw callback, which can be throttled for occluded windows. An individual library
+call cannot be interrupted. Unchanged fragments retain their presentation
 revision during streaming; native list splices retain unaffected measurements.
 
-Sources up to 2 KiB remain intact. Larger sources split at paragraph boundaries and fenced code
-splits at 24 lines/2 KiB with language context. Non-code blocks above 16 KiB use lossless plain
-fragments to bound UI text layout; ordinary tables and multiline markup remain intact. Markdown
-references spanning independently parsed fragments are not resolved across fragments. These
-are explicit limits of the lightweight source index, not a second Markdown parser. Source indexing
-still scans changed messages on the UI thread; journal loading/runtime projection retain their
-existing ownership and are not database-page virtualization.
+The initial source scan supplies cheap plain-text placeholders. The same worker then parses
+real top-level Markdown blocks and publishes a range-only semantic index before preparing rich
+rows. Lists (including loose/nested items), quotes and tables retain their block boundaries;
+inter-block spacing is computed from adjacent AST nodes, including standalone strong lead-ins
+followed by lists. Index publication checks the whole message revision as well as the normal
+fragment/epoch/demand checks, splices rows, and restores the source-byte scroll anchor.
+Append-only streaming retains the completed semantic prefix, leaving the last two logical
+blocks provisional like `StreamingMarkdownState`. Reindexing preserves matching row revisions
+and presentations, so settled content does not revert to raw Markdown on every token.
+Expanding or collapsing reasoning/tool output retains unchanged assistant indices and
+presentations; overlay-only changes cannot redefine their cached source fragments.
+Large paragraph-only messages use the existing scan without a global AST, but only after ruling
+out container openers, indentation, setext headings and tables. Mixed documents still require
+one whole-message background parse; their initial plain frame remains independent of parsing.
 
-Prepared data has an estimated 8 MiB working-set budget and a 1 MiB per-fragment admission limit;
+Code rows preserve the opening fence's indentation so reparsing retains the indexed code offsets.
+They are slices of one logical block: they share the whole block's prepared AST/highlights,
+show one header, copy the complete code, and round only the outer corners. The working-set budget
+counts shared allocations once. Other non-code blocks above 16 KiB retain the lossless plain-text
+fallback. Messages up to 2 KiB with reference definitions remain a single preparation unit,
+preserving link/image references, including definitions inside containers. Cross-block reference
+definitions in larger messages remain unsupported by independently prepared prose.
+These are explicit bounded-rendering limits. Source scanning still runs on the UI thread; journal
+loading/runtime projection retain their existing ownership and are not database-page virtualization.
+
+Ordinary paragraphs are shaped as whole physical lines and wrapped at Unicode line-break
+opportunities, keeping inline code together when it fits. They create one native text element
+per visual line instead of per word/character. Selection stores original logical byte ranges and
+projects visual line segments onto them, preserving copy and selection across reflow. Inline
+formula SVGs retain the existing baseline-aware mixed-object flow. Body text is 16/26 px;
+section/heading-following gaps are 24/8 px and tight/loose list-item gaps are 6/12 px.
+
+Prepared data has an estimated 8 MiB working-set budget and a 1 MiB per-prose-fragment admission limit (shared logical code can use the 8 MiB budget);
 over-budget fragments remain readable plain text. Eviction drops ASTs, syntax spans, selections,
 and reference-counted generated SVG leases. Current frames can briefly hold an extra lease.
 Formula vectors use GPUI's themed SVG alpha mask. RaTeX's embedded raster glyphs (color Emoji)
@@ -117,7 +143,8 @@ The channel and counters are absent from production builds.
 
 Run `just bench-chat` for a release-mode, headless GPUI timing baseline using only Rust's test
 harness and `std::time::Instant`. Generated fixtures cover 1,000 rich messages, a single message
-with 20,000 paragraphs, and repeated Haskell code/formula tables. Every sample changes the
+with 20,000 paragraphs, repeated Haskell code/formula tables, and Chinese/English prose with
+bold text and inline code. Every sample changes the
 presentation namespace and discards Chat presentations. Sample 0 is reported separately; the
 next 20 samples report nearest-rank p50/p95 with process-wide fonts/libraries warmed.
 
@@ -134,15 +161,16 @@ benchmark is ignored by ordinary tests. Compare logs from the same machine, tool
 and build profile; no machine-dependent timing threshold gates CI yet. Use the deterministic
 test to guard scheduling/demand invariants, and native profiling for end-to-end interaction.
 
-Initial local baseline (2026-09-15): Apple M4 Pro, macOS 26.5.2, rustc 1.97.1,
+Local typography acceptance baseline (2026-09-16): Apple M4 Pro, macOS 26.5.2, rustc 1.97.1,
 workspace release profile, 1180 × 720 headless viewport. Times are milliseconds for the
 20 warmed samples; these are reference measurements, not CI limits.
 
 | Fixture | Source bytes | First frame p50 / p95 | Settle p50 / p95 |
 | --- | ---: | ---: | ---: |
-| 1,000 rich messages | 271,890 | 0.721 / 0.939 | 238.236 / 258.528 |
-| One 20,000-paragraph message | 620,011 | 1.774 / 2.047 | 14.491 / 15.745 |
-| Haskell and formula tables | 10,371 | 0.549 / 0.656 | 122.741 / 127.222 |
+| 1,000 rich messages | 271,890 | 0.658 / 0.670 | 125.167 / 126.269 |
+| One 20,000-paragraph message | 620,011 | 2.383 / 2.536 | 16.664 / 17.130 |
+| Haskell and formula tables | 10,371 | 0.564 / 0.606 | 124.422 / 125.258 |
+| Chinese/English prose | 7,331 | 0.440 / 0.509 | 3.437 / 3.612 |
 
 ### Timeline
 

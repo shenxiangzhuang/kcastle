@@ -218,6 +218,7 @@ impl DesktopApp {
                 dsh_markdown::render_prepared_markdown(
                     row.message.key.0,
                     &prepared,
+                    row.code_visible(),
                     self.core.layout.content_max_width,
                     &selection,
                     window,
@@ -243,7 +244,12 @@ impl DesktopApp {
                 .when(row.message.role == Role::Assistant, |body| {
                     body.text_size(px(16.0))
                 })
-                .pb(px(4.0))
+                .pt(px(row
+                    .chunk
+                    .as_ref()
+                    .and_then(|chunk| chunk.gap_before)
+                    .unwrap_or(0) as f32))
+                .when(row.message.role != Role::Assistant, |body| body.pb(px(4.0)))
                 .when(row.message.role == Role::User, |body| {
                     body.flex().justify_end()
                 })
@@ -860,7 +866,7 @@ mod tests {
 
     #[test]
     fn assistant_typography_uses_the_dsh_reading_rhythm() {
-        assert_eq!(metrics::MESSAGE_LINE_HEIGHT, 28.0);
+        assert_eq!(metrics::MESSAGE_LINE_HEIGHT, 26.0);
     }
 
     #[gpui_kit::test]

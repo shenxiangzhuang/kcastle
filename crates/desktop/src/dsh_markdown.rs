@@ -126,6 +126,7 @@ pub(crate) fn prepare_markdown(
 pub(crate) fn render_prepared_markdown(
     message_key: u64,
     prepared: &PreparedMarkdown,
+    code_range: Option<Range<usize>>,
     available_width: f32,
     selection: &SelectionFrame,
     window: &mut Window,
@@ -138,6 +139,7 @@ pub(crate) fn render_prepared_markdown(
         available_width,
         selection,
         Some(prepared),
+        code_range.as_ref(),
         window,
         cx,
     )
@@ -159,6 +161,7 @@ pub(crate) fn render_markdown(
         available_width,
         selection,
         None,
+        None,
         window,
         cx,
     )
@@ -172,6 +175,7 @@ fn render_markdown_inner(
     available_width: f32,
     selection: &SelectionFrame,
     prepared: Option<&PreparedMarkdown>,
+    code_range: Option<&Range<usize>>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -214,7 +218,11 @@ fn render_markdown_inner(
             .checked_sub(1)
             .and_then(|index| blocks.get(index))
             .map(|(block, _)| &block.node);
-        let gap = root_block_gap(previous, &block.node, index == 0);
+        let gap = block_gap(
+            previous,
+            &block.node,
+            blocks.get(index + 1).map(|(b, _)| &b.node),
+        );
         let context = BlockContext {
             message_key,
             generation: state.generation(),
@@ -225,6 +233,7 @@ fn render_markdown_inner(
             available_width,
             selection: Some(selection),
             prepared,
+            code_range,
         };
         selection.separate("\n\n");
         root = root.child(
@@ -249,6 +258,7 @@ struct BlockContext<'a> {
     available_width: f32,
     selection: Option<&'a SelectionFrame>,
     prepared: Option<&'a PreparedMarkdown>,
+    code_range: Option<&'a Range<usize>>,
 }
 
 fn render_node(
@@ -297,9 +307,11 @@ fn render_node(
                 body = body.child(
                     div()
                         .w_full()
-                        .when(index > 0, |element| {
-                            element.mt(px(metrics::MARKDOWN_BLOCK_GAP))
-                        })
+                        .mt(px(block_gap(
+                            index.checked_sub(1).map(|i| &quote.children[i]),
+                            child,
+                            quote.children.get(index + 1),
+                        )))
                         .child(render_node(
                             child,
                             context,
@@ -340,9 +352,11 @@ fn render_node(
                 body = body.child(
                     div()
                         .w_full()
-                        .when(index > 0, |element| {
-                            element.mt(px(metrics::MARKDOWN_BLOCK_GAP))
-                        })
+                        .mt(px(block_gap(
+                            index.checked_sub(1).map(|i| &root.children[i]),
+                            child,
+                            root.children.get(index + 1),
+                        )))
                         .child(render_node(
                             child,
                             context,
@@ -426,7 +440,9 @@ fn render_list(
                 .items_start()
                 .w_full()
                 .min_w(px(0.0))
-                .when(index > 0, |element| element.mt(px(6.0)))
+                .when(index > 0, |element| {
+                    element.mt(px(if list.spread { 12.0 } else { 6.0 }))
+                })
                 .child(
                     div()
                         .flex_none()
@@ -550,6 +566,15 @@ fn render_code_block(
     path: &str,
     cx: &mut App,
 ) -> AnyElement {
+    let visible = context.code_range.cloned().unwrap_or(0..code.len());
+    let first = visible.start == 0;
+    let last = visible.end == code.len();
+    let display = &code[visible.clone()];
+    let display = if last {
+        display
+    } else {
+        display.strip_suffix('\n').unwrap_or(display)
+    };
     let language_label = code_language_label(language);
     let clipboard_id = SharedString::from(format!(
         "dsh-md-copy-{}-{}-{path}",
@@ -561,24 +586,27 @@ fn render_code_block(
         .w_full()
         .min_w(px(0.0))
         .overflow_hidden()
-        .rounded(px(12.0))
+        .when(first, |body| body.rounded_t(px(12.0)))
+        .when(last, |body| body.rounded_b(px(12.0)))
         .bg(context.colors.markdown_code_block)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .px(px(16.0))
-                .py(px(8.0))
-                .border_b_1()
-                .border_color(context.colors.border)
-                .text_color(context.colors.muted_text)
-                .text_size(px(12.0))
-                .line_height(px(20.0))
-                .child(language_label)
-                .child(Clipboard::new(clipboard_id).value(code.to_owned())),
-        );
+        .when(first, |body| {
+            body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .border_b_1()
+                    .border_color(context.colors.border)
+                    .text_color(context.colors.muted_text)
+                    .text_size(px(12.0))
+                    .line_height(px(20.0))
+                    .child(language_label)
+                    .child(Clipboard::new(clipboard_id).value(code.to_owned())),
+            )
+        });
 
     let highlight_theme = markdown_highlight_theme(cx.theme().is_dark());
     let highlights = if let Some(prepared) = context.prepared {
@@ -601,7 +629,9 @@ fn render_code_block(
         div().w_full().overflow_x_scrollbar().child(
             div()
                 .min_w_full()
-                .p_4()
+                .px_4()
+                .when(first, |body| body.pt_4())
+                .when(last, |body| body.pb_4())
                 .whitespace_nowrap()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_color(
@@ -614,8 +644,16 @@ fn render_code_block(
                 .line_height(px(22.0))
                 .child(
                     InlineText::new(InlineOutput {
-                        text: code.to_owned(),
-                        highlights,
+                        text: display.to_owned(),
+                        highlights: highlights
+                            .into_iter()
+                            .filter_map(|(range, style)| {
+                                let start = range.start.max(visible.start);
+                                let end = range.end.min(visible.start + display.len());
+                                (start < end)
+                                    .then(|| (start - visible.start..end - visible.start, style))
+                            })
+                            .collect(),
                         ..InlineOutput::default()
                     })
                     .selectable(context.selection),
@@ -646,18 +684,24 @@ fn render_id(context: &BlockContext<'_>, path: &str) -> SharedString {
     ))
 }
 
-fn root_block_gap(previous: Option<&Node>, node: &Node, first: bool) -> f32 {
-    if first {
+fn standalone_strong(node: &Node) -> bool {
+    matches!(node, Node::Paragraph(p) if !p.children.is_empty() && p.children.iter().all(|child| matches!(child, Node::Strong(_)) || matches!(child, Node::Text(t) if t.value.trim().is_empty())))
+}
+
+pub(crate) fn block_gap(previous: Option<&Node>, node: &Node, next: Option<&Node>) -> f32 {
+    let Some(previous) = previous else {
         return 0.0;
-    }
-    if matches!(previous, Some(Node::ThematicBreak(_))) || matches!(node, Node::ThematicBreak(_)) {
+    };
+    if matches!(previous, Node::ThematicBreak(_)) || matches!(node, Node::ThematicBreak(_)) {
         return metrics::MARKDOWN_SECTION_GAP;
     }
-    if matches!(node, Node::Heading(heading) if heading.depth <= 3) {
-        return metrics::MARKDOWN_SECTION_GAP;
+    if matches!(node, Node::Heading(_))
+        || (standalone_strong(node) && matches!(next, Some(Node::List(_))))
+    {
+        return 24.0;
     }
-    if matches!(node, Node::List(_))
-        && matches!(previous, Some(Node::Heading(heading)) if heading.depth >= 4)
+    if matches!(previous, Node::Heading(_))
+        || (standalone_strong(previous) && matches!(node, Node::List(_)))
     {
         return 8.0;
     }
@@ -686,14 +730,18 @@ fn inline_block(
     cx: &mut App,
 ) -> AnyElement {
     if !contains_inline_math(nodes) {
+        let mut output = InlineOutput::default();
+        append_inlines(nodes, InlineStyle::default(), context.colors, &mut output);
+        output.code_font = cx
+            .try_global::<gpui_kit::component::Theme>()
+            .map(|theme| theme.mono_font_family.clone());
         return div()
             .w_full()
             .min_w(px(0.0))
-            .whitespace_normal()
             .text_size(px(size))
             .line_height(px(line_height))
             .font_weight(weight)
-            .child(inline_text(nodes, context.colors).selectable(context.selection))
+            .child(ParagraphText::new(output, context.selection))
             .into_any_element();
     }
 
@@ -713,7 +761,10 @@ fn inline_block(
     let text_baseline = shaped_text_baseline(nodes, size, line_height, weight, context, window);
     for piece in inline_pieces(nodes, context.colors) {
         match piece {
-            InlinePiece::Text(output) => {
+            InlinePiece::Text(mut output) => {
+                output.code_font = cx
+                    .try_global::<gpui_kit::component::Theme>()
+                    .map(|theme| theme.mono_font_family.clone());
                 for element in inline_flow_text(output, context.selection) {
                     body = body.child(element);
                 }
@@ -1174,6 +1225,7 @@ pub(crate) fn plain_text(
     .selectable(selection)
 }
 
+#[cfg(test)]
 fn inline_text(nodes: &[Node], colors: UiPalette) -> InlineText {
     let mut output = InlineOutput::default();
     append_inlines(nodes, InlineStyle::default(), colors, &mut output);
@@ -1192,8 +1244,22 @@ fn inline_wrap_ranges(text: &str) -> Vec<Range<usize>> {
 }
 
 fn inline_flow_text(output: InlineOutput, selection: Option<&SelectionFrame>) -> Vec<AnyElement> {
+    let mut code = output.backgrounds.iter().peekable();
+    let mut start = 0;
     inline_wrap_ranges(&output.text)
         .into_iter()
+        .filter_map(|range| {
+            while code.peek().is_some_and(|(code, _)| code.end <= range.end) {
+                code.next();
+            }
+            // Keep a code span in one element; oversized spans still wrap inside it.
+            if code.peek().is_some_and(|(code, _)| code.start < range.end) {
+                return None;
+            }
+            let merged = start..range.end;
+            start = range.end;
+            Some(merged)
+        })
         .flat_map(|range| {
             let explicit_break = output.text[range.clone()].ends_with('\n');
             let mut content = range.clone();
@@ -1358,6 +1424,7 @@ struct InlineStyle {
 
 #[derive(Default)]
 struct InlineOutput {
+    code_font: Option<SharedString>,
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     backgrounds: Vec<(Range<usize>, Hsla)>,
@@ -1373,6 +1440,7 @@ impl InlineOutput {
         };
 
         Self {
+            code_font: self.code_font.clone(),
             text: self.text[range.clone()].to_owned(),
             omitted: self.omitted.iter().filter_map(adjust).collect(),
             highlights: self
@@ -1389,6 +1457,229 @@ impl InlineOutput {
     }
 }
 
+// Measure the paragraph as text, then create only one native text element per visual
+// line. Styling and selection remain source-byte ranges, independent of wrapping.
+struct ParagraphText {
+    output: Arc<InlineOutput>,
+    selection: Option<SelectionFragment>,
+}
+
+impl ParagraphText {
+    fn new(output: InlineOutput, selection: Option<&SelectionFrame>) -> Self {
+        let selection = selection.map(|frame| {
+            let fragment = frame.text(output.text.clone().into());
+            fragment.omit(&output.omitted);
+            fragment
+        });
+        Self {
+            output: Arc::new(output),
+            selection,
+        }
+    }
+}
+
+fn paragraph_lines(
+    output: &InlineOutput,
+    width: Pixels,
+    style: &gpui_kit::TextStyle,
+    window: &Window,
+) -> (Vec<Range<usize>>, Pixels) {
+    let font_size = style.font_size.to_pixels(window.rem_size());
+    let mut result = Vec::new();
+    let mut natural_width = px(0.0);
+    let mut base = 0;
+    for physical in output.text.split('\n') {
+        let part = output.slice(base..base + physical.len());
+        let mut runs = Vec::new();
+        let mut offset = 0;
+        for (range, highlight) in &part.highlights {
+            if offset < range.start {
+                runs.push(style.to_run(range.start - offset));
+            }
+            runs.push(style.clone().highlight(*highlight).to_run(range.len()));
+            offset = range.end;
+        }
+        if offset < physical.len() {
+            runs.push(style.to_run(physical.len() - offset));
+        }
+        let mut offset = 0;
+        for run in &mut runs {
+            if let Some(font) = &part.code_font
+                && part
+                    .backgrounds
+                    .iter()
+                    .any(|(r, _)| r.start <= offset && offset + run.len <= r.end)
+            {
+                run.font.family = font.clone();
+            }
+            offset += run.len;
+        }
+        let shaped =
+            window
+                .text_system()
+                .shape_line(physical.to_owned().into(), font_size, &runs, None);
+        natural_width = natural_width.max(shaped.width());
+        let candidates = inline_wrap_ranges(physical)
+            .into_iter()
+            .map(|r| r.end)
+            .filter(|end| {
+                !part
+                    .backgrounds
+                    .iter()
+                    .any(|(r, _)| r.start < *end && *end < r.end)
+            })
+            .collect::<Vec<_>>();
+        let mut start = 0;
+        if physical.is_empty() {
+            result.push(base..base);
+        }
+        while start < physical.len() {
+            let x = shaped.x_for_index(start);
+            let end = candidates[candidates.partition_point(|end| *end <= start)..]
+                .iter()
+                .copied()
+                .take_while(|end| shaped.x_for_index(*end) - x <= width)
+                .last()
+                .unwrap_or_else(|| {
+                    // An unbroken URL/code span wider than the column must still
+                    // advance. Use shaped glyph boundaries, never split UTF-8 or a cluster.
+                    shaped
+                        .runs
+                        .iter()
+                        .flat_map(|r| &r.glyphs)
+                        .map(|g| g.index)
+                        .chain([physical.len()])
+                        .filter(|end| *end > start)
+                        .take_while(|end| shaped.x_for_index(*end) - x <= width)
+                        .last()
+                        .unwrap_or_else(|| {
+                            physical[start..]
+                                .char_indices()
+                                .nth(1)
+                                .map_or(physical.len(), |(i, _)| start + i)
+                        })
+                });
+            result.push(base + start..base + end);
+            start = end;
+        }
+        base += physical.len() + 1;
+    }
+    (result, natural_width)
+}
+
+impl IntoElement for ParagraphText {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+impl Element for ParagraphText {
+    type RequestLayoutState = std::rc::Rc<std::cell::RefCell<Vec<Range<usize>>>>;
+    type PrepaintState = Vec<AnyElement>;
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        _: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let lines = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let measured = lines.clone();
+        let output = self.output.clone();
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let line_height = window.pixel_snap(
+            style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size()),
+        );
+        let id = window.request_measured_layout(
+            Default::default(),
+            move |known, available, window, _| {
+                let width = known.width.unwrap_or(match available.width {
+                    gpui_kit::AvailableSpace::Definite(width) => width,
+                    gpui_kit::AvailableSpace::MinContent => px(1.0),
+                    gpui_kit::AvailableSpace::MaxContent => px(f32::MAX),
+                });
+                let (ranges, natural_width) =
+                    paragraph_lines(&output, width.max(px(1.0)), &style, window);
+                let height = line_height * ranges.len();
+                *measured.borrow_mut() = ranges;
+                size(width.min(natural_width), height)
+            },
+        );
+        (id, lines)
+    }
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        lines: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        if let Some(selection) = &self.selection {
+            selection.clear_layouts();
+        }
+        let style = window.text_style();
+        let font_size = style.font_size.to_pixels(window.rem_size());
+        let height = window.pixel_snap(
+            style
+                .line_height
+                .to_pixels(font_size.into(), window.rem_size()),
+        );
+        lines
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(index, range)| {
+                let mut text = InlineText::new(self.output.slice(range.clone()));
+                text.selection = self.selection.as_ref().map(|s| s.slice(range.clone()));
+                let mut line = div()
+                    .whitespace_nowrap()
+                    .h(height)
+                    .child(text)
+                    .into_any_element();
+                line.layout_as_root(
+                    size(
+                        gpui_kit::AvailableSpace::Definite(bounds.size.width),
+                        gpui_kit::AvailableSpace::MinContent,
+                    ),
+                    window,
+                    cx,
+                );
+                line.prepaint_at(
+                    point(bounds.left(), bounds.top() + height * index),
+                    window,
+                    cx,
+                );
+                line
+            })
+            .collect()
+    }
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        lines: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for line in lines {
+            line.paint(window, cx);
+        }
+    }
+}
+
 // GPUI highlight backgrounds occupy the entire line height, which makes code on
 // adjacent lines merge visually. Paint code backgrounds separately so they can
 // be inset without changing the text shaping or wrapping behavior.
@@ -1401,13 +1692,17 @@ struct InlineText {
 }
 
 impl InlineText {
-    const CODE_BACKGROUND_INSET: Pixels = px(2.0);
-    const CODE_BACKGROUND_RADIUS: Pixels = px(4.0);
+    const CODE_BACKGROUND_INSET: Pixels = px(3.0);
+    const CODE_BACKGROUND_RADIUS: Pixels = px(3.0);
 
     fn new(output: InlineOutput) -> Self {
         let text = SharedString::from(output.text);
         Self {
-            styled: StyledText::new(text.clone()).with_highlights(output.highlights),
+            styled: StyledText::new(text.clone())
+                .with_highlights(output.highlights)
+                .with_font_family_overrides(output.backgrounds.iter().filter_map(|(range, _)| {
+                    output.code_font.clone().map(|font| (range.clone(), font))
+                })),
             text,
             backgrounds: output.backgrounds,
             omitted: output.omitted,
@@ -1704,7 +1999,7 @@ fn append_inline_text(
     if style.link {
         highlight.color = Some(colors.markdown_link);
     }
-    if highlight != HighlightStyle::default() {
+    if highlight != HighlightStyle::default() || style.code {
         output.highlights.push((start..end, highlight));
     }
 }
@@ -1719,7 +2014,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::{
-        InlineText, build_math, code_language_label, heading_style, inline_text, root_block_gap,
+        InlineText, block_gap, build_math, code_language_label, heading_style, inline_text,
     };
     use crate::assets::DesktopAssets;
     use crate::streaming_markdown::MarkdownBlock;
@@ -1817,6 +2112,7 @@ mod tests {
                 available_width,
                 selection: Some(&selection),
                 prepared: None,
+                code_range: None,
             };
             div()
                 .size_full()
@@ -1855,6 +2151,7 @@ mod tests {
                 super::render_prepared_markdown(
                     0,
                     prepared,
+                    None,
                     f32::from(window.viewport_size().width),
                     &selection,
                     window,
@@ -2159,6 +2456,7 @@ mod tests {
                 available_width: f32::from(window.viewport_size().width),
                 selection: None,
                 prepared: None,
+                code_range: None,
             };
             div()
                 .size_full()
@@ -2204,21 +2502,46 @@ mod tests {
         assert_eq!(selected, "选择中文 hello");
     }
 
+    #[gpui_kit::test]
+    fn chinese_prose_wraps_without_orphaning_punctuation(cx: &mut TestAppContext) {
+        let (view, cx) =
+            markdown_selection_harness("甲乙，丙（丁戊）己。 `Copy`，无需拷贝元素本身。", cx);
+        for width in (80..210).step_by(7) {
+            cx.simulate_resize(size(px(width as f32), px(700.0)));
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                let frame = view.frame.as_ref().unwrap();
+                for (left, right) in [
+                    ("乙", "，"),
+                    ("（", "丁"),
+                    ("戊", "）"),
+                    ("己", "。"),
+                    ("Copy", "，无需"),
+                ] {
+                    assert_eq!(
+                        frame.text_position(left, false).y,
+                        frame.text_position(right, false).y,
+                        "{left}/{right} must stay together at width {width}"
+                    );
+                }
+            });
+        }
+        assert_eq!(
+            select_markdown(&view, "甲", "本身。", cx),
+            "甲乙，丙（丁戊）己。 Copy，无需拷贝元素本身。"
+        );
+    }
+
     #[test]
     fn block_rhythm_preserves_sections_and_tight_heading_lists() {
         let nodes = blocks("paragraph\n\n## section\n\ntext");
-        assert_eq!(root_block_gap(None, &nodes[0], true), 0.0);
-        assert_eq!(
-            root_block_gap(Some(&nodes[0]), &nodes[1], false),
-            metrics::MARKDOWN_SECTION_GAP
-        );
-        assert_eq!(
-            root_block_gap(Some(&nodes[1]), &nodes[2], false),
-            metrics::MARKDOWN_BLOCK_GAP
-        );
+        assert_eq!(block_gap(None, &nodes[0], None), 0.0);
+        assert_eq!(block_gap(Some(&nodes[0]), &nodes[1], None), 24.0);
+        assert_eq!(block_gap(Some(&nodes[1]), &nodes[2], None), 8.0);
 
         let nodes = blocks("#### details\n\n- one\n- two");
-        assert_eq!(root_block_gap(Some(&nodes[0]), &nodes[1], false), 8.0);
+        assert_eq!(block_gap(Some(&nodes[0]), &nodes[1], None), 8.0);
     }
 
     #[test]
@@ -2239,6 +2562,23 @@ mod tests {
             &inline.text[inline.backgrounds[1].0.clone()],
             "\u{a0}Agent::set_model\u{a0}"
         );
+    }
+
+    #[gpui_kit::test]
+    fn inline_code_keeps_one_background_when_it_fits(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness("`Ord + Clone`", cx);
+        let code_backgrounds = cx.update(|window, cx| {
+            let color = crate::ui_theme::palette(cx).markdown_inline_code.into();
+            window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == color)
+                .count()
+        });
+        assert_eq!(code_backgrounds, 1);
+        cx.simulate_resize(size(px(60.0), px(700.0)));
+        cx.run_until_parked();
+        assert_eq!(select_markdown(&view, "Ord", "Clone", cx), "Ord + Clone");
     }
 
     #[test]
@@ -2705,6 +3045,7 @@ mod tests {
             let omitted_range = ordered(indices[4], indices[5]);
             let expected = text[slice_range.clone()].to_owned();
             let output = super::InlineOutput {
+                code_font: None,
                 text,
                 highlights: vec![(style_range.clone(), gpui_kit::HighlightStyle::default())],
                 backgrounds: vec![(style_range, test_palette().canvas)],

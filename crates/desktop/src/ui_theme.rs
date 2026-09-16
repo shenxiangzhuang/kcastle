@@ -68,7 +68,7 @@ pub(crate) mod metrics {
     pub(crate) const LEDGER_TOOLBAR_HEIGHT: f32 = 32.0;
     pub(crate) const LEDGER_ROW_HEIGHT: f32 = 30.0;
     pub(crate) const BODY_LINE_HEIGHT: f32 = 24.0;
-    pub(crate) const MESSAGE_LINE_HEIGHT: f32 = 28.0;
+    pub(crate) const MESSAGE_LINE_HEIGHT: f32 = 26.0;
     pub(crate) const MARKDOWN_BLOCK_GAP: f32 = 16.0;
     pub(crate) const MARKDOWN_SECTION_GAP: f32 = 32.0;
 }
@@ -104,7 +104,7 @@ pub(crate) fn palette(cx: &App) -> UiPalette {
         assistant: theme.chart_4,
         user_bubble: rgb(0xedf3fe).into(),
         markdown_text: markdown_text_color(theme.is_dark()),
-        markdown_inline_code: rgb(0xebeef2).into(),
+        markdown_inline_code: rgb(0xf1f3f5).into(),
         markdown_code_block: rgb(0xf4f4f4).into(),
         markdown_link: rgb(0x4176e6).into(),
         markdown_quote: rgb(0xadb2b8).into(),

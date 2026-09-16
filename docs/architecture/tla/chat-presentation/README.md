@@ -14,7 +14,13 @@ theme. In Rust, an unchanged source fragment keeps its revision during streaming
 
 Mapping: `ChatViewport::sync/activate/release` invalidate state; list callbacks collect
 `requested`; `finish_chat_frame` prunes and starts work; `current_result` guards publication.
-`Task` ownership retains the slot until completion. SVG leases follow presentation lifetime.
+`FinishIndex` represents semantic range-index publication: after the same freshness check,
+rows are replaced and demand is collected again. Rust additionally checks the whole-message
+revision before this operation, since unchanged fragment revisions alone cannot authorize an
+index for an older message. Shared code-block preparations use the existing completion path.
+The Rust completion path also calls the existing demand scheduler directly, so cached or
+throttled native draws cannot stall queued preparation. This is `Finish` followed by `Start`,
+not an additional worker slot. `Task` ownership retains the slot until completion. SVG leases follow presentation lifetime.
 Decoded formula Emoji images share that lifetime and count toward the Rust byte budget;
 their preparation does not add another worker or change publication/cancellation transitions.
 
