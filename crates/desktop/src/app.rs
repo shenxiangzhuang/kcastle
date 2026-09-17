@@ -227,6 +227,7 @@ pub(crate) enum SidebarSessionStatus {
 pub(crate) struct DesktopApp {
     pub(crate) core: AppState,
     pub(crate) chat: RefCell<ChatViewport>,
+    pub(crate) html_previews: crate::html_preview::HtmlPreviews,
     pub(crate) message_presentations: RefCell<MessagePresentationStore>,
     pub(crate) selected_runtime: Entity<SessionRuntime>,
     project_runtimes: HashMap<ProjectId, ProjectSessionRuntimes>,
@@ -441,6 +442,7 @@ impl DesktopApp {
         let app = Self {
             core,
             chat: RefCell::new(ChatViewport::default()),
+            html_previews: crate::html_preview::HtmlPreviews::new(window, cx),
             message_presentations: RefCell::new(MessagePresentationStore::default()),
             selected_runtime: runtime,
             project_runtimes,

@@ -34,12 +34,25 @@ tree-sitter-haskell.workspace = true
 tree-sitter.workspace = true
 unicode-linebreak.workspace = true
 velopack.workspace = true
+wry = { package = "lb-wry", version = "=0.53.3", default-features = false, features = ["os-webview", "x11", "drag-drop"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "=0.18.2"
+gdkx11 = "=0.18.2"
+webkit2gtk = "=2.0.1"
+cairo-rs = { version = "=0.18.5", features = ["png"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "=0.38.2"
+windows = { version = "=0.61.3", features = ["Win32_System_Com", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
 objc2 = "=0.6.4"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "block2"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSEvent", "NSCursor", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow", "NSAccessibilityProtocols", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "NSData", "NSDictionary", "NSError", "NSValue", "block2"] }
+objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["CALayer", "objc2-core-foundation"] }
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]

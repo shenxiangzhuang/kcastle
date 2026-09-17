@@ -16,6 +16,16 @@ use crate::ui_theme::palette;
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending_trajectory_query_restore(window, cx);
+        self.html_previews.sync(
+            self.chat.borrow().namespace(),
+            self.core.session_view.trajectory.projection_lineage(),
+            self.core
+                .session_view
+                .conversation
+                .messages
+                .iter()
+                .map(|message| message.as_ref()),
+        );
         let empty = conversation_view_model(&self.core).empty;
         let sidebar_mode = self.core.layout.sidebar;
         let colors = palette(cx);
@@ -97,7 +107,7 @@ impl Render for DesktopApp {
                 .into_any_element(),
             SidebarMode::Rail => main.into_any_element(),
         };
-        div()
+        let root = div()
             .id("app-main")
             .role(Role::Main)
             .accessibility_id(ids::APP_MAIN)
@@ -127,6 +137,12 @@ impl Render for DesktopApp {
             .when(sidebar_mode == SidebarMode::Rail, |root| {
                 root.child(self.sidebar(window, cx))
             })
-            .children(self.modal_view(window, cx))
+            .children(self.modal_view(window, cx));
+        self.html_previews.frame(
+            root,
+            self.modal.is_some()
+                || self.core.composer.menu.is_some()
+                || self.core.sidebar.options_open,
+        )
     }
 }

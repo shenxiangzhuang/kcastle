@@ -210,11 +210,28 @@ impl DesktopApp {
         };
         let colors = palette(cx);
         let body = if let Some(selection) = selection {
+            let html = if row.message.role == Role::Assistant {
+                prepared
+                    .as_ref()
+                    .and_then(|prepared| prepared.html_document())
+                    .map(std::borrow::Cow::Borrowed)
+                    .or_else(|| {
+                        row.code_visible().and_then(|_| {
+                            self.html_previews
+                                .retained_source(row.key)
+                                .map(std::borrow::Cow::Owned)
+                        })
+                    })
+            } else {
+                None
+            };
             #[cfg(test)]
-            let plain_selector = prepared
-                .is_none()
+            let plain_selector = (prepared.is_none() && html.is_none())
                 .then(|| format!("chat-plain:{}", row.message.key.0));
-            let content = if let Some(prepared) = prepared {
+            let content = if let Some(html) = html {
+                self.html_previews
+                    .render(row.key, &html, row.plain(), &selection, cx)
+            } else if let Some(prepared) = prepared {
                 dsh_markdown::render_prepared_markdown(
                     row.message.key.0,
                     &prepared,

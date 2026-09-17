@@ -7,6 +7,7 @@ a passing model check does not prove that the Rust implementation refines the mo
 | Model | Architecture contract | Scope |
 | --- | --- | --- |
 | [Chat presentation](chat-presentation/README.md) | [Desktop](../desktop.md#chat-viewport) | Viewport demand, freshness, cancellation, and bounded workers |
+| [Inline HTML](html-preview/README.md) | [Desktop](../desktop.md#inline-html-previews) | Multiple live documents, visibility, retention and stale callback rejection |
 | [Session tools](session-tools/README.md) | [Session](../session.md) | Authorization, dispatch intent, commit receipts, ordered attachment, and cancellation/crash recovery |
 
 The [desktop update migration](../desktop.md#desktop-updates) changes release-feed routing,
