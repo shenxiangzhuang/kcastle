@@ -27,7 +27,8 @@ Current prerelease desktop installers are unsigned and may trigger operating-sys
 Source builds require Rust 1.97 or newer.
 
 ```bash
-just qa
+just pre-push # Daily formatting, lint, and test checks
+just qa       # Also build optimized release binaries
 ```
 
 Project architecture and development workflows live in [docs/README.md](docs/README.md).
