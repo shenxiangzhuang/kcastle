@@ -9,6 +9,11 @@ a passing model check does not prove that the Rust implementation refines the mo
 | [Chat presentation](chat-presentation/README.md) | [Desktop](../desktop.md#chat-viewport) | Viewport demand, freshness, cancellation, and bounded workers |
 | [Session tools](session-tools/README.md) | [Session](../session.md) | Authorization, dispatch intent, commit receipts, ordered attachment, and cancellation/crash recovery |
 
+The [desktop update migration](../desktop.md#desktop-updates) changes release-feed routing,
+not the session or Chat state machines modeled here. Retention of the Universal bridge feed,
+package availability, and Velopack app replacement are outside these models; release/updater
+checks and the documented native migration procedure cover those boundaries.
+
 ## Layout
 
 ```text

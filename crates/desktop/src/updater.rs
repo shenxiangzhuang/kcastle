@@ -13,8 +13,10 @@ use crate::app::DesktopApp;
 const UPDATE_TARGET: &str = "linux-x64";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const UPDATE_TARGET: &str = "linux-arm64";
-#[cfg(target_os = "macos")]
-const UPDATE_TARGET: &str = "osx-universal";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const UPDATE_TARGET: &str = "osx-arm64";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const UPDATE_TARGET: &str = "osx-x64";
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const UPDATE_TARGET: &str = "win-x64";
 
@@ -23,7 +25,10 @@ const UPDATE_TARGET: &str = "win-x64";
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
-    target_os = "macos",
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
     all(target_os = "windows", target_arch = "x86_64")
 )))]
 compile_error!("kcastle-desktop updater does not support this target");
@@ -153,6 +158,102 @@ mod tests {
     fn restart_waits_for_active_sessions() {
         assert_eq!(restart_block_reason(false), None);
         assert_eq!(restart_block_reason(true), Some(ACTIVE_SESSION_NOTICE));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_updates_follow_the_running_architecture() {
+        let target = match std::env::consts::ARCH {
+            "aarch64" => "osx-arm64",
+            "x86_64" => "osx-x64",
+            arch => panic!("unsupported macOS architecture: {arch}"),
+        };
+        for (version, channel) in [
+            ("0.2.0-alpha.28", "alpha"),
+            ("0.2.0-alpha.29", "alpha"),
+            ("0.2.0-beta.1", "beta"),
+            ("0.2.0", "stable"),
+        ] {
+            assert_eq!(
+                update_source(version),
+                format!("https://updates.kcastle.mathewshen.me/{channel}/{target}")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn universal_bridge_accepts_only_newer_native_releases() {
+        use std::fs;
+        use velopack::{
+            UpdateCheck, UpdateManager, VelopackAsset, VelopackAssetFeed,
+            locator::VelopackLocatorConfig, sources::FileSource,
+        };
+
+        let root = std::env::temp_dir().join(format!("kcastle-update-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let manifest = root.join("sq.version");
+        let updater = root.join("UpdateMac");
+        fs::write(&updater, "").unwrap();
+        for target in ["osx-arm64", "osx-x64"] {
+            for (installed, feed, available, expected) in [
+                ("0.2.0-alpha.27", "osx-universal", "0.2.0-alpha.28", true),
+                ("0.2.0-alpha.28", target, "0.2.0-alpha.28", false),
+                ("0.2.0-alpha.28", target, "0.2.0-alpha.29", true),
+                ("0.2.0-alpha.28", target, "0.2.0-alpha.30", true),
+                ("0.2.0-alpha.29", target, "0.2.0-alpha.30", true),
+            ] {
+                fs::write(
+                    &manifest,
+                    format!(
+                        "<package><metadata><id>Kcastle</id><version>{installed}</version>\
+                         <channel>alpha</channel><mainExe>kcastle</mainExe></metadata></package>"
+                    ),
+                )
+                .unwrap();
+                let source = root.join(feed);
+                fs::create_dir_all(&source).unwrap();
+                let asset = VelopackAsset {
+                    PackageId: "Kcastle".into(),
+                    Version: available.into(),
+                    Type: "Full".into(),
+                    FileName: format!("Kcastle-{available}-alpha-full.nupkg"),
+                    ..Default::default()
+                };
+                fs::write(
+                    source.join("releases.alpha.json"),
+                    serde_json::to_vec(&VelopackAssetFeed {
+                        Assets: vec![asset],
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                let manager = UpdateManager::new(
+                    FileSource::new(source),
+                    None,
+                    Some(VelopackLocatorConfig {
+                        RootAppDir: root.clone(),
+                        UpdateExePath: updater.clone(),
+                        PackagesDir: root.join("packages"),
+                        ManifestPath: manifest.clone(),
+                        CurrentBinaryDir: root.clone(),
+                        IsPortable: true,
+                    }),
+                )
+                .unwrap();
+                match manager.check_for_updates().unwrap() {
+                    UpdateCheck::UpdateAvailable(update) => {
+                        assert!(expected, "{installed} -> {available} via {feed}");
+                        assert_eq!(update.TargetFullRelease.Version, available);
+                        assert!(!update.IsDowngrade);
+                        assert!(update.DeltasToTarget.is_empty());
+                    }
+                    UpdateCheck::NoUpdateAvailable => assert!(!expected),
+                    UpdateCheck::RemoteIsEmpty => panic!("missing migration release"),
+                }
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
