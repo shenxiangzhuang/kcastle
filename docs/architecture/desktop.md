@@ -297,3 +297,20 @@ in-progress drag is the only additional interaction state.
   and primitive count.
 - The desktop is finally exercised as a native application for hover, range selection, dimming,
   ledger scrolling, zoom, details, composer statistics, and narrow-window clipping.
+
+
+## Desktop updates
+
+`updater.rs` derives the release channel from the application version and selects a feed by
+OS and the running binary's architecture. macOS uses `osx-arm64` or `osx-x64`; a Universal
+bridge uses the same selection in each compiled slice. An explicitly Rosetta-launched Intel
+slice follows the Intel feed. The package ID and channel remain unchanged across the split.
+
+The download/pending-restart lifecycle remains owned by Velopack. Updates use full packages;
+only a higher version is accepted, and restart is blocked while sessions are active. Changing
+the feed directory does not change journal storage, session cancellation, or restart ownership.
+
+The [release protocol](../development/release.md#macos-architecture-split) retains the final
+Universal bridge and its feed indefinitely. Legacy clients first install that bridge, then a
+higher native version. Later releases leave the old prefix untouched. Availability of the
+frozen feed/packages is a deployment assumption, not a property of the session or Chat models.

@@ -42,49 +42,29 @@ jobs:
             sleep 10
           done
           exit 1
+  release-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - id: targets
+        run: |
+          python3 scripts/release-matrix.py --self-test
+          matrix=$(python3 scripts/release-matrix.py "$RELEASE_TAG")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
   desktop-apps:
+    needs: release-matrix
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            targets: x86_64-unknown-linux-gnu
-            velopack_runtime: linux-x64
-            update_target: linux-x64
-            pack_dir: target/velopack-input
-            main_exe: kcastle-desktop
-            primary_asset: kcastle-desktop-linux-amd64.AppImage
-            secondary_asset: kcastle-desktop-linux-amd64.deb
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            targets: aarch64-unknown-linux-gnu
-            velopack_runtime: linux-arm64
-            update_target: linux-arm64
-            pack_dir: target/velopack-input
-            main_exe: kcastle-desktop
-            primary_asset: kcastle-desktop-linux-arm64.AppImage
-            secondary_asset: kcastle-desktop-linux-arm64.deb
-          - os: macos-14
-            target: universal-apple-darwin
-            targets: aarch64-apple-darwin,x86_64-apple-darwin
-            update_target: osx-universal
-            pack_dir: target/Kcastle.app
-            main_exe: kcastle
-            primary_asset: kcastle-desktop-macos-universal.dmg
-            secondary_asset: ""
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            targets: x86_64-pc-windows-msvc
-            velopack_runtime: win-x64
-            update_target: win-x64
-            pack_dir: target/velopack-input
-            main_exe: kcastle-desktop.exe
-            primary_asset: kcastle-desktop-windows-x86_64-setup.exe
-            secondary_asset: ""
+      matrix: ${{ fromJSON(needs.release-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
@@ -92,7 +72,27 @@ jobs:
         with:
           dotnet-version: 8.0.x
       - name: Install Velopack CLI
-        run: dotnet tool install --global vpk --version 1.2.110-ge826545
+        shell: bash
+        run: |
+          dotnet tool install --tool-path target/vpk vpk --version 1.2.110-ge826545
+          echo "$GITHUB_WORKSPACE/target/vpk" >> "$GITHUB_PATH"
+      - name: Select macOS updater architecture before signing and packaging
+        if: runner.os == 'macOS' && matrix.update_target != 'osx-universal'
+        env:
+          MACOS_ARCH: ${{ matrix.macos_arches }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+
+          helpers = list(Path("target/vpk").rglob("UpdateMac"))
+          assert len(helpers) == 1, helpers
+          helper = helpers[0]
+          thin = helper.with_suffix(".thin")
+          subprocess.run(["lipo", str(helper), "-thin", os.environ["MACOS_ARCH"], "-output", str(thin)], check=True)
+          thin.replace(helper)
+          PY
       - name: Verify release tag
         shell: bash
         run: |
@@ -104,11 +104,11 @@ jobs:
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
           sudo apt-get install -y dpkg-dev libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev librsvg2-bin
-      - name: Build Linux or Windows desktop app
-        if: runner.os != 'macOS'
+      - name: Build native desktop app
+        if: matrix.update_target != 'osx-universal'
         run: cargo build --release --locked -p kcastle-desktop --target ${{ matrix.target }}
-      - name: Build universal macOS desktop app
-        if: runner.os == 'macOS'
+      - name: Build final universal macOS bridge
+        if: matrix.update_target == 'osx-universal'
         run: |
           cargo build --release --locked -p kcastle-desktop --target aarch64-apple-darwin
           cargo build --release --locked -p kcastle-desktop --target x86_64-apple-darwin
@@ -152,12 +152,13 @@ jobs:
             --outputDir target/velopack
             --delta None
           )
+          if [[ -n "${{ matrix.velopack_runtime }}" ]]; then
+            args+=(--runtime "${{ matrix.velopack_runtime }}")
+          fi
           if [[ "$RUNNER_OS" == Linux ]]; then
-            args+=(--runtime "${{ matrix.velopack_runtime }}" --icon target/velopack-icon.png --categories Development)
+            args+=(--icon target/velopack-icon.png --categories Development)
           elif [[ "$RUNNER_OS" == macOS ]]; then
             args+=(--signAppIdentity=- --noInst)
-          else
-            args+=(--runtime "${{ matrix.velopack_runtime }}")
           fi
           vpk pack "${args[@]}"
       - name: Build distribution installers
@@ -181,6 +182,13 @@ jobs:
           elif [[ "$RUNNER_OS" == macOS ]]; then
             staging=$(mktemp -d)
             ditto -x -k "target/velopack/Kcastle-${UPDATE_CHANNEL}-Portable.zip" "$staging"
+            for binary in kcastle UpdateMac; do
+              executable="$staging/Kcastle.app/Contents/MacOS/$binary"
+              actual=$(lipo -archs "$executable" | tr ' ' '\n' | sort | xargs)
+              expected=$(echo "${{ matrix.macos_arches }}" | tr ' ' '\n' | sort | xargs)
+              test "$actual" = "$expected"
+            done
+            codesign --verify --deep --strict "$staging/Kcastle.app"
             ln -s /Applications "$staging/Applications"
             hdiutil create -volname Kcastle -srcfolder "$staging" -ov -format UDZO \
               "target/velopack/${primary}"
