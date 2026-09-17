@@ -51,9 +51,12 @@ tla-self-test model="all":
 build:
     cargo build --workspace --release --locked
 
-# Run the complete local release gate.
-qa: fmt-check clippy test build
+# Run fast local checks before pushing.
+pre-push: fmt-check clippy test
     git diff --check
+
+# Run the complete local release gate.
+qa: pre-push build
 
 # Build and package the release desktop binary as a signed macOS app.
 macos-app:

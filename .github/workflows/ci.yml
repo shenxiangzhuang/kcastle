@@ -59,13 +59,26 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
-    needs: [quality, test]
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Select release build
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 scripts/ci-release-build.py --self-test
+          python3 scripts/ci-release-build.py >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.required == 'true'
       - uses: Swatinem/rust-cache@v2
-      - run: |
+        if: steps.scope.outputs.required == 'true'
+      - if: steps.scope.outputs.required == 'true'
+        run: |
           test ! -f /etc/apt/apt-mirrors.txt || sudo sed -i 's|http://azure.archive.ubuntu.com|https://archive.ubuntu.com|' /etc/apt/apt-mirrors.txt
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
           sudo apt-get install -y libfontconfig1-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev
       - run: cargo build --workspace --release --locked
+        if: steps.scope.outputs.required == 'true'
