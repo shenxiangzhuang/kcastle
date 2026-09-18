@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Sourced by ../check in its isolated run directory.
+for case in outside:NoSwallowedWheel phantom:NoSwallowedWheel double:NoDoubleConsumption short:NoSwallowedWheel sidebar:SidebarIsolated reverse:CorrectDirection replay:NoDoubleConsumption none:ShortDownReachable none:ShortUpReachable none:InnerReachable none:SidebarBoundaryReachable; do
+    fault=${case%:*}
+    invariant=${case#*:}
+    name="probe-$fault-$invariant"
+    cat > "$name.cfg" <<CFG
+CONSTANT Fault = "$fault"
+SPECIFICATION Spec
+INVARIANT $invariant
+CFG
+    result=0
+    run_tlc "$name" > "$name.log" 2>&1 || result=$?
+    if [[ $result -ne 12 ]] || ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
+        cat "$name.log"
+        echo "FAIL: expected $invariant counterexample for $fault" >&2
+        exit 1
+    fi
+    echo "PASS: $fault produces $invariant counterexample"
+done
+
+cat > probe-unfair.cfg <<CFG
+CONSTANT Fault = "none"
+SPECIFICATION UnfairSpec
+PROPERTY EventSettles
+CFG
+result=0
+run_tlc probe-unfair > probe-unfair.log 2>&1 || result=$?
+if [[ $result -ne 13 ]] || ! grep -Fq 'Temporal properties were violated.' probe-unfair.log; then
+    cat probe-unfair.log
+    echo 'FAIL: expected stalled delivery without fairness' >&2
+    exit 1
+fi
+echo 'PASS: removing fairness produces EventSettles counterexample'

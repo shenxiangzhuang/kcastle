@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-for case in stale:CurrentOnly none:MultiplePreviewsReachable; do
+for case in stale:CurrentOnly exclusive:MountedDocumentsVisible none:MultiplePreviewsReachable none:SidebarAndInlineReachable; do
     fault=${case%:*}
     invariant=${case#*:}
     name="probe-$fault"

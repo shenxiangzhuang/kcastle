@@ -33,7 +33,10 @@ input { flex:1; accent-color:#947397 } svg { display:block; width:100%; height:8
 <h3>概率分布</h3>
 <label>概率 <input aria-label="概率" id="probability" type="range" min="0" max="100" value="65"><output id="value">65%</output></label>
 <svg viewBox="0 0 500 80"><rect x="0" y="15" width="500" height="45" rx="8" fill="#e6dce6"/><rect id="fill" x="0" y="15" width="325" height="45" rx="8" fill="#947397"/></svg>
+<p>长表格：纵向滚动应连续，横向滚动只移动表格。</p>
+<div style="overflow-x:auto;overflow-y:hidden"><table style="width:900px;border-collapse:collapse"><tbody id="rows"></tbody></table></div>
 <script>
+document.querySelector('#rows').innerHTML = Array.from({length:40}, (_, i) => `<tr><td style="padding:12px">第 ${i+1} 行</td><td>横向滚动检查</td><td>右侧列</td></tr>`).join('');
 const slider = document.querySelector('#probability');
 slider.oninput = () => { document.querySelector('#value').textContent=slider.value+'%'; document.querySelector('#fill').setAttribute('width', slider.value*5); };
 </script>

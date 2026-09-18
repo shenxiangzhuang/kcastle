@@ -231,16 +231,18 @@ impl Drop for Accessibility {
 /// GPUI registers its current cursor over its entire NSView, including WebKit children.
 /// Suspend those legacy cursor rectangles while WebKit owns the pointer; WebKit's
 /// tracking areas then control CSS cursors. Restore them outside the visible browser.
+/// The same visible regions route wheels before AppKit/WebKit gesture latching.
 struct CursorState {
+    input_view: Retained<NSView>,
     window: Retained<objc2_app_kit::NSWindow>,
-    regions: Vec<NSRect>,
+    regions: Vec<(NSRect, Retained<objc2_web_kit::WKWebView>)>,
     browser_owns: bool,
 }
 impl CursorState {
     fn sync(&mut self) {
         let point = self.window.mouseLocationOutsideOfEventStream();
-        let inside =
-            self.window.isKeyWindow() && self.regions.iter().any(|rect| contains(*rect, point));
+        let inside = self.window.isKeyWindow()
+            && self.regions.iter().any(|(rect, _)| contains(*rect, point));
         if inside != self.browser_owns {
             self.browser_owns = inside;
             if inside {
@@ -268,16 +270,27 @@ impl CursorOwner {
         owner: &mut Option<Self>,
         previews: impl Iterator<Item = &'a super::Preview>,
     ) {
-        use objc2_app_kit::{NSEvent, NSEventMask};
+        use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags, NSEventType};
+        use objc2_foundation::NSString;
+        use wry::WebViewExtMacOS;
         let clips = previews
             .filter(|preview| preview.applied.is_some())
-            .filter_map(|preview| preview.browser.as_ref().map(|browser| &browser.clip.0))
+            .filter_map(|preview| preview.browser.as_ref())
             .collect::<Vec<_>>();
         if owner.is_none() {
-            let Some(window) = clips.first().and_then(|view| view.window()) else {
+            // This is GPUI's raw-window-handle view, where ClipView::new attached us.
+            // NSWindow.contentView is only its AppKit wrapper, not an input receiver.
+            let Some(input_view) = clips
+                .first()
+                .and_then(|browser| unsafe { browser.clip.0.superview() })
+            else {
+                return;
+            };
+            let Some(window) = input_view.window() else {
                 return;
             };
             let state = std::rc::Rc::new(std::cell::RefCell::new(CursorState {
+                input_view,
                 window,
                 regions: Vec::new(),
                 browser_owns: false,
@@ -288,7 +301,54 @@ impl CursorOwner {
                 let native_event = unsafe { event.as_ref() };
                 let mut state = events.borrow_mut();
                 if native_event.window(state.window.mtm()).as_deref() == Some(&state.window) {
-                    state.sync();
+                    if native_event.r#type() == NSEventType::ScrollWheel {
+                        if native_event.modifierFlags().intersects(
+                            NSEventModifierFlags::Control | NSEventModifierFlags::Command,
+                        ) {
+                            return event.as_ptr();
+                        }
+                        let point = native_event.locationInWindow();
+                        // Hit-test every event, including momentum. AppKit/WebKit may latch a
+                        // gesture to a child that has since moved with the virtual transcript.
+                        if let Some((_, view)) = state
+                            .regions
+                            .iter()
+                            .find(|(rect, _)| contains(*rect, point))
+                        {
+                            let local = view.convertPoint_fromView(point, None);
+                            let y = if view.isFlipped() {
+                                local.y
+                            } else {
+                                view.bounds().size.height - local.y
+                            };
+                            let factor = if native_event.hasPreciseScrollingDeltas() {
+                                1.0
+                            } else {
+                                20.0
+                            };
+                            let dx = -native_event.scrollingDeltaX() * factor;
+                            let dy = -native_event.scrollingDeltaY() * factor;
+                            if dx != 0.0 || dy != 0.0 {
+                                let script = NSString::from_str(&format!(
+                                    "window.previewWheel({},{},{dx},{dy})",
+                                    local.x, y
+                                ));
+                                // The trusted host alone forwards this to its opaque iframe.
+                                unsafe {
+                                    view.evaluateJavaScript_completionHandler(&script, None);
+                                }
+                            }
+                            // Never deliver the same wheel to WebKit's native scrolling path.
+                            return std::ptr::null_mut();
+                        }
+                        // Outside a preview, bypass any old WebKit gesture target as well.
+                        let input_view = state.input_view.clone();
+                        drop(state);
+                        input_view.scrollWheel(native_event);
+                        return std::ptr::null_mut();
+                    } else {
+                        state.sync();
+                    }
                 }
                 event.as_ptr()
             });
@@ -297,7 +357,8 @@ impl CursorOwner {
                 | NSEventMask::MouseExited
                 | NSEventMask::LeftMouseDragged
                 | NSEventMask::RightMouseDragged
-                | NSEventMask::OtherMouseDragged;
+                | NSEventMask::OtherMouseDragged
+                | NSEventMask::ScrollWheel;
             let Some(monitor) =
                 (unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) })
             else {
@@ -309,7 +370,13 @@ impl CursorOwner {
             let mut state = owner.state.borrow_mut();
             state.regions = clips
                 .iter()
-                .map(|view| view.convertRect_toView(view.bounds(), None))
+                .map(|browser| {
+                    let view = &browser.clip.0;
+                    (
+                        view.convertRect_toView(view.bounds(), None),
+                        browser.webview().into_super(),
+                    )
+                })
                 .collect();
             state.sync();
         }

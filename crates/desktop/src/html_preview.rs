@@ -2,10 +2,12 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Element, ElementId, GlobalElementId, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Styled, Task, Window, div,
-    prelude::FluentBuilder, px,
+    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, StatefulInteractiveElement,
+    Styled, Task, Window, accesskit::Role, div, prelude::FluentBuilder, px,
 };
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -18,7 +20,7 @@ use crate::{app::DesktopApp, platform::gpui::RowKey, ui_theme::palette};
 mod macos;
 
 const INITIAL_HEIGHT: f32 = 240.0;
-const MAX_HEIGHT: f32 = 32_768.0;
+const MAX_HEIGHT: f32 = 480.0;
 type Snapshot = tokio::sync::oneshot::Receiver<Result<Vec<u8>, String>>;
 
 pub(crate) fn is_html(language: &str) -> bool {
@@ -36,6 +38,15 @@ impl Placement {
         let clip = full.intersect(&mask);
         (clip.size.width > px(0.0) && clip.size.height > px(0.0)).then_some(Self { full, clip })
     }
+
+    fn needs_layout(self, previous: Option<Self>, source_mode: bool) -> bool {
+        // AppKit moves/clips the native view without changing the iframe viewport.
+        // Source mode alone needs its inset synchronized with the visible clip.
+        previous.is_none_or(|old| {
+            old.full.size != self.full.size
+                || ((!cfg!(target_os = "macos") || source_mode) && old != self)
+        })
+    }
 }
 
 struct Preview {
@@ -52,6 +63,25 @@ struct Preview {
     dark: bool,
     dirty: bool,
     applied_mode: Option<(bool, bool)>,
+}
+impl Preview {
+    fn new(source: String, source_prefix: String, generation: u64, dark: bool) -> Self {
+        Self {
+            source,
+            source_prefix,
+            generation,
+            height: INITIAL_HEIGHT,
+            source_mode: false,
+            placement: None,
+            applied: None,
+            browser: None,
+            error: None,
+            loaded: false,
+            dark,
+            dirty: false,
+            applied_mode: None,
+        }
+    }
 }
 impl Drop for Preview {
     fn drop(&mut self) {
@@ -101,7 +131,23 @@ struct Store {
     cursor: Option<macos::CursorOwner>,
     entries: HashMap<RowKey, Preview>,
     expanded: Option<RowKey>,
+    sidebar: Option<(RowKey, Preview)>,
     sender: mpsc::Sender<Envelope>,
+}
+
+impl Store {
+    fn preview_mut(&mut self, key: RowKey, generation: u64) -> Option<(&mut Preview, bool)> {
+        if let Some((sidebar_key, preview)) = &mut self.sidebar
+            && *sidebar_key == key
+            && preview.generation == generation
+        {
+            return Some((preview, true));
+        }
+        self.entries
+            .get_mut(&key)
+            .filter(|p| p.generation == generation)
+            .map(|p| (p, false))
+    }
 }
 
 pub(crate) struct HtmlPreviews {
@@ -119,11 +165,8 @@ impl HtmlPreviews {
                 if owner
                     .update_in(cx, |app, window, cx| {
                         let mut store = app.html_previews.store.borrow_mut();
-                        let enlarged = store.expanded.is_some();
-                        let Some(preview) = store
-                            .entries
-                            .get_mut(&message.key)
-                            .filter(|p| p.generation == message.generation)
+                        let Some((preview, enlarged)) =
+                            store.preview_mut(message.key, message.generation)
                         else {
                             return;
                         };
@@ -153,13 +196,15 @@ impl HtmlPreviews {
                                             .then_some(message.key);
                                     }
                                     PreviewAction::Dismiss => {
-                                        store.expanded = None;
+                                        if store.expanded == Some(message.key) {
+                                            store.expanded = None;
+                                        }
                                     }
                                 }
                                 window.refresh();
                             }
                             BrowserEvent::Height { height } => {
-                                if height.is_finite() {
+                                if !enlarged && height.is_finite() {
                                     let height = height.ceil().clamp(64.0, MAX_HEIGHT);
                                     if (height - preview.height).abs() >= 1.0 {
                                         preview.height = height;
@@ -174,17 +219,15 @@ impl HtmlPreviews {
                                 }
                             }
                             BrowserEvent::Wheel { x, y, dx, dy } => {
-                                if enlarged {
-                                    return;
-                                }
-                                if let Some(placement) = preview.applied
+                                // A sidebar owns its scrolling, including at both boundaries.
+                                if !enlarged
+                                    && preview.applied.is_some()
                                     && [x, y, dx, dy].iter().all(|v| v.is_finite())
                                 {
+                                    // The row may have moved since the browser sent this event.
+                                    // Route to its owner instead of hit-testing stale coordinates.
                                     let position =
-                                        placement.full.origin + gpui_kit::point(px(x), px(y));
-                                    if !placement.clip.contains(&position) {
-                                        return;
-                                    }
+                                        app.chat.borrow().list.viewport_bounds().center();
                                     let event = gpui_kit::ScrollWheelEvent {
                                         position,
                                         delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(
@@ -194,7 +237,6 @@ impl HtmlPreviews {
                                         ..Default::default()
                                     };
                                     drop(store);
-                                    // Dispatch after releasing DesktopApp's mutable entity borrow.
                                     window.defer(cx, move |window, cx| {
                                         window.dispatch_event(
                                             gpui_kit::PlatformInput::ScrollWheel(event),
@@ -249,6 +291,7 @@ impl HtmlPreviews {
                 cursor: None,
                 entries: HashMap::new(),
                 expanded: None,
+                sidebar: None,
                 sender,
             })),
             _events: events,
@@ -265,6 +308,7 @@ impl HtmlPreviews {
     ) {
         let mut store = self.store.borrow_mut();
         if store.namespace != namespace || store.lineage != lineage {
+            store.sidebar = None;
             store.entries.clear();
             store.expanded = None;
             store.namespace = namespace.to_owned();
@@ -311,21 +355,12 @@ impl HtmlPreviews {
             } else {
                 store.entries.insert(
                     key,
-                    Preview {
-                        source: html.to_owned(),
-                        source_prefix: source_prefix.trim_end().to_owned(),
+                    Preview::new(
+                        html.to_owned(),
+                        source_prefix.trim_end().to_owned(),
                         generation,
-                        height: INITIAL_HEIGHT,
-                        source_mode: false,
-                        placement: None,
-                        applied: None,
-                        browser: None,
-                        error: None,
-                        loaded: false,
                         dark,
-                        dirty: false,
-                        applied_mode: None,
-                    },
+                    ),
                 );
             }
         }
@@ -373,6 +408,7 @@ impl HtmlPreviews {
                     .w_full()
                     .child(PreviewMount {
                         key,
+                        expanded: false,
                         store: self.store.clone(),
                     })
                     .into_any_element()
@@ -388,27 +424,82 @@ impl HtmlPreviews {
             .map(|entry| entry.source.clone())
     }
 
-    pub(crate) fn frame(&self, child: impl IntoElement, covered: bool) -> impl IntoElement {
-        let expanded = self.store.borrow().expanded.is_some();
+    pub(crate) fn sidebar(&self, cx: &mut App) -> Option<AnyElement> {
+        let mut state = self.store.borrow_mut();
+        let Some(key) = state.expanded else {
+            state.sidebar = None;
+            return None;
+        };
+        let inline = state.entries.get(&key)?;
+        if state
+            .sidebar
+            .as_ref()
+            .is_none_or(|(old, p)| *old != key || p.source != inline.source)
+        {
+            let source = inline.source.clone();
+            let prefix = inline.source_prefix.clone();
+            state.next_generation += 1;
+            state.sidebar = Some((
+                key,
+                Preview::new(source, prefix, state.next_generation, cx.theme().is_dark()),
+            ));
+        }
+        drop(state);
+        let colors = palette(cx);
         let store = self.store.clone();
-        let child = div()
-            .relative()
-            .size_full()
-            .child(child)
-            .when(expanded && !covered, |root| {
-                root.child(
+        Some(
+            div()
+                .id("html-preview-sidebar")
+                .role(Role::Complementary)
+                .aria_label("HTML preview")
+                .flex()
+                .flex_col()
+                .size_full()
+                .min_w(px(0.0))
+                .border_l_1()
+                .border_color(colors.border)
+                .bg(colors.surface)
+                .child(
                     div()
-                        .id("html-preview-backdrop")
-                        .absolute()
-                        .inset_0()
-                        .bg(gpui_kit::black().opacity(0.35))
-                        .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
-                            store.borrow_mut().expanded = None;
-                            window.refresh();
-                            cx.stop_propagation();
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_between()
+                        .h(px(crate::ui_theme::metrics::TITLEBAR_HEIGHT))
+                        .px_3()
+                        .border_b_1()
+                        .border_color(colors.border)
+                        .text_sm()
+                        .child("HTML preview")
+                        .child(
+                            Button::new("close-html-preview")
+                                .icon(IconName::Close)
+                                .accessibility_label("Close preview sidebar")
+                                .ghost()
+                                .compact()
+                                .tooltip("Close preview sidebar")
+                                .on_click(move |_, window, _| {
+                                    store.borrow_mut().expanded = None;
+                                    window.refresh();
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h(px(0.0))
+                        .overflow_hidden()
+                        .child(PreviewMount {
+                            key,
+                            expanded: true,
+                            store: self.store.clone(),
                         }),
                 )
-            });
+                .into_any_element(),
+        )
+    }
+
+    pub(crate) fn frame(&self, child: impl IntoElement, covered: bool) -> impl IntoElement {
         PreviewFrame {
             child: child.into_any_element(),
             store: self.store.clone(),
@@ -428,10 +519,9 @@ impl DesktopApp {
         let snapshot = self
             .html_previews
             .store
-            .borrow()
-            .entries
-            .get(&key)
-            .and_then(|entry| entry.browser.as_ref())
+            .borrow_mut()
+            .preview_mut(key, generation)
+            .and_then(|(entry, _)| entry.browser.as_ref())
             .map(|browser| browser.snapshot());
         let Some(snapshot) = snapshot else { return };
         cx.spawn_in(window, async move |owner, cx| {
@@ -444,10 +534,9 @@ impl DesktopApp {
                     if let Some(entry) = app
                         .html_previews
                         .store
-                        .borrow()
-                        .entries
-                        .get(&key)
-                        .filter(|entry| entry.generation == generation)
+                        .borrow_mut()
+                        .preview_mut(key, generation)
+                        .map(|(entry, _)| entry)
                         && let Some(browser) = &entry.browser
                     {
                         let _ = browser.evaluate_script("window.previewCaptureFinished()");
@@ -774,7 +863,12 @@ impl NativeBrowser {
         let _ = self.view.focus_parent();
     }
 
-    fn place(&self, placement: Placement, previous: Option<Placement>) -> Result<(), wry::Error> {
+    fn place(
+        &self,
+        placement: Placement,
+        previous: Option<Placement>,
+        source_mode: bool,
+    ) -> Result<(), wry::Error> {
         let full = placement.full;
         let clip = placement.clip;
         #[cfg(target_os = "macos")]
@@ -788,7 +882,7 @@ impl NativeBrowser {
             f32::from(full.origin.x - clip.origin.x),
             f32::from(full.origin.y - clip.origin.y),
         );
-        if previous != Some(placement) {
+        if placement.needs_layout(previous, source_mode) {
             let (top, bottom) = if cfg!(target_os = "macos") {
                 (
                     f32::from(clip.top() - full.top()),
@@ -821,6 +915,7 @@ impl NativeBrowser {
 
 struct PreviewMount {
     key: RowKey,
+    expanded: bool,
     store: Rc<RefCell<Store>>,
 }
 impl IntoElement for PreviewMount {
@@ -877,7 +972,17 @@ impl Element for PreviewMount {
         window: &mut Window,
         _: &mut App,
     ) {
-        if let Some(entry) = self.store.borrow_mut().entries.get_mut(&self.key) {
+        let mut store = self.store.borrow_mut();
+        let entry = if self.expanded {
+            store
+                .sidebar
+                .as_mut()
+                .filter(|(key, _)| *key == self.key)
+                .map(|(_, p)| p)
+        } else {
+            store.entries.get_mut(&self.key)
+        };
+        if let Some(entry) = entry {
             entry.placement = Placement::new(bounds, window.content_mask().bounds);
         }
     }
@@ -927,14 +1032,23 @@ impl Element for PreviewFrame {
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
+        _: Bounds<Pixels>,
         _: &mut (),
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
-        for entry in self.store.borrow_mut().entries.values_mut() {
-            entry.placement = None;
+        {
+            let mut store = self.store.borrow_mut();
+            let Store {
+                entries, sidebar, ..
+            } = &mut *store;
+            for entry in entries
+                .values_mut()
+                .chain(sidebar.iter_mut().map(|(_, p)| p))
+            {
+                entry.placement = None;
+            }
         }
         self.child.paint(window, cx);
         let events = self.store.clone();
@@ -943,14 +1057,20 @@ impl Element for PreviewFrame {
                 return;
             }
             let store = events.borrow();
-            if !store.entries.values().any(|entry| {
-                entry
-                    .applied
-                    .is_some_and(|p| p.clip.contains(&event.position))
-            }) {
+            if !store
+                .entries
+                .values()
+                .chain(store.sidebar.iter().map(|(_, p)| p))
+                .any(|entry| {
+                    entry
+                        .applied
+                        .is_some_and(|p| p.clip.contains(&event.position))
+                })
+            {
                 for browser in store
                     .entries
                     .values()
+                    .chain(store.sidebar.iter().map(|(_, p)| p))
                     .filter_map(|entry| entry.browser.as_ref())
                 {
                     browser.release_focus();
@@ -964,34 +1084,32 @@ impl Element for PreviewFrame {
                 let mut store = store.borrow_mut();
                 let Store {
                     entries,
+                    sidebar,
                     accessibility,
                     cursor,
                     ..
                 } = &mut *store;
-                macos::Accessibility::update(accessibility, entries.values());
-                macos::CursorOwner::update(cursor, entries.values());
+                macos::Accessibility::update(
+                    accessibility,
+                    entries.values().chain(sidebar.iter().map(|(_, p)| p)),
+                );
+                macos::CursorOwner::update(
+                    cursor,
+                    entries.values().chain(sidebar.iter().map(|(_, p)| p)),
+                );
             });
         }
         let mut store = self.store.borrow_mut();
         let sender = store.sender.clone();
-        let expanded = store.expanded;
-        for (&key, entry) in &mut store.entries {
-            let placement = if self.covered {
-                None
-            } else if let Some(expanded) = expanded {
-                (key == expanded).then(|| {
-                    let full = Bounds::new(
-                        bounds.origin + gpui_kit::point(px(32.0), px(48.0)),
-                        gpui_kit::size(
-                            (bounds.size.width - px(64.0)).max(px(1.0)),
-                            (bounds.size.height - px(80.0)).max(px(1.0)),
-                        ),
-                    );
-                    Placement { full, clip: full }
-                })
-            } else {
-                entry.placement
-            };
+        let Store {
+            entries, sidebar, ..
+        } = &mut *store;
+        for (key, entry, enlarged) in entries
+            .iter_mut()
+            .map(|(&key, p)| (key, p, false))
+            .chain(sidebar.iter_mut().map(|(key, p)| (*key, p, true)))
+        {
+            let placement = if self.covered { None } else { entry.placement };
             let Some(placement) = placement else {
                 if entry.applied.take().is_some()
                     && let Some(browser) = &entry.browser
@@ -1041,16 +1159,23 @@ impl Element for PreviewFrame {
                     window.defer(cx, |window, _| window.refresh());
                 }
             }
-            let mode = (expanded == Some(key), entry.source_mode);
+            let dark = cx.theme().is_dark();
+            if entry.dark != dark {
+                entry.dark = dark;
+                let _ = browser.evaluate_script(&format!("window.previewTheme({dark})"));
+            }
+            let mode = (enlarged, entry.source_mode);
             if entry.loaded && entry.applied_mode != Some(mode) {
                 let _ =
                     browser.evaluate_script(&format!("window.previewMode({},{})", mode.0, mode.1));
                 entry.applied_mode = Some(mode);
+                // Entering source mode needs current clip insets even without a resize.
+                entry.applied = None;
             }
             if !entry.loaded || entry.applied == Some(placement) {
                 continue;
             }
-            if let Err(error) = browser.place(placement, entry.applied) {
+            if let Err(error) = browser.place(placement, entry.applied, entry.source_mode) {
                 entry.error = Some(error.to_string());
                 window.defer(cx, |window, _| window.refresh());
             } else {
@@ -1064,6 +1189,37 @@ impl Element for PreviewFrame {
 mod tests {
     use super::*;
     use gpui_kit::{TestAppContext, size};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn transcript_scroll_does_not_send_browser_layout_commands() {
+        let mask = Bounds::new(
+            gpui_kit::point(px(0.0), px(80.0)),
+            size(px(800.0), px(500.0)),
+        );
+        let mut full = Bounds::new(
+            gpui_kit::point(px(20.0), px(120.0)),
+            size(px(600.0), px(462.0)),
+        );
+        let initial = Placement::new(full, mask).unwrap();
+        assert!(initial.needs_layout(None, false));
+        full.origin.y -= px(180.0);
+        let scrolled = Placement::new(full, mask).unwrap();
+        assert!(
+            !scrolled.needs_layout(Some(initial), false),
+            "native clipping must not enqueue JS layout work on every wheel frame"
+        );
+        assert!(
+            scrolled.needs_layout(Some(initial), true),
+            "source mode still follows the clip"
+        );
+        full.size.width -= px(80.0);
+        assert!(
+            Placement::new(full, mask)
+                .unwrap()
+                .needs_layout(Some(scrolled), false)
+        );
+    }
 
     #[gpui_kit::test]
     fn multiple_previews_survive_virtualization_and_reject_old_callbacks(cx: &mut TestAppContext) {
@@ -1138,11 +1294,163 @@ mod tests {
             let store = app.html_previews.store.borrow();
             assert_eq!(store.expanded, Some(keys[0].0));
             assert!(store.entries[&keys[0].0].source_mode);
+            let sidebar = store.sidebar.as_ref().unwrap().1.placement.unwrap().full;
+            let inline = store.entries[&keys[1].0].placement.unwrap().full;
+            assert_eq!(sidebar.right(), px(1180.0));
+            assert_eq!(sidebar.top(), px(40.0));
+            assert_eq!(sidebar.bottom(), px(900.0));
+            assert!(inline.right() < sidebar.left());
+            let original = store.entries[&keys[0].0].placement.unwrap().full;
+            assert!(
+                original.right() < sidebar.left(),
+                "the original stays visible beside its sidebar copy"
+            );
+            assert_ne!(store.sidebar.as_ref().unwrap().1.generation, keys[0].1);
             assert_eq!(
                 store.entries.len(),
                 2,
                 "enlarging must retain the other document"
             );
+        });
+        let sidebar_generation = view.read_with(cx, |app, _| {
+            app.html_previews
+                .store
+                .borrow()
+                .sidebar
+                .as_ref()
+                .unwrap()
+                .1
+                .generation
+        });
+        sender
+            .try_send(Envelope {
+                key: keys[0].0,
+                generation: sidebar_generation,
+                event: BrowserEvent::Height { height: 1500.0 },
+            })
+            .unwrap();
+        cx.run_until_parked();
+        view.update(cx, |app, cx| {
+            assert_eq!(
+                app.html_previews.store.borrow().entries[&keys[0].0].height,
+                INITIAL_HEIGHT,
+                "sidebar measurements must not resize the inline preview"
+            );
+            app.chat.borrow().list.scroll_to_end();
+            cx.notify();
+        });
+        for width in [720.0, 1400.0, 1180.0] {
+            cx.simulate_resize(size(px(width), px(900.0)));
+            cx.run_until_parked();
+            view.read_with(cx, |app, _| {
+                let store = app.html_previews.store.borrow();
+                let sidebar = store.sidebar.as_ref().unwrap().1.placement.unwrap().full;
+                assert_eq!(sidebar.right(), px(width));
+                assert!(sidebar.size.width >= px(280.0));
+                assert!(sidebar.left() >= px(320.0));
+                assert_eq!(store.entries[&keys[0].0].generation, keys[0].1);
+            });
+        }
+        // Selecting another document reuses the same sidebar; a late dismissal from
+        // the previous document must not close its replacement.
+        let before = view.update(cx, |app, _| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let preview = &mut store.sidebar.as_mut().unwrap().1;
+            // Headless windows have no native browser to publish the applied rectangle.
+            preview.applied = preview.placement;
+            app.chat.borrow().list.logical_scroll_top()
+        });
+        sender
+            .try_send(Envelope {
+                key: keys[0].0,
+                generation: sidebar_generation,
+                event: BrowserEvent::Wheel {
+                    x: 50.0,
+                    y: 50.0,
+                    dx: 0.0,
+                    dy: -160.0,
+                },
+            })
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let after = app.chat.borrow().list.logical_scroll_top();
+            assert_eq!(
+                (after.item_ix, after.offset_in_item),
+                (before.item_ix, before.offset_in_item),
+                "a sidebar boundary wheel must not scroll the transcript"
+            );
+        });
+        for (key, action) in [
+            (keys[1], PreviewAction::Expand),
+            (keys[0], PreviewAction::Dismiss),
+        ] {
+            sender
+                .try_send(Envelope {
+                    key: key.0,
+                    generation: key.1,
+                    event: BrowserEvent::Action { action },
+                })
+                .unwrap();
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            assert_eq!(store.expanded, Some(keys[1].0));
+            assert_eq!(
+                store
+                    .sidebar
+                    .as_ref()
+                    .unwrap()
+                    .1
+                    .placement
+                    .unwrap()
+                    .full
+                    .right(),
+                px(1180.0)
+            );
+        });
+        sender
+            .try_send(Envelope {
+                key: keys[0].0,
+                generation: keys[0].1,
+                event: BrowserEvent::Action {
+                    action: PreviewAction::Expand,
+                },
+            })
+            .unwrap();
+        view.update(cx, |app, cx| {
+            app.chat
+                .borrow()
+                .list
+                .scroll_to(gpui_kit::ListOffset::default());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Reopening the same row must not accept the retired sidebar's callbacks.
+        for event in [
+            BrowserEvent::Height { height: 999.0 },
+            BrowserEvent::Action {
+                action: PreviewAction::Dismiss,
+            },
+        ] {
+            sender
+                .try_send(Envelope {
+                    key: keys[0].0,
+                    generation: sidebar_generation,
+                    event,
+                })
+                .unwrap();
+        }
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            assert_eq!(store.expanded, Some(keys[0].0));
+            assert_ne!(
+                store.sidebar.as_ref().unwrap().1.generation,
+                sidebar_generation
+            );
+            assert_eq!(store.entries[&keys[0].0].height, INITIAL_HEIGHT);
         });
         sender
             .try_send(Envelope {
@@ -1159,6 +1467,21 @@ mod tests {
             assert_eq!(store.expanded, None);
             assert!(store.entries[&keys[0].0].source_mode);
             assert_eq!(store.entries[&keys[0].0].generation, keys[0].1);
+        });
+        sender
+            .try_send(Envelope {
+                key: keys[0].0,
+                generation: keys[0].1,
+                event: BrowserEvent::Height { height: 1500.0 },
+            })
+            .unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.html_previews.store.borrow().entries[&keys[0].0].height,
+                480.0,
+                "long inline content must have a bounded scrolling viewport"
+            );
         });
         sender
             .try_send(Envelope {

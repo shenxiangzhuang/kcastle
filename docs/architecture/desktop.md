@@ -206,15 +206,38 @@ can grow with the number of visited HTML documents in that session, outside the 
 
 A root paint wrapper collects actual GPUI content masks and hides browsers absent from the paint.
 On macOS a retained native clip view bounds the full-sized WebKit view; scrolling changes native
-geometry without reflowing the document or waiting for a JavaScript translation. On other supported
+geometry without reflowing the document or waiting for a JavaScript translation.
+Scroll-only placements on macOS do not enqueue `previewLayout` JavaScript; document size changes
+still do, and source mode keeps its clipping insets synchronized. Mode changes invalidate applied
+placement so entering source mode initializes those insets even without a resize. On other supported
 native backends a clipped host viewport offsets a full-sized iframe. ResizeObserver and mutation
-notifications update the logical row height, with finite validation and a 64–32768 px range.
+notifications update the logical row height, with finite validation and a 64–480 px range.
 Measurement is coalesced in a microtask, since WebKit can suspend animation frames in an occluded
 native child view even while DOM interaction still works.
-Documents taller than this must scroll internally. Content-driven height is recommended; viewport-
-relative height with margins can form a feedback loop and reaches the height limit. Row remeasurement
-uses native list anchoring. Wheel events stay with scrollable page widgets until their boundary,
-then are deferred into GPUI's normal scroll dispatch, outside DesktopApp's mutable entity borrow.
+Long documents scroll inside the bounded preview; sidebar previews fill their panel. The cap also
+bounds height feedback from viewport-relative content. Row remeasurement uses native list anchoring.
+The host fills a fixed viewport with hidden overflow, keeping its own scrollbar out of the document.
+Document roots enable vertical scrolling and disable native overscroll chaining/bounce into the host.
+Wheel input outside a preview only scrolls the transcript, leaving the document's scroll offset intact.
+Inside either preview, the innermost element that can move along the dominant axis consumes the whole
+wheel synchronously, confirmed by a changed scroll offset. CSS/geometry hints alone must not
+consume input: if an attempted scroll does not move, try the next ancestor or the transcript.
+On macOS, the window's local event monitor hit-tests each native wheel against the current
+visible clips, including momentum. It consumes the native event and calls the trusted host's
+`previewWheel`, which messages the opaque iframe; this does not depend on WebKit delivering a
+DOM wheel after native child views move across a gesture. Outside input goes directly to the GPUI view that owns the native clips (the view from the raw
+window handle), bypassing any old WebKit gesture target. `NSWindow.contentView` is an AppKit
+wrapper around that GPUI view and must never be used as the scroll receiver. Coordinates are converted from the native
+window to the full browser viewport before forwarding. Other backends use the DOM wheel handler
+with default handling cancelled. Both entries share the same synchronous ownership policy.
+At inline boundaries, subsequent wheel input is deferred once into GPUI's transcript scroll
+dispatch, outside DesktopApp's mutable entity borrow. It targets the transcript viewport rather
+than hit-testing coordinates made stale by asynchronous layout. Sidebar input stays within the
+sidebar at both boundaries; document, trusted host and native callback all enforce this isolation.
+Sidebar roots have their own vertical scrollbar, including while the original inline view is visible. Reversing direction immediately returns
+ownership to an inner scroller with room in that direction. Horizontal tables cannot trap vertical
+gestures; modifier zoom is preserved. The DOM fallback respects events already handled by the document. Mode switches and
+height reports do not reset the document's scroll offset.
 
 Modal/composer/sidebar menus temporarily hide native previews to keep their windows from covering
 GPUI overlays; runtime state is retained. macOS exposes visible native WebKit accessibility roots
@@ -228,18 +251,25 @@ The trusted host embeds each generated document in an opaque-origin `sandbox="al
 iframe, with restrictive CSP installed before generated content. Inline JavaScript/CSS, inline SVG,
 and embedded data/blob assets work. External resources, fetch/WebSocket, nested frames, forms,
 popups and external navigation are blocked. There is no shell/file/application bridge. A bounded
-256-message channel accepts ready, height, wheel, diagnostic and trusted toolbar events of at most 4096 bytes;
+256-message channel accepts ready, height, wheel, errors and trusted toolbar events of at most 4096 bytes;
 height/coordinates are checked and wheel deltas bounded. OS browser isolation remains responsible
 for executing arbitrary page scripts; an infinite script may hang its browser process, not a Rust
 worker. The host accepts no toolbar actions from the generated iframe. A random per-browser capability
 token, present only in the trusted parent, also guards the native IPC handler because platform
 bridges may be exposed to subframes; an iframe cannot bypass the host by calling that bridge directly. A compact upper-right toolbar
 appears on hover or keyboard focus: save a PNG, enlarge, and view source. Source is assigned as
-plain text in the host, leaving the hidden iframe and its interaction state alive. Enlarging moves
-the same native browser over a dimmed window backdrop and hides other browsers without releasing
-them. Escape returns from source first, then closes the enlarged view; clicking the backdrop also
-closes it. Session changes or removal of the owning row dismiss enlargement. Covered app overlays
-still take precedence; wheel events in the enlarged view never reach the transcript.
+plain text in the host, leaving the hidden iframe and its interaction state alive. Enlarging creates
+one separate browser instance in a resizable right sidebar alongside the conversation and composer.
+The original inline instance stays visible and interactive. Both render the same source, with separate
+DOM/JavaScript and scroll state; arbitrary script closures/canvas state are not cloned or synchronized.
+The sidebar has its own unique generation, so its height reports cannot resize the inline view and
+its delayed actions cannot affect a replacement sidebar. Only one sidebar instance is retained;
+selecting another document replaces it. Closing via the header, sidebar toolbar or Escape releases
+that instance without reloading the inline browser. Escape returns from source first. The sidebar
+stays mounted when its original row scrolls out of view; session changes or removal of the owning
+row close it. Covered app overlays still hide all native browsers and retain their runtime state.
+The split reuses the existing resizable panels, reserves at least 320 px for chat and 280 px for
+preview at the supported window sizes, and has no persisted sidebar preference or journal state.
 
 Toolbar controls are inset 28 px from the full document's upper-right corner, beyond the default
 16 px document margin. They stay attached to that document corner: transcript scrolling clips
@@ -249,7 +279,7 @@ They are not selectable text. On macOS, GPUI's legacy cursor rectangle spans its
 A window-owned local event monitor suspends those cursor rectangles only while the pointer is in
 a visible browser clip; WebKit's tracking areas then own CSS cursors. Leaving, hiding all matching
 clips, or dropping the owner restores the GPUI cursor rectangles. The monitor observes and returns
-events unchanged and does not request global input monitoring.
+mouse events unchanged; unmodified wheels are consumed and routed to the current owner as described above. It does not request global input monitoring.
 
 Image export hides the toolbar/source and captures the rendered browser with the platform API
 (WKWebView snapshot, WebKitGTK snapshot, or WebView2 CapturePreview), including canvas pixels.
@@ -263,8 +293,15 @@ The [HTML preview model](tla/html-preview/README.md) checks independent document
 state, overlay visibility and rejection of retired-instance callbacks. Rust tests cover semantic
 partitioning, clipping geometry, the full virtual list's multi-preview lifecycle and stale height
 notifications. Headless GPUI tests do not create native WebViews.
+The [HTML scrolling model](tla/html-scroll/README.md) separately checks the intended
+inside/outside ownership protocol, short-content handoff, both edges, exclusive consumption
+and eventual delivery. Its bounded verification assumes synchronous inner movement and
+reliable native callback dispatch; it does not prove those browser/GPUI assumptions.
 `node crates/desktop/tests/html-preview-bootstrap.cjs` checks expand/collapse height delivery with
 suspended animation frames, and runs in the CI quality job.
+It also covers horizontal tables, vertical widgets, axis drift, boundary handoff, and the
+native host-to-iframe routing without DOM wheel delivery, and sidebar boundary isolation. The native fixture includes a long, wide table;
+scroll over its cells in both directions, at its boundaries, and after moving it into the sidebar.
 
 Native backends use Wry: WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux/X11. Linux build
 jobs install `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`; Debian runtime dependencies come from
@@ -283,7 +320,11 @@ KCASTLE_PREVIEW_MARKDOWN="$PWD/crates/desktop/tests/fixtures/html-previews.md" \
 ```
 
 Use the two independent sliders, expand/collapse the explanation, scroll both documents fully
-out of view and back, resize the window, switch source/preview, enlarge/restore, and open/close settings.
+out of view and back, resize the window, switch source/preview, open/close the right preview sidebar,
+and open/close settings. With a preview in the sidebar, drag the divider, continue typing in the
+composer, scroll another inline preview, and open that second preview in the sidebar. Repeat at
+the minimum 720 px window width. Check that closing restores each document's original interaction
+state and that the sidebar stays visible while its original row is offscreen.
 Check value retention, automatic height changes, clipping above the composer, and keyboard access.
 For cursor regression checks, first hover transcript text (I-beam), then each preview toolbar
 button (pointing hand), then a page slider/button, source text, and the composer. Repeat with the

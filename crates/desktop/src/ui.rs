@@ -92,6 +92,31 @@ impl Render for DesktopApp {
                     .children(self.approval_card(cx))
                     .child(self.docked_composer(window, cx))
             });
+        let main = if let Some(preview) = self.html_previews.sidebar(cx) {
+            // Reserve chat space even when the left sidebar is at its widest.
+            let available = f32::from(window.viewport_size().width)
+                - if sidebar_mode == SidebarMode::Expanded {
+                    sidebar_max_width
+                } else {
+                    0.0
+                };
+            h_resizable("chat-preview-layout")
+                .child(
+                    resizable_panel()
+                        .size_range(px(320.0)..gpui_kit::Pixels::MAX)
+                        .child(main),
+                )
+                .child(
+                    resizable_panel()
+                        .size(px((available * 0.5).min(640.0)))
+                        .size_range(px(280.0)..px((available - 320.0).max(280.0)))
+                        .flex_none()
+                        .child(preview),
+                )
+                .into_any_element()
+        } else {
+            main.into_any_element()
+        };
         let content = match sidebar_mode {
             SidebarMode::Expanded => h_resizable("app-layout")
                 .child(

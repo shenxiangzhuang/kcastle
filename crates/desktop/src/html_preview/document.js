@@ -21,6 +21,8 @@
     if (!scheduled) { scheduled = true; queueMicrotask(measure); }
   };
   addEventListener('DOMContentLoaded', () => {
+    document.documentElement.style.setProperty('overflow-y', 'auto', 'important');
+    document.documentElement.style.setProperty('overscroll-behavior', 'none', 'important');
     const observer = new ResizeObserver(schedule);
     observer.observe(document.body);
     new MutationObserver(schedule).observe(document.body, {subtree:true, childList:true, attributes:true, characterData:true});
@@ -30,30 +32,48 @@
   addEventListener('resize', schedule);
   document.fonts.ready.then(schedule);
   addEventListener('message', event => {
-    if (event.source === parent && event.data?.kind === 'expanded') expanded = !!event.data.value;
+    if (event.source === parent && event.data?.kind === 'expanded') {
+      expanded = event.data.value;
+      document.documentElement.style.setProperty('overflow-y', expanded ? 'scroll' : 'auto', 'important');
+      // Republish measurements after a mode change.
+      lastHeight = 0;
+      schedule();
+    }
+    if (event.source === parent && event.data?.kind === 'nativeWheel') {
+      const {x, y, dx, dy} = event.data;
+      scroll(document.elementFromPoint(x, y), x, y, dx, dy);
+    }
     if (event.source === parent && event.data?.kind === 'theme') {
       document.documentElement.style.colorScheme = event.data.dark ? 'dark' : 'light';
       dispatchEvent(new CustomEvent('kcastle-theme', {detail:{dark:event.data.dark}}));
       schedule();
     }
   });
-  // Inner scrollable widgets keep their wheel events. At their edge, continue the transcript.
-  addEventListener('wheel', event => {
-    if (expanded) return;
-    if (event.ctrlKey || event.metaKey || event.defaultPrevented) return;
-    let node = event.target instanceof Element ? event.target : event.target.parentElement;
+  // Both native input and browser wheels use the same single-owner scroll policy.
+  const scroll = (target, x, y, dx, dy) => {
+    const vertical = Math.abs(dy) >= Math.abs(dx);
+    let node = target instanceof Element ? target : target?.parentElement;
     while (node) {
       const style = getComputedStyle(node);
-      const dy = event.deltaY, dx = event.deltaX;
       const y = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
       const x = /(auto|scroll)/.test(style.overflowX) && node.scrollWidth > node.clientWidth + 1;
-      if ((y && (dy < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) ||
-          (x && (dx < 0 ? node.scrollLeft > 0 : node.scrollLeft + node.clientWidth < node.scrollWidth - 1))) return;
+      if ((vertical && dy && y && (dy < 0 ? node.scrollTop > 0 : node.scrollTop + node.clientHeight < node.scrollHeight - 1)) ||
+          (!vertical && dx && x && (dx < 0 ? node.scrollLeft > 0 : node.scrollLeft + node.clientWidth < node.scrollWidth - 1))) {
+        // Synchronous movement avoids native scroll chaining and smooth-scroll lag
+        // racing the next boundary decision. Excess delta stays with this owner.
+        const before = vertical ? node.scrollTop : node.scrollLeft;
+        node.scrollBy({top:vertical ? dy : 0, left:vertical ? 0 : dx, behavior:'instant'});
+        if ((vertical ? node.scrollTop : node.scrollLeft) !== before) return;
+      }
       node = node.parentElement;
     }
-    event.preventDefault();
+    if (!expanded) send({kind:'wheel', x, y, dx, dy});
+  };
+  addEventListener('wheel', event => {
+    if (event.ctrlKey || event.metaKey || event.defaultPrevented) return;
     const factor = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? innerHeight : 1;
-    send({kind:'wheel', x:event.clientX, y:event.clientY, dx:event.deltaX*factor, dy:event.deltaY*factor});
+    event.preventDefault();
+    scroll(event.target, event.clientX, event.clientY, event.deltaX * factor, event.deltaY * factor);
   }, {passive:false});
   addEventListener('keydown', event => {
     if (event.key === 'Escape') send({kind:'escape'});
