@@ -230,6 +230,10 @@ window handle), bypassing any old WebKit gesture target. `NSWindow.contentView` 
 wrapper around that GPUI view and must never be used as the scroll receiver. Coordinates are converted from the native
 window to the full browser viewport before forwarding. Other backends use the DOM wheel handler
 with default handling cancelled. Both entries share the same synchronous ownership policy.
+The trusted host also handles DOM wheels over its source view and toolbar through `previewWheel`;
+iframe wheel events do not bubble into the host. macOS consumes the original native wheel before
+DOM dispatch, so the added host listener does not consume a second copy. Source views use the same
+inline boundary handoff and sidebar isolation policy as rendered documents.
 At inline boundaries, subsequent wheel input is deferred once into GPUI's transcript scroll
 dispatch, outside DesktopApp's mutable entity borrow. It targets the transcript viewport rather
 than hit-testing coordinates made stale by asynchronous layout. Sidebar input stays within the
@@ -246,6 +250,8 @@ hidden, the window still publishes its GPUI root and window controls; clearing t
 children would erase the accessibility tree instead of restoring it. This is a native child-view
 integration, not browser pixels composited into GPUI's GPU scene. General arbitrary GPUI overlay
 composition and a fully interleaved browser/GPUI accessibility tree are outside this implementation.
+The chat's Back to bottom control sits in the tab strip, outside the transcript's native clips,
+so a long HTML preview cannot obscure it or intercept its clicks.
 
 The trusted host embeds each generated document in an opaque-origin `sandbox="allow-scripts"`
 iframe, with restrictive CSP installed before generated content. Inline JavaScript/CSS, inline SVG,
@@ -270,6 +276,14 @@ stays mounted when its original row scrolls out of view; session changes or remo
 row close it. Covered app overlays still hide all native browsers and retain their runtime state.
 The split reuses the existing resizable panels, reserves at least 320 px for chat and 280 px for
 preview at the supported window sizes, and has no persisted sidebar preference or journal state.
+
+The selected sidebar tracks canonical message revisions and prepares its fence on a background worker even
+when the original row is offscreen or the user switches to Trajectory. There is at most one sidebar
+preparation in flight: completed append snapshots may advance the display, then the next frame
+requests the newest revision. Publication checks sidebar generation, session namespace, projection
+lineage and append ancestry. Closing/replacing the sidebar drops its task. Preparation shares the
+chat's 1 MiB input and 256 KiB code-source limits; an unavailable/oversized fence closes the sidebar.
+Unchanged HTML keeps its runtime, and source changes retain the browser and source-view mode.
 
 Toolbar controls are inset 28 px from the full document's upper-right corner, beyond the default
 16 px document margin. They stay attached to that document corner: transcript scrolling clips

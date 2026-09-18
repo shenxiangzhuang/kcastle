@@ -92,7 +92,10 @@ impl Render for DesktopApp {
                     .children(self.approval_card(cx))
                     .child(self.docked_composer(window, cx))
             });
-        let main = if let Some(preview) = self.html_previews.sidebar(cx) {
+        let main = if let Some(preview) = self
+            .html_previews
+            .sidebar(&self.core.session_view.conversation.messages, cx)
+        {
             // Reserve chat space even when the left sidebar is at its widest.
             let available = f32::from(window.viewport_size().width)
                 - if sidebar_mode == SidebarMode::Expanded {

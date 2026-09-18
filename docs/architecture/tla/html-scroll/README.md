@@ -94,6 +94,11 @@ For native acceptance, place short and long previews in a scrollable transcript.
 inside/outside movement, both edges and immediate reversal, then repeat in the sidebar
 and after an inline preview is partially clipped. Short previews must pass both directions
 to the transcript immediately when inline; a short sidebar must leave the transcript unchanged. Repeat with a nested horizontal table and vertical widget.
+Repeat in source view: its `pre` is the inner scroller in this abstraction. On Windows/Linux,
+the host's DOM wheel listener supplies this entry because source events do not reach the iframe.
+On macOS, the native monitor consumes the original event before the same host handler runs;
+the DOM listener therefore does not deliver a second copy. The JS regression exercises both
+entries, short-source handoff and sidebar boundaries; TLC still assumes delivery to the handler.
 
 ## Native regression (2026-09-18)
 

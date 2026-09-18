@@ -63,6 +63,10 @@ struct Preview {
     dark: bool,
     dirty: bool,
     applied_mode: Option<(bool, bool)>,
+    source_revision: Option<u64>,
+    source_task: Option<Task<()>>,
+    #[cfg(test)]
+    source_gate: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 impl Preview {
     fn new(source: String, source_prefix: String, generation: u64, dark: bool) -> Self {
@@ -80,7 +84,19 @@ impl Preview {
             dark,
             dirty: false,
             applied_mode: None,
+            source_revision: None,
+            source_task: None,
+            #[cfg(test)]
+            source_gate: None,
         }
+    }
+
+    fn replace_source(&mut self, source: String, prefix: String, generation: u64) {
+        self.source = source;
+        self.source_prefix = prefix;
+        self.generation = generation;
+        self.error = None;
+        self.dirty = true;
     }
 }
 impl Drop for Preview {
@@ -347,11 +363,11 @@ impl HtmlPreviews {
             store.next_generation += 1;
             let generation = store.next_generation;
             if let Some(preview) = store.entries.get_mut(&key) {
-                preview.source = html.to_owned();
-                preview.source_prefix = source_prefix.trim_end().to_owned();
-                preview.generation = generation;
-                preview.error = None;
-                preview.dirty = true;
+                preview.replace_source(
+                    html.to_owned(),
+                    source_prefix.trim_end().to_owned(),
+                    generation,
+                );
             } else {
                 store.entries.insert(
                     key,
@@ -424,18 +440,18 @@ impl HtmlPreviews {
             .map(|entry| entry.source.clone())
     }
 
-    pub(crate) fn sidebar(&self, cx: &mut App) -> Option<AnyElement> {
+    pub(crate) fn sidebar(
+        &self,
+        messages: &im::Vector<std::sync::Arc<crate::domain::Message>>,
+        cx: &mut Context<DesktopApp>,
+    ) -> Option<AnyElement> {
         let mut state = self.store.borrow_mut();
         let Some(key) = state.expanded else {
             state.sidebar = None;
             return None;
         };
         let inline = state.entries.get(&key)?;
-        if state
-            .sidebar
-            .as_ref()
-            .is_none_or(|(old, p)| *old != key || p.source != inline.source)
-        {
+        if state.sidebar.as_ref().is_none_or(|(old, _)| *old != key) {
             let source = inline.source.clone();
             let prefix = inline.source_prefix.clone();
             state.next_generation += 1;
@@ -443,6 +459,78 @@ impl HtmlPreviews {
                 key,
                 Preview::new(source, prefix, state.next_generation, cx.theme().is_dark()),
             ));
+        }
+        let message = messages.iter().find(|message| message.key == key.message)?;
+        let namespace = state.namespace.clone();
+        let lineage = state.lineage;
+        let (_, preview) = state.sidebar.as_mut()?;
+        if preview.source_revision != Some(message.revision) && preview.source_task.is_none() {
+            let generation = preview.generation;
+            preview.source_revision = Some(message.revision);
+            let message = message.clone();
+            let executor = cx.background_executor().clone();
+            #[cfg(test)]
+            let dispatcher = executor.clone();
+            #[cfg(test)]
+            let gate = preview.source_gate.take();
+            let task =
+                cx.spawn(async move |owner, cx| {
+                    let input = message.clone();
+                    let result = executor
+                        .spawn(async move {
+                            #[cfg(test)]
+                            if let Some(gate) = gate {
+                                let _ = gate.await;
+                            }
+                            #[cfg(test)]
+                            assert!(
+                                !dispatcher.is_main_thread(),
+                                "sidebar parsing must stay off the UI thread"
+                            );
+                            sidebar_document(input.text.get(key.start..)?)
+                        })
+                        .await;
+                    let _ =
+                        owner.update(cx, |app, cx| {
+                            let mut store = app.html_previews.store.borrow_mut();
+                            let Some((preview, true)) = store.preview_mut(key, generation) else {
+                                return;
+                            };
+                            preview.source_task = None;
+                            // A completed append may advance the sidebar while newer input is queued.
+                            // Rewrites, session changes and replacement sidebar instances cannot.
+                            if app.chat.borrow().namespace() != namespace
+                                || app.core.session_view.trajectory.projection_lineage() != lineage
+                                || !app.core.session_view.conversation.messages.iter().any(
+                                    |current| {
+                                        current.key == key.message
+                                            && current.text.starts_with(&message.text)
+                                    },
+                                )
+                            {
+                                preview.source_revision = None;
+                                cx.notify();
+                                return;
+                            }
+                            let Some((source, prefix)) = result else {
+                                store.sidebar = None;
+                                store.expanded = None;
+                                cx.notify();
+                                return;
+                            };
+                            if preview.source != source {
+                                store.next_generation += 1;
+                                let next_generation = store.next_generation;
+                                if let Some((preview, true)) = store.preview_mut(key, generation) {
+                                    preview.replace_source(source, prefix, next_generation);
+                                }
+                            } else {
+                                preview.source_prefix = prefix;
+                            }
+                            cx.notify();
+                        });
+                });
+            preview.source_task = Some(task);
         }
         drop(state);
         let colors = palette(cx);
@@ -506,6 +594,28 @@ impl HtmlPreviews {
             covered,
         }
     }
+}
+
+fn sidebar_document(source: &str) -> Option<(String, String)> {
+    use crate::platform::gpui::{MAX_CODE_SOURCE_BYTES, MAX_INDEX_SOURCE_BYTES};
+    if source.len() > MAX_INDEX_SOURCE_BYTES {
+        return None;
+    }
+    let mut parsed = crate::streaming_markdown::StreamingMarkdownState::default();
+    parsed.update(source);
+    let block = parsed.frozen().iter().chain(parsed.tail_blocks()).next()?;
+    if let markdown::mdast::Node::Code(code) = &block.node
+        && is_html(code.lang.as_deref().unwrap_or_default())
+        && block.source.len() <= MAX_CODE_SOURCE_BYTES
+    {
+        return Some((
+            code.value.clone(),
+            source[..block.key + block.source.len()]
+                .trim_end()
+                .to_owned(),
+        ));
+    }
+    None
 }
 
 impl DesktopApp {
@@ -1678,5 +1788,262 @@ mod tests {
             2,
             "template-like user content must survive both source and preview serialization"
         );
+    }
+    fn preview_app(
+        cx: &mut TestAppContext,
+        text: String,
+    ) -> (
+        std::path::PathBuf,
+        gpui_kit::Entity<DesktopApp>,
+        &mut gpui_kit::VisualTestContext,
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-preview-{}",
+            kcastle_agent::SessionId::new()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut app = DesktopApp::new(startup, window, cx);
+            let mut snapshot = crate::domain::SessionView::default();
+            snapshot
+                .conversation
+                .messages
+                .push_back(std::sync::Arc::new(crate::domain::Message {
+                    key: MessageId(88000),
+                    revision: 0,
+                    role: crate::domain::Role::Assistant,
+                    text,
+                    tool_call_id: None,
+                    title: None,
+                    payload: None,
+                    schema: None,
+                    pending: false,
+                    failed: false,
+                    started_at_ms: None,
+                    duration_ms: None,
+                    turn: 0,
+                    step: 0,
+                    request_id: None,
+                }));
+            app.core.session_view = std::sync::Arc::new(snapshot);
+            app.core.follow_chat_tail = false;
+            app.chat.get_mut().pending_anchor = Some(crate::layout::ScrollAnchor::Block {
+                id: MessageId(88000),
+                field: 1,
+                source_offset: 0,
+                local_offset: 0.0,
+            });
+            window.blur(cx);
+            app
+        });
+        cx.simulate_resize(size(px(1180.0), px(620.0)));
+        cx.run_until_parked();
+        (root, view, cx)
+    }
+
+    #[gpui_kit::test]
+    fn back_to_bottom_stays_outside_native_preview(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(
+            cx,
+            format!(
+                "```html\n<div style='height:2000px'>Long preview</div>\n```\n\n{}",
+                "Text after preview.\n\n".repeat(100),
+            ),
+        );
+        view.update(cx, |app, cx| {
+            for preview in app.html_previews.store.borrow_mut().entries.values_mut() {
+                preview.height = MAX_HEIGHT;
+            }
+            app.chat.borrow().list.remeasure();
+            app.chat
+                .borrow()
+                .list
+                .set_follow_mode(gpui_kit::FollowMode::Normal);
+            app.chat
+                .borrow()
+                .list
+                .scroll_to(gpui_kit::ListOffset::default());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let button = cx.debug_bounds("back-to-bottom").unwrap();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            let clips = store
+                .entries
+                .values()
+                .filter_map(|p| p.placement.map(|p| p.clip))
+                .collect::<Vec<_>>();
+            assert!(!clips.is_empty());
+            assert!(
+                clips.iter().all(|clip| !clip.contains(&button.center())),
+                "Back to bottom is covered by a native browser clip"
+            );
+        });
+        cx.simulate_click(button.center(), gpui_kit::Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.chat_at_bottom()));
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_follows_stream_while_inline_is_hidden(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(cx, "```html\n<h1>Start</h1>".into());
+        view.update(cx, |app, cx| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let key = *store.entries.keys().next().unwrap();
+            store.expanded = Some(key);
+            app.core.surface = crate::domain::Surface::Trajectory;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let mut generation = view.update(cx, |app, _| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let sidebar = &mut store.sidebar.as_mut().unwrap().1;
+            sidebar.source_mode = true;
+            sidebar.generation
+        });
+        for (suffix, changed) in [
+            ("<h2>Finished</h2>\n```", true),
+            (
+                "\n\nAfter the document.\n\n```html\n<p>Second document</p>\n```",
+                false,
+            ),
+        ] {
+            view.update(cx, |app, cx| {
+                let mut snapshot = (*app.core.session_view).clone();
+                let mut message = (**snapshot.conversation.messages.front().unwrap()).clone();
+                message.revision += 1;
+                message.text.push_str(suffix);
+                snapshot.conversation.messages.clear();
+                snapshot
+                    .conversation
+                    .messages
+                    .push_back(std::sync::Arc::new(message));
+                app.core.session_view = std::sync::Arc::new(snapshot);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            generation = view.read_with(cx, |app, _| {
+                let store = app.html_previews.store.borrow();
+                assert!(store.entries.values().all(|p| p.placement.is_none()));
+                let sidebar = &store.sidebar.as_ref().unwrap().1;
+                assert!(sidebar.placement.is_some());
+                assert!(sidebar.source_mode, "streaming retains source-view mode");
+                assert!(sidebar.source_task.is_none());
+                assert_eq!(sidebar.source, "<h1>Start</h1><h2>Finished</h2>");
+                assert_eq!(sidebar.generation != generation, changed);
+                sidebar.generation
+            });
+        }
+        view.update(cx, |app, cx| {
+            app.core.surface = crate::domain::Surface::Chat;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            let (key, sidebar) = store.sidebar.as_ref().unwrap();
+            assert_eq!(
+                sidebar.generation, generation,
+                "remounting inline must not reload the sidebar"
+            );
+            assert_eq!(store.entries[key].source, sidebar.source);
+        });
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn sidebar_extracts_only_the_selected_fence_with_chat_limits() {
+        let source = "\n  ~~~HTM\n  <p>Selected</p>\n  ~~~\n\n```html\n<p>Next</p>\n```";
+        let (html, prefix) = sidebar_document(source).unwrap();
+        assert_eq!(html, "<p>Selected</p>");
+        assert_eq!(prefix, "\n  ~~~HTM\n  <p>Selected</p>\n  ~~~");
+        assert!(sidebar_document("```rust\nlet x = 1;\n```").is_none());
+        let oversized = format!(
+            "```html\n{}\n```",
+            "x".repeat(crate::platform::gpui::MAX_CODE_SOURCE_BYTES)
+        );
+        assert!(sidebar_document(&oversized).is_none());
+        assert!(
+            sidebar_document(&"x".repeat(crate::platform::gpui::MAX_INDEX_SOURCE_BYTES + 1))
+                .is_none()
+        );
+    }
+    #[gpui_kit::test]
+    fn retired_sidebar_worker_cannot_replace_reopened_document(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(cx, "```html\n<h1>Start</h1>".into());
+        view.update(cx, |app, cx| {
+            let mut store = app.html_previews.store.borrow_mut();
+            store.expanded = store.entries.keys().next().copied();
+            app.core.surface = crate::domain::Surface::Trajectory;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        view.update(cx, |app, cx| {
+            let mut store = app.html_previews.store.borrow_mut();
+            let preview = &mut store.sidebar.as_mut().unwrap().1;
+            preview.source_revision = None;
+            preview.source_gate = Some(gate);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let retired = view.update(cx, |app, cx| {
+            // Hold the old task alive to exercise late publication even after replacement.
+            let task = app
+                .html_previews
+                .store
+                .borrow_mut()
+                .sidebar
+                .take()
+                .unwrap()
+                .1
+                .source_task
+                .take()
+                .unwrap();
+            let mut snapshot = (*app.core.session_view).clone();
+            let mut message = (**snapshot.conversation.messages.front().unwrap()).clone();
+            message.revision += 1;
+            message.text.push_str("<p>Latest</p>\n```");
+            snapshot.conversation.messages.clear();
+            snapshot
+                .conversation
+                .messages
+                .push_back(std::sync::Arc::new(message));
+            app.core.session_view = std::sync::Arc::new(snapshot);
+            cx.notify();
+            task
+        });
+        cx.run_until_parked();
+        let generation = view.read_with(cx, |app, _| {
+            app.html_previews
+                .store
+                .borrow()
+                .sidebar
+                .as_ref()
+                .unwrap()
+                .1
+                .generation
+        });
+        release.send(()).unwrap();
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            let preview = &store.sidebar.as_ref().unwrap().1;
+            assert_eq!(preview.source, "<h1>Start</h1><p>Latest</p>");
+            assert_eq!(preview.generation, generation);
+        });
+        drop(retired);
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

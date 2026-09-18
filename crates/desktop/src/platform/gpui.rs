@@ -6,7 +6,9 @@ mod message_projection;
 mod session_runtime;
 mod text_selection;
 
-pub(crate) use chat_viewport::{ChatViewport, RowKey};
+pub(crate) use chat_viewport::{
+    ChatViewport, MAX_CODE_SOURCE_BYTES, MAX_INDEX_SOURCE_BYTES, RowKey,
+};
 pub(crate) use effect_runner::run_effects;
 pub(crate) use measured_container::measured_container;
 pub(crate) use message_projection::{MessagePresentation, MessagePresentationStore};

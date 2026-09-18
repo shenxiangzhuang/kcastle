@@ -31,8 +31,8 @@ const MAX_PROSE_BYTES: usize = 16 * 1024;
 const PRESENTATION_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNK_PRESENTATION_BYTES: usize = 1024 * 1024;
 const OVERSCAN: f32 = 600.0;
-const MAX_INDEX_SOURCE_BYTES: usize = 1024 * 1024;
-const MAX_CODE_SOURCE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_INDEX_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CODE_SOURCE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct RowKey {

@@ -222,3 +222,37 @@ assert.equal(ipc.length, routed, 'short sidebar content cannot move the transcri
 hostEvents.message({source:frame.contentWindow, data:{kind:'wheel', x:0, y:0, dx:0, dy:40}});
 assert.equal(ipc.length, routed, 'the host also rejects sidebar wheel handoff');
 console.log('HTML preview native bridge: missing DOM delivery and sidebar isolation passed');
+
+
+// Source lives in the trusted host, so its wheels never reach the iframe listener.
+const sourceElement = elements['#source'];
+Object.assign(sourceElement, new Element());
+sourceElement.scrollBy = Element.prototype.scrollBy;
+const sourceWheel = (dx, dy, options = {}) => {
+  const event = {deltaX:dx, deltaY:dy, deltaMode:0, clientX:12, clientY:34,
+    preventDefault() { this.prevented = true; }, ...options};
+  const before = ipc.length;
+  hostEvents.wheel?.(event);
+  return {forwarded:ipc.length - before, prevented:!!event.prevented};
+};
+hostWindow.previewMode(false, true);
+for (const dy of [-40, 40]) {
+  assert.deepEqual(sourceWheel(0, dy), {forwarded:1, prevented:true}, 'short source hands off exactly once');
+}
+sourceElement.scrollHeight = 400;
+assert.deepEqual(sourceWheel(0, 40), {forwarded:0, prevented:true});
+assert.equal(sourceElement.scrollTop, 40);
+sourceElement.scrollTop = 290;
+assert.equal(sourceWheel(0, 40).forwarded, 0, 'reaching the boundary keeps one owner');
+assert.equal(sourceElement.scrollTop, 300);
+assert.equal(sourceWheel(0, 40).forwarded, 1);
+assert.equal(sourceWheel(0, -40).forwarded, 0);
+assert.equal(sourceElement.scrollTop, 260);
+assert.deepEqual(sourceWheel(0, 40, {ctrlKey:true}), {forwarded:0, prevented:false});
+assert.deepEqual(sourceWheel(0, 40, {defaultPrevented:true}), {forwarded:0, prevented:false});
+hostWindow.previewMode(true, true);
+sourceElement.scrollTop = 300;
+assert.equal(sourceWheel(0, 40).forwarded, 0, 'sidebar source never scrolls chat');
+sourceElement.scrollTop = 0;
+assert.equal(sourceWheel(0, -40).forwarded, 0);
+console.log('HTML preview source: DOM handoff, single consumption and sidebar isolation passed');

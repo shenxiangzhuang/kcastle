@@ -53,6 +53,14 @@ html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3
       frame.contentWindow.postMessage({kind:'nativeWheel', x:x-rect.left, y:y-rect.top, dx, dy}, '*');
     }
   };
+  // Host wheels (source and toolbar) do not bubble through the iframe listener.
+  // On macOS the native monitor consumes the original event before DOM dispatch.
+  window.addEventListener('wheel', event => {
+    if (event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+    const factor = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? innerHeight : 1;
+    event.preventDefault();
+    window.previewWheel(event.clientX, event.clientY, event.deltaX * factor, event.deltaY * factor);
+  }, {passive:false});
   window.previewTheme = value => {
     dark = value;
     document.documentElement.style.colorScheme = dark ? 'dark' : 'light';

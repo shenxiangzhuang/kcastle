@@ -16,6 +16,8 @@ and inline mounts to be displayed, and `HiddenStateRetained` checks that mere vi
 cannot destroy a running inline document; closing/replacing the sidebar releases its copy. Sensitivity tests accept a stale callback and restore exclusive
 enlargement deliberately. Reachability tests require two simultaneously displayed previews,
 including the same document displayed inline and in the sidebar at once.
+The `sidebar-source` fault keeps the sidebar on an obsolete source while its inline row is hidden;
+`CurrentOnly` rejects it. A reachability check requires an updated sidebar with no inline mount.
 
 Mapping: `HtmlPreviews::sync` performs namespace reset; `render` replaces changed sources;
 `PreviewFrame::paint` collects placements and updates browser visibility; the event task checks
@@ -24,6 +26,10 @@ The native WebView is reused for append-only source changes, while `Rewrite`/`Fr
 logical document retirement and publication inside it. Native allocation cost and reuse are
 implementation details outside this model; the Rust streaming regression checks retained layout
 and preview state, and the host attaches document generations to IPC callbacks after each reload.
+The selected sidebar has its own bounded background preparation, independent of chat visibility.
+`Frame` abstracts successful preparation/publication; worker scheduling and cancellation are outside
+this model. Rust checks the worker's sidebar generation, namespace, lineage and append ancestry before
+publication, and dropping the sidebar cancels its owning task.
 
 Bounds/assumptions: one source replacement per page, one namespace switch, at most two queued callbacks (delivered in either order),
 and atomic frame publication. Browser process isolation, CSP enforcement, WebKit/WebView2
