@@ -222,7 +222,11 @@ impl DesktopApp {
         };
         let colors = palette(cx);
         let body = if let Some(selection) = selection {
-            let html = if row.message.role == Role::Assistant {
+            // Retained browsers bridge cache eviction, not rejection of oversized source.
+            let html = if row.message.role == Role::Assistant
+                && row.preparation_range().is_some_and(|range| {
+                    range.len() <= crate::platform::gpui::MAX_CODE_SOURCE_BYTES
+                }) {
                 prepared
                     .as_ref()
                     .and_then(|prepared| prepared.html_document())

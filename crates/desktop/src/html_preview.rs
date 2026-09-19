@@ -908,6 +908,13 @@ impl Drop for NativeBrowser {
     }
 }
 impl NativeBrowser {
+    fn set_visible(&self, visible: bool) -> Result<(), wry::Error> {
+        // Wry only hides WKWebView; its retained parent must leave hit testing too.
+        #[cfg(target_os = "macos")]
+        self.clip.set_visible(visible);
+        self.view.set_visible(visible)
+    }
+
     fn snapshot(&self) -> Snapshot {
         #[cfg(target_os = "macos")]
         {
@@ -1061,7 +1068,7 @@ impl NativeBrowser {
         })?;
         #[cfg(not(target_os = "macos"))]
         occlusion::apply(&self.view, placement)?;
-        self.view.set_visible(true)
+        self.set_visible(true)
     }
 }
 
@@ -2148,5 +2155,47 @@ mod tests {
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[gpui_kit::test]
+    fn oversized_streamed_html_falls_back_to_current_source(cx: &mut TestAppContext) {
+        let (root, view, cx) = preview_app(cx, "```html\n<h1>Start</h1>".into());
+        view.read_with(cx, |app, _| {
+            assert_eq!(app.html_previews.store.borrow().entries.len(), 1)
+        });
+        view.update(cx, |app, cx| {
+            let mut snapshot = (*app.core.session_view).clone();
+            let mut message = (**snapshot.conversation.messages.front().unwrap()).clone();
+            message.revision += 1;
+            message.text.push_str(&"x".repeat(256 * 1024));
+            message.text.push_str("<h2>Final</h2>\n```");
+            snapshot.conversation.messages.clear();
+            snapshot
+                .conversation
+                .messages
+                .push_back(std::sync::Arc::new(message));
+            app.core.session_view = std::sync::Arc::new(snapshot);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let stale_mounted = view.read_with(cx, |app, _| {
+            let store = app.html_previews.store.borrow();
+            store
+                .entries
+                .values()
+                .any(|p| p.placement.is_some() && !p.source.contains("Final"))
+        });
+        let source_visible = cx.debug_bounds("chat-plain:88000").is_some();
+        drop(view);
+        cx.update(|window, _| window.remove_window());
+        cx.run_until_parked();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            source_visible,
+            "oversized HTML must remain readable as source"
+        );
+        assert!(
+            !stale_mounted,
+            "oversized streamed HTML must fall back to current source, not mount its stale preview"
+        );
     }
 }

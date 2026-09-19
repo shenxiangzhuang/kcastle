@@ -22,6 +22,11 @@ The `sidebar-source` fault keeps the sidebar on an obsolete source while its inl
 Mapping: `HtmlPreviews::sync` performs namespace reset; `render` replaces changed sources;
 `PreviewFrame::paint` collects placements and updates browser visibility; the event task checks
 monotonically increasing document generations before applying callbacks.
+Visibility publication includes both WKWebView and its retained macOS clip container. The latter
+must stop participating in native hit testing when hidden, otherwise it can block a displayed
+sibling while contributing no pixels. `displayed` abstracts the complete native attachment, not
+just the browser child. The model does not execute AppKit hit testing; the desktop native
+acceptance steps cover scroll-away/remount and overlay hide/show of retained containers.
 The native WebView is reused for append-only source changes, while `Rewrite`/`Frame` describe the
 logical document retirement and publication inside it. Native allocation cost and reuse are
 implementation details outside this model; the Rust streaming regression checks retained layout

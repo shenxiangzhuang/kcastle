@@ -41,7 +41,8 @@ impl PreviewClip {
             px(local.x as f32),
             px((self.bounds().size.height - local.y) as f32),
         );
-        contains(self.bounds(), local)
+        !self.isHiddenOrHasHiddenAncestor()
+            && contains(self.bounds(), local)
             && !self
                 .ivars()
                 .get()
@@ -55,6 +56,10 @@ impl PreviewClip {
 
 pub(super) struct ClipView(Retained<PreviewClip>);
 impl ClipView {
+    pub(super) fn set_visible(&self, visible: bool) {
+        self.0.setHidden(!visible);
+    }
+
     pub(super) fn release_focus(&self) {
         let Some(window) = self.0.window() else {
             return;
@@ -82,6 +87,7 @@ impl ClipView {
         let view = PreviewClip::alloc(mtm).set_ivars(Cell::new(None));
         let view: Retained<PreviewClip> =
             unsafe { msg_send![super(view), initWithFrame: NSRect::ZERO] };
+        view.setHidden(true);
         view.setWantsLayer(true);
         if let Some(layer) = view.layer() {
             layer.setMasksToBounds(true);

@@ -181,7 +181,9 @@ These are GPUI headless layout checks, not a native display frame-time measureme
 Top-level fenced `html`/`htm` blocks in assistant messages render automatically as interactive
 pages. Each logical document is one semantic row, even beyond the ordinary 24-line/2 KiB code
 slices. Other languages retain code virtualization. HTML still uses the 256 KiB code-source and
-1 MiB message-index limits; larger inputs remain readable source. Raw Markdown HTML remains text,
+1 MiB message-index limits; larger inputs remain readable source. A growing fence that crosses
+the code-source limit stops mounting its retained preview and displays the current full source;
+retention during cache eviction must not bypass this limit. Raw Markdown HTML remains text,
 and HTML nested inside another Markdown container is not promoted to a separate browser row.
 
 `HtmlPreviews` owns live browser instances per window and active projection namespace. Identity is
@@ -205,6 +207,10 @@ can grow with the number of visited HTML documents in that session, outside the 
 8 MiB estimate. This is an explicit state-retention tradeoff, not a bounded RSS claim.
 
 A root paint wrapper collects actual GPUI content masks and hides browsers absent from the paint.
+Native browser visibility includes the macOS clip container: hiding only WKWebView leaves an
+empty NSView intercepting clicks over other previews. Creation starts hidden; mounting, offscreen
+retention, covering overlays and reloads use the same visibility operation. Hidden containers also
+opt out of cursor/wheel hit testing, including before the monitor refreshes its regions.
 On macOS a retained native clip view bounds the full-sized WebKit view; scrolling changes native
 geometry without reflowing the document or waiting for a JavaScript translation.
 Scroll-only placements on macOS do not enqueue `previewLayout` JavaScript; document size changes
@@ -225,7 +231,11 @@ consume input: if an attempted scroll does not move, try the next ancestor or th
 On macOS, the window's local event monitor hit-tests each native wheel against the current
 visible clips, including momentum. It consumes the native event and calls the trusted host's
 `previewWheel`, which messages the opaque iframe; this does not depend on WebKit delivering a
-DOM wheel after native child views move across a gesture. Outside input goes directly to the GPUI view that owns the native clips (the view from the raw
+DOM wheel after native child views move across a gesture. The iframe dispatches a cancelable,
+bubbling synthetic `wheel` to the hit element first. Page listeners, including window listeners,
+can consume it with `preventDefault()`; otherwise the bridge applies its scroll policy once
+after dispatch. The bootstrap DOM listener skips these marked events to avoid double consumption.
+Synthetic events have `isTrusted = false` and do not grant browser user activation. Outside input goes directly to the GPUI view that owns the native clips (the view from the raw
 window handle), bypassing any old WebKit gesture target. `NSWindow.contentView` is an AppKit
 wrapper around that GPUI view and must never be used as the scroll receiver. Coordinates are converted from the native
 window to the full browser viewport before forwarding. Other backends use the DOM wheel handler
@@ -352,6 +362,12 @@ button (pointing hand), then a page slider/button, source text, and the composer
 preview partially clipped, enlarged, covered by settings, and after switching sessions. Verify the
 toolbar stays inside the document border and the I-beam returns only over selectable/editable text.
 Cursor glyphs are a native AppKit/WebKit check, not proven by the headless geometry tests.
+For the retained-container regression, use a 1180 × 620 window with both fixture previews loaded.
+Scroll down until the first preview leaves the viewport and the second preview occupies its
+former area. Click and drag the second preview's slider, then scroll back and operate the first
+preview's slider and expand button. Repeat down/up several times; controls must keep responding
+and retain their values. Open and close settings, then repeat to check overlay hide/show too.
+This exercises real native hit testing; headless tests never create the clip views.
 The fixture is a transient presentation only: it performs no model request and writes no journal.
 
 #### Chat performance checks

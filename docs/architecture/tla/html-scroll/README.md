@@ -53,10 +53,13 @@ from an event loop that indefinitely stops servicing a pending event.
 
 ## Implementation mapping and assumptions
 
-- `Begin`: a nonzero wheel's dominant axis, after modifier/default-prevented filtering
-  at the macOS native monitor (or the DOM fallback in `document.js`). The monitor
+- `Begin`: a nonzero wheel's dominant axis, after modifier filtering and page cancellation.
+  The macOS monitor filters modifiers; `document.js` dispatches its forwarded input as a
+  cancelable synthetic wheel before entering the modeled default scrolling policy. The monitor
   selects the current clip for every event and consumes native delivery; `previewWheel`
-  reaches the same handler through a trusted host message without requiring a DOM wheel.
+  reaches the iframe through a trusted host message without requiring WebKit to deliver a native
+  DOM wheel. The bootstrap skips its own synthetic event during DOM propagation and only calls
+  the default scroll handler once dispatch finishes without cancellation.
   A point in the floating Back to bottom pill's native cutout is outside the preview
   (`inside = FALSE`); the macOS monitor and native mouse hit testing share that exclusion.
   Exact rounded-mask geometry and X11/Windows input-region enforcement are implementation
@@ -74,6 +77,9 @@ before accepting the next wheel; it assumes FIFO, exactly-once delivery from the
 document. Inline fallback targets the transcript owner instead of re-hit-testing stale
 coordinates. Native hit testing before acceptance and JavaScript execution remain assumptions.
 Browser/default wheel movement is cancelled, and an inner scroll is synchronous.
+Page-consumed events (for example, canvas zoom via `preventDefault()`) do not enter `Begin`;
+arbitrary page behavior is outside this scrolling model. JS regressions check element and
+window-listener cancellation and exactly one fallback for unhandled native input.
 Source replacement, session switching, hidden windows, lost IPC, event coalescing,
 momentum phases, smooth scrolling, zoom, horizontal/vertical coupling and RTL offsets
 are outside this model. The lifecycle model covers retired document tokens; JS tests

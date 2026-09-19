@@ -5,13 +5,24 @@ const { readFileSync } = require('node:fs');
 const { runInNewContext } = require('node:vm');
 
 const events = {}, messages = [], microtasks = [];
-let mutation, height = 198;
+let mutation, height = 198, pageWindowWheel;
+class WheelEvent {
+  constructor(type, properties) { Object.assign(this, {type, defaultPrevented:false}, properties); }
+  preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+}
 const parentWindow = { postMessage: message => messages.push(message) };
 const style = () => ({ setProperty(name, value) { this[name] = value; } });
 class Element {
   constructor(properties = {}) {
     Object.assign(this, {style: style(), parentElement: null, scrollTop: 0, scrollLeft: 0,
       clientHeight: 100, scrollHeight: 100, clientWidth: 100, scrollWidth: 100}, properties);
+  }
+  dispatchEvent(event) {
+    event.target = this;
+    this.onwheel?.(event);
+    events[event.type]?.(event);
+    pageWindowWheel?.(event); // Page listeners registered after the bootstrap also get a say.
+    return !event.defaultPrevented;
   }
   scrollBy({top, left, behavior}) {
     assert.equal(behavior, 'instant');
@@ -29,7 +40,7 @@ const body = {
 runInNewContext(readFileSync(`${__dirname}/../src/html_preview/document.js`, 'utf8'), {
   parent: parentWindow,
   document: { body, elementFromPoint: () => root, documentElement: root, scrollingElement: root, fonts: { ready: { then() {} } } },
-  Element,
+  Element, WheelEvent,
   addEventListener: (name, callback) => { events[name] = callback; },
   getComputedStyle: node => ({ marginBottom: '0', overflowX: 'visible', overflowY: node.style['overflow-y'] || 'visible', ...node.style }),
   innerHeight: 240,
@@ -70,6 +81,36 @@ events.message({source:parentWindow, data:{kind:'nativeWheel', x:12, y:34, dx:0,
 assert.equal(messages.length, nativeBefore + 1, 'native input must work without a DOM wheel event');
 assert.equal(messages.at(-1).kind, 'wheel');
 assert.equal(messages.at(-1).dy, 40);
+
+// Native delivery must offer the wheel to the page before default scrolling.
+let pageWheels = 0;
+root.onwheel = event => {
+  pageWheels++;
+  assert.equal(event.type, 'wheel');
+  assert.equal(event.bubbles, true);
+  assert.equal(event.cancelable, true);
+  assert.deepEqual([event.clientX, event.clientY, event.deltaX, event.deltaY], [12,34,0,40]);
+  event.preventDefault();
+};
+const nativeWheel = () => events.message({source:parentWindow, data:{kind:'nativeWheel', x:12, y:34, dx:0, dy:40}});
+let beforeNative = messages.length;
+nativeWheel();
+assert.equal(pageWheels, 1, 'native delivery must invoke the page wheel listener');
+assert.equal(messages.length, beforeNative, 'page consumption prevents transcript handoff');
+root.onwheel = undefined;
+pageWindowWheel = event => event.preventDefault();
+nativeWheel();
+assert.equal(messages.length, beforeNative, 'even later window listeners can consume native input');
+pageWindowWheel = undefined;
+root.scrollHeight = 400;
+nativeWheel();
+assert.equal(root.scrollTop, 40, 'an unhandled native wheel scrolls exactly once');
+assert.equal(messages.length, beforeNative);
+root.scrollHeight = root.clientHeight;
+root.scrollTop = 0;
+nativeWheel();
+assert.equal(messages.length, beforeNative + 1, 'an unhandled short document hands off exactly once');
+console.log('HTML preview native wheel: page cancellation and single fallback passed');
 
 // A horizontal table must not consume a vertical gesture (including trackpad drift).
 const table = new Element({style: {overflowX:'auto'}, scrollWidth:400});

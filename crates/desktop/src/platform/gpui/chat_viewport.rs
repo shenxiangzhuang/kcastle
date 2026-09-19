@@ -466,7 +466,7 @@ impl ChatRow {
             .as_ref()
             .map(|code| code.visible.clone())
     }
-    fn preparation_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn preparation_range(&self) -> Option<Range<usize>> {
         self.chunk.as_ref().map(|c| {
             c.code
                 .as_ref()
