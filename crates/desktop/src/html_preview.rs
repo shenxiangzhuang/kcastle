@@ -1868,6 +1868,15 @@ mod tests {
         });
         cx.run_until_parked();
         let button = cx.debug_bounds("back-to-bottom").unwrap();
+        let viewport = view.read_with(cx, |app, _| app.chat.borrow().list.viewport_bounds());
+        assert!(
+            button.top() >= viewport.bottom() + px(8.0),
+            "Back to bottom belongs below the transcript, above the composer"
+        );
+        assert!(
+            (button.center().x - viewport.center().x).abs() < px(1.0),
+            "Back to bottom must be centered in the chat column"
+        );
         view.read_with(cx, |app, _| {
             let store = app.html_previews.store.borrow();
             let clips = store
@@ -1884,6 +1893,14 @@ mod tests {
         cx.simulate_click(button.center(), gpui_kit::Modifiers::default());
         cx.run_until_parked();
         view.read_with(cx, |app, _| assert!(app.chat_at_bottom()));
+        assert!(cx.debug_bounds("back-to-bottom").is_none());
+        view.read_with(cx, |app, _| {
+            assert_eq!(
+                app.chat.borrow().list.viewport_bounds(),
+                viewport,
+                "hiding the button must not resize the transcript"
+            );
+        });
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();

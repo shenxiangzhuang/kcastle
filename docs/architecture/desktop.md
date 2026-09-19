@@ -250,8 +250,9 @@ hidden, the window still publishes its GPUI root and window controls; clearing t
 children would erase the accessibility tree instead of restoring it. This is a native child-view
 integration, not browser pixels composited into GPUI's GPU scene. General arbitrary GPUI overlay
 composition and a fully interleaved browser/GPUI accessibility tree are outside this implementation.
-The chat's Back to bottom control sits in the tab strip, outside the transcript's native clips,
-so a long HTML preview cannot obscure it or intercept its clicks.
+The chat's Back to bottom control is centered in a 48 px footer above the composer, outside
+the transcript's native clips, so a long HTML preview cannot obscure it or intercept its clicks.
+The footer keeps its height when the button is hidden, avoiding transcript layout shifts.
 
 The trusted host embeds each generated document in an opaque-origin `sandbox="allow-scripts"`
 iframe, with restrictive CSP installed before generated content. Inline JavaScript/CSS, inline SVG,
