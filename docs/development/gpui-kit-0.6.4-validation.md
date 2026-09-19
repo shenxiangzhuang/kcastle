@@ -69,7 +69,12 @@ it did not compare list semantics, code actions or visual layout with the shared
 That gap allowed the Trajectory pilot through prematurely. The checked-in fixture and
 copy acceptance probe now make these differences repeatable.
 
-## Final application checks
+## Initial application checks
+
+The checks below were the evidence available when `b4435cb` was committed, not a
+complete native acceptance run. The subsequent [full macOS regression report](gpui-kit-0.6.4-full-validation.md)
+adds real session journals, Trajectory, long-history switching, live streaming,
+cancellation, restart, and an executable pre-upgrade comparison.
 
 - Workspace tests: 412 passed, 5 ignored (four existing benchmarks/tests plus the
   explicitly failing upstream acceptance probe); zero unexpected failures.
