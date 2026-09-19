@@ -67,3 +67,8 @@ does not quantify retained grammar/parser memory or cross-window pool contention
 live results and parallel workers; each must violate its invariant. The `flash` fault clears
 ready content on append and must violate `NoIntermediateDowngrade`. A false `NoReady` invariant
 confirms publication is reachable.
+
+GPUI Kit 0.6.4 acceptance retained the shared Chat/Trajectory Markdown renderer:
+TextView did not preserve list numbering and copy semantics in the migration probe.
+Chat publication, demand, cancellation and cache transitions are unchanged; this
+upgrade requires no model action. See the [acceptance record](../../../development/gpui-kit-0.6.4-validation.md).

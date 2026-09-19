@@ -45,6 +45,22 @@ gap and does not maintain a second lifecycle state machine. Applying a committed
 small patch of changed stable IDs; persistent maps and vectors share untouched structure and
 preserve stable record arcs.
 
+### Framework controls
+
+GPUI Kit 0.6.4 owns popup positioning, menu keyboard navigation and selection, and
+modal focus trapping, Escape/Enter routing, and backdrop dismissal. The application
+retains only the current composer menu identity and the modal's business data.
+`PopupMenu` submenus replace the former highlighted-item reducer and keyboard dispatcher.
+The root key handler leaves dialog/menu keys to the framework. Menu actions still use
+existing session/configuration guards. The open-state projection continues hiding native
+HTML previews while either kind of overlay covers them.
+
+Chat and Trajectory keep their shared Markdown renderer. A native 0.6.4 TextView
+comparison found lost ordered-list start numbers and list/task markers in plain-text
+copy, so the Trajectory pilot was withdrawn rather than retaining two renderers.
+See [the acceptance record](../development/gpui-kit-0.6.4-validation.md).
+Chat demand, cancellation, cache admission and atomic streaming publication are unchanged.
+
 ### Chat viewport
 
 The native GPUI `ListState` owns variable-height row layout and scroll anchoring. On session

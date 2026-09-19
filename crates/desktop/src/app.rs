@@ -32,9 +32,9 @@ use crate::dialogs::Modal;
 use crate::domain::session_document::SessionDocument;
 use crate::domain::timeline::{AxisId, AxisRange, DomainRange};
 use crate::domain::{
-    Action, AppState, ComposerMenu, DetailsSelection, DetailsTab, Effect, LayoutGeneration,
-    Message, Role, RunState, ScrollIntent, Surface, TimelineMode, TrajectoryItemId,
-    TrajectoryRequestKey, next_message_id, reduce,
+    Action, AppState, DetailsSelection, DetailsTab, Effect, LayoutGeneration, Message, Role,
+    RunState, ScrollIntent, Surface, TimelineMode, TrajectoryItemId, TrajectoryRequestKey,
+    next_message_id, reduce,
 };
 use crate::layout::{LayoutInput, ScrollAnchor};
 use crate::platform::NativeTitlebarController;
@@ -237,7 +237,7 @@ pub(crate) struct DesktopApp {
     trajectory_query_value: String,
     pub(crate) modal: Option<Modal>,
     pub(crate) modal_focus: FocusHandle,
-    pub(crate) composer_menu_focus: FocusHandle,
+    pub(crate) composer_popup: Option<Entity<gpui_kit::component::menu::PopupMenu>>,
     pub(crate) trajectory_scroll: ListState,
     pub(crate) trajectory_scroll_restore: Cell<Option<ListOffset>>,
     pub(crate) trajectory_follow_tail: Cell<bool>,
@@ -452,7 +452,7 @@ impl DesktopApp {
             trajectory_query_value: String::new(),
             modal: None,
             modal_focus: cx.focus_handle(),
-            composer_menu_focus: cx.focus_handle(),
+            composer_popup: None,
             trajectory_scroll,
             trajectory_scroll_restore: Cell::new(None),
             trajectory_follow_tail,
@@ -1184,6 +1184,9 @@ impl DesktopApp {
     fn transition(&mut self, action: Action) -> Vec<Effect> {
         let previous_generation = self.core.layout_generation;
         let mut effects = reduce(&mut self.core, action);
+        if self.core.composer.menu.is_none() {
+            self.composer_popup = None;
+        }
         if self.core.layout_generation != previous_generation {
             self.chat.borrow().list.remeasure();
             effects.retain(|effect| !matches!(effect, Effect::ApplyChatTail));
@@ -1669,101 +1672,6 @@ impl DesktopApp {
         }
     }
 
-    pub(crate) fn set_composer_menu(&mut self, menu: Option<ComposerMenu>, cx: &mut Context<Self>) {
-        self.dispatch_local(Action::SetComposerMenu(menu), cx);
-    }
-
-    pub(crate) fn open_composer_menu(
-        &mut self,
-        menu: ComposerMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.set_composer_menu(Some(menu), cx);
-        self.composer_menu_focus.focus(window, cx);
-    }
-
-    pub(crate) fn move_composer_menu(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let count = self.composer_menu_item_count();
-        if count == 0 {
-            return;
-        }
-        self.dispatch_local(
-            Action::MoveComposerHighlight {
-                delta: direction,
-                item_count: count,
-            },
-            cx,
-        );
-    }
-
-    fn composer_menu_item_count(&self) -> usize {
-        match self.core.composer.menu {
-            Some(ComposerMenu::Commands) => 3,
-            Some(ComposerMenu::Permission | ComposerMenu::Model) => 2,
-            Some(ComposerMenu::Models) => composer_model_indices(&self.models).count(),
-            Some(ComposerMenu::Effort) => self.models[self.selected_model]
-                .model
-                .reasoning_efforts()
-                .len(),
-            Some(ComposerMenu::Workspace) => self.project_store.projects().len() + 1,
-            None => 0,
-        }
-    }
-
-    pub(crate) fn activate_composer_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let index = self.core.composer.highlighted_item;
-        match self.core.composer.menu {
-            Some(ComposerMenu::Commands) => match index {
-                0 => {
-                    self.dispatch(Action::SetComposerMenu(None), window, cx);
-                    self.export_session_log(window, cx);
-                }
-                1 => self.set_composer_menu(Some(ComposerMenu::Permission), cx),
-                _ if composer_model_indices(&self.models).next().is_some() => {
-                    self.set_composer_menu(Some(ComposerMenu::Model), cx)
-                }
-                _ => self.open_model_settings_dialog(window, cx),
-            },
-            Some(ComposerMenu::Permission) => self.set_allow_all_tools(index == 1, cx),
-            Some(ComposerMenu::Model) => self.set_composer_menu(
-                Some(if index == 0 {
-                    ComposerMenu::Models
-                } else {
-                    ComposerMenu::Effort
-                }),
-                cx,
-            ),
-            Some(ComposerMenu::Models) => {
-                let selected = composer_model_indices(&self.models).nth(index);
-                if let Some(index) = selected {
-                    self.select_model(index, cx);
-                }
-            }
-            Some(ComposerMenu::Effort) => {
-                if let Some(effort) = self.models[self.selected_model]
-                    .model
-                    .reasoning_efforts()
-                    .get(index)
-                    .cloned()
-                {
-                    self.set_reasoning_effort(effort, cx);
-                    self.dispatch_local(Action::SetComposerMenu(None), cx);
-                }
-            }
-            Some(ComposerMenu::Workspace) => {
-                if index < self.project_store.projects().len() {
-                    self.dispatch(Action::SetComposerMenu(None), window, cx);
-                    self.switch_project(index, window, cx);
-                } else {
-                    self.dispatch(Action::SetComposerMenu(None), window, cx);
-                    self.add_project(window, cx);
-                }
-            }
-            None => {}
-        }
-    }
-
     pub(crate) fn handle_root_key(
         &mut self,
         event: &gpui_kit::KeyDownEvent,
@@ -1781,15 +1689,8 @@ impl DesktopApp {
             cx.stop_propagation();
             return;
         }
-        if self.core.composer.menu.is_some() {
-            match event.keystroke.key.as_str() {
-                "escape" => self.dismiss_transient(window, cx),
-                "up" | "arrowup" => self.move_composer_menu(-1, cx),
-                "down" | "arrowdown" => self.move_composer_menu(1, cx),
-                "enter" | "return" => self.activate_composer_menu(window, cx),
-                _ => return,
-            }
-            cx.stop_propagation();
+        // The framework dialog/menu owns Escape, Enter, and arrow navigation.
+        if self.modal.is_some() || self.core.composer.menu.is_some() {
             return;
         }
         if event.keystroke.key == "escape" {
@@ -2823,6 +2724,76 @@ mod tests {
             weak_view.upgrade().is_none(),
             "closing the test window must release its app and session database handles"
         );
+    }
+
+    #[gpui_kit::test]
+    fn framework_controls_own_navigation_and_modal_dismissal(cx: &mut gpui_kit::TestAppContext) {
+        use crate::domain::ComposerMenu;
+        let root = std::env::temp_dir().join(format!(
+            "kcastle-framework-controls-{}",
+            kcastle_agent::SessionId::new()
+        ));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.open_composer_menu(ComposerMenu::Permission, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        view.read_with(cx, |app, cx| {
+            assert!(app.selected_runtime.read(cx).snapshot().allow_all_tools);
+            assert!(app.core.composer.menu.is_none());
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.open_composer_menu(ComposerMenu::Commands, window, cx)
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.core.composer.menu.is_none()));
+        cx.update(|window, cx| view.update(cx, |app, cx| app.open_settings_dialog(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| assert!(view.read(cx).modal_focus.contains_focused(window, cx)));
+        cx.simulate_resize(gpui_kit::size(px(720.0), px(720.0)));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("settings-dialog").unwrap();
+        assert!(
+            bounds.left() >= px(0.0) && bounds.right() <= px(720.0),
+            "settings and its close button must fit the narrow window: {bounds:?}"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.modal.is_none()));
+        cx.update(|window, cx| {
+            view.update(cx, |app, cx| {
+                app.open_target_rename_session_dialog(
+                    0,
+                    root.join("rename-placeholder"),
+                    "   ".into(),
+                    window,
+                    cx,
+                );
+            })
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        view.read_with(cx, |app, _| {
+            assert!(app.modal.is_some(), "empty title must not submit")
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        view.read_with(cx, |app, _| assert!(app.modal.is_none()));
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[gpui_kit::test]

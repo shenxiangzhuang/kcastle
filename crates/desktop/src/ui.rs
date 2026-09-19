@@ -151,9 +151,6 @@ impl Render for DesktopApp {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    if this.core.composer.menu.is_some() {
-                        this.dispatch(crate::domain::Action::SetComposerMenu(None), window, cx);
-                    }
                     if this.core.sidebar.options_open {
                         this.dispatch(crate::domain::Action::CloseTransientOverlays, window, cx);
                     }

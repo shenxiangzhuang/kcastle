@@ -2215,6 +2215,31 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn long_code_can_scroll_horizontally(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            &format!("```rust\n{} END\n```", "let value = 123; ".repeat(12)),
+            cx,
+        );
+        let position = |cx: &mut gpui_kit::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.frame.as_ref().unwrap().text_position("END", false)
+            })
+        };
+        let before = position(cx);
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: gpui_kit::point(px(300.0), before.y),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(-400.0), px(0.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let after = position(cx);
+        assert!(
+            after.x < before.x,
+            "horizontal scroll must expose clipped code: {before:?} -> {after:?}"
+        );
+    }
+
+    #[gpui_kit::test]
     fn code_block_background_has_four_uncovered_rounded_corners(cx: &mut TestAppContext) {
         let (_view, cx) = markdown_selection_harness("```rust\nlet value = 42;\n```", cx);
         let backgrounds = cx.update(|window, cx| {
@@ -2437,6 +2462,42 @@ mod tests {
             select_markdown(&view, "开始", "结束", cx),
             "开始\n\n• first\n• second\n\nName\tValue\n中文\t42\n\n$$x^2$$\n\n结束"
         );
+    }
+
+    #[gpui_kit::test]
+    fn ordered_and_task_lists_preserve_markers_when_copied(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            "Start\n\n98. first\n99. second\n100. third\n\n- [x] done\n- [ ] pending\n\nEnd",
+            cx,
+        );
+        assert_eq!(
+            select_markdown(&view, "Start", "End", cx),
+            "Start\n\n98. first\n99. second\n100. third\n\n☑ done\n☐ pending\n\nEnd"
+        );
+    }
+
+    // Upgrade acceptance probe: do not replace the shared renderer until this
+    // and the native visual checklist in gpui-kit-0.6.4-validation.md pass.
+    #[gpui_kit::test]
+    #[ignore = "gpui-kit 0.6.4 drops list/task markers in plain-text copy"]
+    fn framework_markdown_list_copy_acceptance(cx: &mut TestAppContext) {
+        use gpui_kit::AppContext as _;
+        cx.update(crate::init_ui);
+        let state = cx.new(|cx| {
+            gpui_kit::base::TextViewState::markdown(
+                "98. first\n99. second\n\n- [x] done\n- [ ] pending",
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.select_all(cx));
+        let selected = state.read_with(cx, |state, _| state.selected_text());
+        for marker in ["98. first", "99. second", "☑ done", "☐ pending"] {
+            assert!(
+                selected.contains(marker),
+                "missing {marker:?} in {selected:?}"
+            );
+        }
     }
 
     #[gpui_kit::test]

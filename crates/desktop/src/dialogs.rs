@@ -10,8 +10,8 @@ use gpui_kit::component::setting::{
 use gpui_kit::component::{Disableable, Icon, IconName, IndexPath, Sizable};
 use gpui_kit::{
     App, AppContext, Context, Entity, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, StyleRefinement, Styled, Window, accesskit::Role, div,
-    prelude::FluentBuilder, px, rgb,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    rgb,
 };
 use kcastle_agent::SessionInfo;
 
@@ -203,9 +203,13 @@ fn settings_dialog_view(
             ),
     );
     div()
+        .when(cfg!(test), |element| {
+            element.debug_selector(|| "settings-dialog".to_owned())
+        })
         .flex()
         .relative()
         .w(px(800.0))
+        .max_w_full()
         .h(px(570.0))
         .rounded(px(24.0))
         .bg(colors.surface)
@@ -1496,38 +1500,33 @@ impl DesktopApp {
             None => return None,
         };
 
+        let owner = cx.entity().downgrade();
         Some(
-            div()
-                .id("modal-overlay")
-                .absolute()
-                .top_0()
-                .right_0()
-                .bottom_0()
-                .left_0()
+            gpui_kit::base::Dialog::new(cx)
+                .focus_handle(self.modal_focus.clone())
                 .flex()
-                .occlude()
                 .items_center()
                 .justify_center()
-                .bg(colors.overlay)
-                .track_focus(&self.modal_focus)
-                .tab_index(0)
-                .on_key_down(
-                    cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                        if event.keystroke.key == "enter"
-                            && matches!(this.modal, Some(Modal::RenameSession { .. }))
-                        {
-                            this.confirm_rename(window, cx);
-                        }
-                    }),
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.close_modal(window, cx)))
-                .child(
+                .backdrop(div().absolute().inset_0().bg(colors.overlay))
+                .on_ok(move |_, window, cx| {
+                    // Only the rename form submits on Enter; destructive actions require
+                    // activating their explicit button.
+                    let _ = owner.update(cx, |this, cx| this.confirm_rename(window, cx));
+                    false
+                })
+                .on_close(cx.listener(|this, _, window, cx| this.close_modal(window, cx)))
+                .popup(
                     div()
                         .id("modal-content")
-                        .role(Role::Dialog)
+                        .role(gpui_kit::accesskit::Role::Dialog)
+                        .occlude()
                         .accessibility_id(ids::DIALOG)
                         .aria_label(dialog_label)
-                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .max_w_full()
+                        .max_h_full()
+                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation()
+                        })
                         .child(content),
                 )
                 .into_any_element(),

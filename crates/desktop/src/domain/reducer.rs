@@ -32,15 +32,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
         Action::SetDetailsTab(tab) => state.details.activate_tab(tab),
         Action::SetComposerMenu(menu) => {
             state.composer.menu = menu;
-            state.composer.highlighted_item = 0;
             state.sidebar.options_open = false;
-        }
-        Action::MoveComposerHighlight { delta, item_count } => {
-            if item_count > 0 {
-                state.composer.highlighted_item = (state.composer.highlighted_item as isize + delta)
-                    .rem_euclid(item_count as isize)
-                    as usize;
-            }
         }
         Action::ToggleSessionSearch => {
             state.sidebar.search_sessions = !state.sidebar.search_sessions;
@@ -59,12 +51,7 @@ pub(crate) fn reduce(state: &mut AppState, action: Action) -> Vec<Effect> {
             state.sidebar.options_open = false;
         }
         Action::DismissTransient => {
-            state.composer.menu = match state.composer.menu {
-                Some(crate::domain::ComposerMenu::Models | crate::domain::ComposerMenu::Effort) => {
-                    Some(crate::domain::ComposerMenu::Model)
-                }
-                _ => None,
-            };
+            state.composer.menu = None;
             state.sidebar.options_open = false;
             state.sidebar.search_sessions = false;
             state.trajectory.selected_range = None;
