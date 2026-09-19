@@ -1,18 +1,59 @@
 //! A native clip view keeps WebKit's layout viewport unchanged while the transcript scrolls.
-use std::ptr::NonNull;
+use std::{cell::Cell, ptr::NonNull};
 
-use gpui_kit::Window;
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+use gpui_kit::{Bounds, Pixels, Window, point, px};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained};
 use objc2_app_kit::NSView;
+use objc2_core_graphics::CGMutablePath;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
-use objc2_quartz_core::CACornerMask;
+use objc2_quartz_core::{CACornerMask, CAShapeLayer, kCAFillRuleEvenOdd};
 use raw_window_handle::{
     AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
 };
 
 use super::Placement;
 
-pub(super) struct ClipView(Retained<NSView>);
+define_class!(
+    // NSView has no additional subclass invariants. Its geometry is accessed on the UI thread.
+    #[unsafe(super = NSView)]
+    #[name = "KcastleHtmlClipView"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = Cell<Option<Bounds<Pixels>>>]
+    struct PreviewClip;
+
+    impl PreviewClip {
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            let parent = unsafe { self.superview() };
+            if !self.covers(self.convertPoint_fromView(point, parent.as_deref())) {
+                None
+            } else {
+                // Preserve AppKit's normal child hit testing outside the overlay's outline.
+                unsafe { msg_send![super(self), hitTest: point] }
+            }
+        }
+    }
+);
+
+impl PreviewClip {
+    fn covers(&self, local: NSPoint) -> bool {
+        let position = point(
+            px(local.x as f32),
+            px((self.bounds().size.height - local.y) as f32),
+        );
+        contains(self.bounds(), local)
+            && !self
+                .ivars()
+                .get()
+                .is_some_and(|hole| super::pill_contains(hole, position))
+    }
+
+    fn covers_window_point(&self, point: NSPoint) -> bool {
+        self.covers(self.convertPoint_fromView(point, None))
+    }
+}
+
+pub(super) struct ClipView(Retained<PreviewClip>);
 impl ClipView {
     pub(super) fn release_focus(&self) {
         let Some(window) = self.0.window() else {
@@ -38,7 +79,9 @@ impl ClipView {
         };
         // GPUI owns the NSView for the window's lifetime; this retained child is detached on drop.
         let parent = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
-        let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+        let view = PreviewClip::alloc(mtm).set_ivars(Cell::new(None));
+        let view: Retained<PreviewClip> =
+            unsafe { msg_send![super(view), initWithFrame: NSRect::ZERO] };
         view.setWantsLayer(true);
         if let Some(layer) = view.layer() {
             layer.setMasksToBounds(true);
@@ -77,6 +120,40 @@ impl ClipView {
             }
             layer.setMaskedCorners(corners);
             layer.setCornerRadius(12.0);
+            let hole = placement
+                .occlusion
+                .map(|bounds| Bounds::new(bounds.origin - clip.origin, bounds.size));
+            self.0.ivars().set(hole);
+            if let Some(hole) = hole {
+                let path = CGMutablePath::new();
+                let mask = CAShapeLayer::new();
+                let rect = NSRect::new(
+                    NSPoint::new(
+                        f64::from(hole.left()),
+                        f64::from(clip.size.height - hole.bottom()),
+                    ),
+                    NSSize::new(f64::from(hole.size.width), f64::from(hole.size.height)),
+                );
+                let radius = rect.size.width.min(rect.size.height) / 2.0;
+                // Subtract only the pill; surrounding HTML retains its pixels and input.
+                unsafe {
+                    CGMutablePath::add_rect(Some(&path), std::ptr::null(), self.0.bounds());
+                    CGMutablePath::add_rounded_rect(
+                        Some(&path),
+                        std::ptr::null(),
+                        rect,
+                        radius,
+                        radius,
+                    );
+                    mask.setFillRule(kCAFillRuleEvenOdd);
+                    mask.setPath(Some(&path));
+                    layer.setMask(Some(&mask));
+                }
+            } else {
+                unsafe {
+                    layer.setMask(None);
+                }
+            }
         }
     }
 }
@@ -235,14 +312,17 @@ impl Drop for Accessibility {
 struct CursorState {
     input_view: Retained<NSView>,
     window: Retained<objc2_app_kit::NSWindow>,
-    regions: Vec<(NSRect, Retained<objc2_web_kit::WKWebView>)>,
+    regions: Vec<(Retained<PreviewClip>, Retained<objc2_web_kit::WKWebView>)>,
     browser_owns: bool,
 }
 impl CursorState {
     fn sync(&mut self) {
         let point = self.window.mouseLocationOutsideOfEventStream();
         let inside = self.window.isKeyWindow()
-            && self.regions.iter().any(|(rect, _)| contains(*rect, point));
+            && self
+                .regions
+                .iter()
+                .any(|(clip, _)| clip.covers_window_point(point));
         if inside != self.browser_owns {
             self.browser_owns = inside;
             if inside {
@@ -313,7 +393,7 @@ impl CursorOwner {
                         if let Some((_, view)) = state
                             .regions
                             .iter()
-                            .find(|(rect, _)| contains(*rect, point))
+                            .find(|(clip, _)| clip.covers_window_point(point))
                         {
                             let local = view.convertPoint_fromView(point, None);
                             let y = if view.isFlipped() {
@@ -370,13 +450,7 @@ impl CursorOwner {
             let mut state = owner.state.borrow_mut();
             state.regions = clips
                 .iter()
-                .map(|browser| {
-                    let view = &browser.clip.0;
-                    (
-                        view.convertRect_toView(view.bounds(), None),
-                        browser.webview().into_super(),
-                    )
-                })
+                .map(|browser| (browser.clip.0.clone(), browser.webview().into_super()))
                 .collect();
             state.sync();
         }

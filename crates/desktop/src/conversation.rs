@@ -163,16 +163,17 @@ impl DesktopApp {
                         .pb(px(self.core.layout.tail_inset)),
                     ),
             )
-            .child(
-                // Reserve space outside native preview clips, even while the button is hidden.
+            .children((!self.chat_at_bottom()).then(|| {
                 div()
-                    .flex_none()
-                    .h(px(48.0))
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(12.0))
                     .flex()
-                    .items_center()
                     .justify_center()
-                    .children((!self.chat_at_bottom()).then(|| {
+                    .child(
                         div()
+                            .relative()
                             .when(cfg!(test), |element| {
                                 element.debug_selector(|| "back-to-bottom".to_owned())
                             })
@@ -197,8 +198,9 @@ impl DesktopApp {
                                         this.scroll_chat_to_bottom(window, cx)
                                     })),
                             )
-                    })),
-            )
+                            .child(self.html_previews.button_occlusion()),
+                    )
+            }))
     }
 
     fn render_chat_row(

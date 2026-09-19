@@ -57,6 +57,10 @@ from an event loop that indefinitely stops servicing a pending event.
   at the macOS native monitor (or the DOM fallback in `document.js`). The monitor
   selects the current clip for every event and consumes native delivery; `previewWheel`
   reaches the same handler through a trusted host message without requiring a DOM wheel.
+  A point in the floating Back to bottom pill's native cutout is outside the preview
+  (`inside = FALSE`); the macOS monitor and native mouse hit testing share that exclusion.
+  Exact rounded-mask geometry and X11/Windows input-region enforcement are implementation
+  assumptions, checked separately from the bounded ownership transitions.
 - `TryInner`: walk DOM ancestors, attempt synchronous `scrollBy`, and confirm an offset
   change before returning. CSS overflow is only a candidate-selection hint.
 - `Deliver`: the generation-checked `BrowserEvent::Wheel` path in `html_preview.rs`,

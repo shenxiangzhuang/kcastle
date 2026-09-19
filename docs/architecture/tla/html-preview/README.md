@@ -31,6 +31,12 @@ The selected sidebar has its own bounded background preparation, independent of 
 this model. Rust checks the worker's sidebar generation, namespace, lineage and append ancestry before
 publication, and dropping the sidebar cancels its owning task.
 
+The floating Back to bottom pill is a partial native cutout, not a covering app overlay:
+its preview remains mounted/displayed and retains its viewport. `Frame` abstracts publication
+of that geometry; rounded masks and platform hit testing remain outside this lifecycle model.
+Rust checks an overlapping button's cutout, surrounding native pixels/input, unchanged layout,
+and removal after clicking. Native acceptance checks actual visibility and click-through.
+
 Bounds/assumptions: one source replacement per page, one namespace switch, at most two queued callbacks (delivered in either order),
 and atomic frame publication. Browser process isolation, CSP enforcement, WebKit/WebView2
 behavior, pixel clipping, native cursor ownership/glyphs, wheel routing, height convergence, image encoding/save-dialog cancellation, performance and memory are outside

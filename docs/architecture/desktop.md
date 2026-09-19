@@ -250,9 +250,15 @@ hidden, the window still publishes its GPUI root and window controls; clearing t
 children would erase the accessibility tree instead of restoring it. This is a native child-view
 integration, not browser pixels composited into GPUI's GPU scene. General arbitrary GPUI overlay
 composition and a fully interleaved browser/GPUI accessibility tree are outside this implementation.
-The chat's Back to bottom control is centered in a 48 px footer above the composer, outside
-the transcript's native clips, so a long HTML preview cannot obscure it or intercept its clicks.
-The footer keeps its height when the button is hidden, avoiding transcript layout shifts.
+The chat's Back to bottom control floats at the bottom center of the transcript without reserving
+layout space. Its painted pill bounds are collected in the same frame as native placements.
+Overlapping native previews subtract only that rounded outline: macOS uses a clip-layer mask and
+matching NSView hit testing, Windows shapes Wry's child HWND, and X11 applies matching visual/input
+regions to Wry's child window. The button remains the original GPUI control, with one action and
+accessibility node; HTML beside its outline stays visible and interactive. macOS cursor/wheel
+ownership uses the same native clip hit test, so input over the button goes to GPUI. Disappearing
+buttons clear their cutout on the next paint; source mode, clipping, and sidebar resizing reuse the
+same geometry without changing the document viewport or enqueuing extra JavaScript layout commands.
 
 The trusted host embeds each generated document in an opaque-origin `sandbox="allow-scripts"`
 iframe, with restrictive CSP installed before generated content. Inline JavaScript/CSS, inline SVG,

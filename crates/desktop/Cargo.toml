@@ -44,7 +44,7 @@ cairo-rs = { version = "=0.18.5", features = ["png"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 webview2-com = "=0.38.2"
-windows = { version = "=0.61.3", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+windows = { version = "=0.61.3", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
@@ -52,7 +52,8 @@ objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSEvent", "NSCursor", "NSButton", "NSControl", "NSResponder", "NSView", "NSWindow", "NSAccessibilityProtocols", "NSImage", "NSImageRep", "NSBitmapImageRep"] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSOperation", "NSString", "NSData", "NSDictionary", "NSError", "NSValue", "block2"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }
-objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["CALayer", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["CALayer", "CAShapeLayer", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGPath"] }
 raw-window-handle = "=0.6.2"
 
 [dev-dependencies]

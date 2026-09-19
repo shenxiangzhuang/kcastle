@@ -18,6 +18,8 @@ use crate::{app::DesktopApp, platform::gpui::RowKey, ui_theme::palette};
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(not(target_os = "macos"))]
+mod occlusion;
 
 const INITIAL_HEIGHT: f32 = 240.0;
 const MAX_HEIGHT: f32 = 480.0;
@@ -31,12 +33,24 @@ pub(crate) fn is_html(language: &str) -> bool {
 struct Placement {
     full: Bounds<Pixels>,
     clip: Bounds<Pixels>,
+    occlusion: Option<Bounds<Pixels>>,
 }
 
 impl Placement {
     fn new(full: Bounds<Pixels>, mask: Bounds<Pixels>) -> Option<Self> {
         let clip = full.intersect(&mask);
-        (clip.size.width > px(0.0) && clip.size.height > px(0.0)).then_some(Self { full, clip })
+        (clip.size.width > px(0.0) && clip.size.height > px(0.0)).then_some(Self {
+            full,
+            clip,
+            occlusion: None,
+        })
+    }
+
+    fn contains(self, point: gpui_kit::Point<Pixels>) -> bool {
+        self.clip.contains(&point)
+            && !self
+                .occlusion
+                .is_some_and(|hole| pill_contains(hole, point))
     }
 
     fn needs_layout(self, previous: Option<Self>, source_mode: bool) -> bool {
@@ -44,9 +58,23 @@ impl Placement {
         // Source mode alone needs its inset synchronized with the visible clip.
         previous.is_none_or(|old| {
             old.full.size != self.full.size
-                || ((!cfg!(target_os = "macos") || source_mode) && old != self)
+                || ((!cfg!(target_os = "macos") || source_mode)
+                    && (old.full != self.full || old.clip != self.clip))
         })
     }
+}
+
+fn pill_contains(bounds: Bounds<Pixels>, point: gpui_kit::Point<Pixels>) -> bool {
+    let radius = bounds.size.height.min(bounds.size.width) / 2.0;
+    let center_x = point
+        .x
+        .clamp(bounds.left() + radius, bounds.right() - radius);
+    let center_y = point
+        .y
+        .clamp(bounds.top() + radius, bounds.bottom() - radius);
+    let dx = f32::from(point.x - center_x);
+    let dy = f32::from(point.y - center_y);
+    dx * dx + dy * dy <= f32::from(radius).powi(2)
 }
 
 struct Preview {
@@ -148,6 +176,7 @@ struct Store {
     entries: HashMap<RowKey, Preview>,
     expanded: Option<RowKey>,
     sidebar: Option<(RowKey, Preview)>,
+    button_occlusion: Option<Bounds<Pixels>>,
     sender: mpsc::Sender<Envelope>,
 }
 
@@ -308,6 +337,7 @@ impl HtmlPreviews {
                 entries: HashMap::new(),
                 expanded: None,
                 sidebar: None,
+                button_occlusion: None,
                 sender,
             })),
             _events: events,
@@ -593,6 +623,16 @@ impl HtmlPreviews {
             store: self.store.clone(),
             covered,
         }
+    }
+
+    pub(crate) fn button_occlusion(&self) -> impl IntoElement {
+        let store = self.store.clone();
+        gpui_kit::canvas(
+            |_, _, _| {},
+            move |bounds, _, _, _| store.borrow_mut().button_occlusion = Some(bounds),
+        )
+        .absolute()
+        .size_full()
     }
 }
 
@@ -1019,6 +1059,8 @@ impl NativeBrowser {
             )
             .into(),
         })?;
+        #[cfg(not(target_os = "macos"))]
+        occlusion::apply(&self.view, placement)?;
         self.view.set_visible(true)
     }
 }
@@ -1150,6 +1192,7 @@ impl Element for PreviewFrame {
     ) {
         {
             let mut store = self.store.borrow_mut();
+            store.button_occlusion = None;
             let Store {
                 entries, sidebar, ..
             } = &mut *store;
@@ -1171,11 +1214,7 @@ impl Element for PreviewFrame {
                 .entries
                 .values()
                 .chain(store.sidebar.iter().map(|(_, p)| p))
-                .any(|entry| {
-                    entry
-                        .applied
-                        .is_some_and(|p| p.clip.contains(&event.position))
-                })
+                .any(|entry| entry.applied.is_some_and(|p| p.contains(event.position)))
             {
                 for browser in store
                     .entries
@@ -1211,6 +1250,7 @@ impl Element for PreviewFrame {
         }
         let mut store = self.store.borrow_mut();
         let sender = store.sender.clone();
+        let button_occlusion = store.button_occlusion;
         let Store {
             entries, sidebar, ..
         } = &mut *store;
@@ -1219,6 +1259,13 @@ impl Element for PreviewFrame {
             .map(|(&key, p)| (key, p, false))
             .chain(sidebar.iter_mut().map(|(key, p)| (*key, p, true)))
         {
+            entry.placement = entry.placement.map(|mut placement| {
+                placement.occlusion = button_occlusion.filter(|hole| {
+                    let overlap = placement.clip.intersect(hole);
+                    overlap.size.width > px(0.0) && overlap.size.height > px(0.0)
+                });
+                placement
+            });
             let placement = if self.covered { None } else { entry.placement };
             let Some(placement) = placement else {
                 if entry.applied.take().is_some()
@@ -1843,7 +1890,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn back_to_bottom_stays_outside_native_preview(cx: &mut TestAppContext) {
+    fn back_to_bottom_floats_over_native_preview_without_layout_gap(cx: &mut TestAppContext) {
         let (root, view, cx) = preview_app(
             cx,
             format!(
@@ -1852,6 +1899,7 @@ mod tests {
             ),
         );
         view.update(cx, |app, cx| {
+            app.core.unread_stream_updates = 649;
             for preview in app.html_previews.store.borrow_mut().entries.values_mut() {
                 preview.height = MAX_HEIGHT;
             }
@@ -1870,8 +1918,8 @@ mod tests {
         let button = cx.debug_bounds("back-to-bottom").unwrap();
         let viewport = view.read_with(cx, |app, _| app.chat.borrow().list.viewport_bounds());
         assert!(
-            button.top() >= viewport.bottom() + px(8.0),
-            "Back to bottom belongs below the transcript, above the composer"
+            button.bottom() <= viewport.bottom() - px(8.0),
+            "Back to bottom floats inside the transcript without a reserved footer"
         );
         assert!(
             (button.center().x - viewport.center().x).abs() < px(1.0),
@@ -1879,15 +1927,23 @@ mod tests {
         );
         view.read_with(cx, |app, _| {
             let store = app.html_previews.store.borrow();
-            let clips = store
+            let placements = store
                 .entries
                 .values()
-                .filter_map(|p| p.placement.map(|p| p.clip))
+                .filter_map(|p| p.placement)
                 .collect::<Vec<_>>();
-            assert!(!clips.is_empty());
             assert!(
-                clips.iter().all(|clip| !clip.contains(&button.center())),
+                placements.iter().any(|p| p.clip.contains(&button.center())),
+                "exercise a native preview behind the floating button"
+            );
+            assert!(
+                placements.iter().all(|p| !p.contains(button.center())),
                 "Back to bottom is covered by a native browser clip"
+            );
+            let beside = gpui_kit::point(button.left() - px(4.0), button.center().y);
+            assert!(
+                placements.iter().any(|p| p.contains(beside)),
+                "HTML beside the button must remain visible and interactive"
             );
         });
         cx.simulate_click(button.center(), gpui_kit::Modifiers::default());
@@ -1900,11 +1956,41 @@ mod tests {
                 viewport,
                 "hiding the button must not resize the transcript"
             );
+            assert!(app.html_previews.store.borrow().button_occlusion.is_none());
         });
         drop(view);
         cx.update(|window, _| window.remove_window());
         cx.run_until_parked();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn floating_button_only_excludes_its_pill_without_reflow() {
+        let full = Bounds::new(
+            gpui_kit::point(px(0.0), px(0.0)),
+            size(px(600.0), px(480.0)),
+        );
+        let before = Placement::new(full, full).unwrap();
+        let hole = Bounds::new(
+            gpui_kit::point(px(230.0), px(430.0)),
+            size(px(140.0), px(32.0)),
+        );
+        let placed = Placement {
+            occlusion: Some(hole),
+            ..before
+        };
+        assert!(!placed.contains(hole.center()));
+        assert!(
+            placed.contains(hole.origin),
+            "rounded corners retain HTML pixels"
+        );
+        assert!(placed.contains(gpui_kit::point(hole.left() - px(1.0), hole.center().y)));
+        assert!(!placed.needs_layout(Some(before), false));
+        assert!(!placed.needs_layout(Some(before), true));
+        assert!(
+            before.contains(hole.center()),
+            "removing the button restores native input"
+        );
     }
 
     #[gpui_kit::test]
