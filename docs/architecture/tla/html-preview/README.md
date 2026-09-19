@@ -55,3 +55,8 @@ inline/sidebar mounts and that sidebar boundary dispatch leaves the transcript u
 The [wheel ownership model](../html-scroll/README.md) separately checks the intended routing
 protocol, including short inline content and non-moving scroll candidates; it does not establish
 native browser/GPUI refinement. The native fixture checks actual scroll routing and long-table geometry.
+
+GPUI Kit 0.6.4 controls: framework dialogs and popup menus replace manual keyboard
+and focus handling. Their application open-state projection still drives the same
+covering-overlay input to `Frame`; native preview visibility and retention transitions
+are unchanged. Rust integration tests check dismissal and menu activation.

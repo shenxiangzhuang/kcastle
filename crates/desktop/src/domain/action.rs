@@ -22,10 +22,6 @@ pub(crate) enum Action {
     SelectDetails(Option<DetailsSelection>),
     SetDetailsTab(DetailsTab),
     SetComposerMenu(Option<ComposerMenu>),
-    MoveComposerHighlight {
-        delta: isize,
-        item_count: usize,
-    },
     ToggleSessionSearch,
     ToggleSidebarOptions,
     CloseTransientOverlays,

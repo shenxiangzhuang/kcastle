@@ -30,9 +30,10 @@ use crate::domain::{
 };
 use crate::dsh_markdown;
 use crate::layout::TrajectoryMode;
-use crate::streaming_markdown::StreamingMarkdownState;
 use crate::ui_automation::ids;
 use crate::ui_theme::{TrajectoryPalette, metrics, trajectory_palette};
+use gpui_kit::base::TextViewState;
+use gpui_kit::{AppContext, Entity};
 
 const TIMELINE_INPUT_TOP: f32 = 6.0;
 const TIMELINE_MODEL_TOP: f32 = 20.0;
@@ -251,9 +252,8 @@ struct TrajectoryMarkdownCacheKey {
 #[derive(Debug, Default)]
 pub(crate) struct TrajectoryDetailsMarkdownCache {
     key: Option<TrajectoryMarkdownCacheKey>,
-    markdown: StreamingMarkdownState,
-    fallback: SharedString,
-    selection: Option<crate::platform::gpui::MessageSelection>,
+    markdown: Option<Entity<TextViewState>>,
+    source: String,
 }
 
 impl TrajectoryDetailsMarkdownCache {
@@ -263,21 +263,29 @@ impl TrajectoryDetailsMarkdownCache {
         record_id: &TrajectoryItemId,
         source_kind: TrajectoryMarkdownSource,
         source: &str,
-    ) {
+        cx: &mut gpui_kit::App,
+    ) -> Entity<TextViewState> {
         let key = TrajectoryMarkdownCacheKey {
             projection_lineage,
             record_id: record_id.clone(),
             source: source_kind,
         };
-        if self.key.as_ref() != Some(&key) {
-            self.key = Some(key);
-            self.markdown = StreamingMarkdownState::default();
-            self.selection = None;
-            self.fallback = source.to_owned().into();
-        } else if self.fallback.as_ref() != source {
-            self.fallback = source.to_owned().into();
+        if self.key.as_ref() == Some(&key)
+            && let Some(state) = &self.markdown
+        {
+            if self.source != source {
+                let normalized = crate::streaming_markdown::text_view_source(source);
+                state.update(cx, |state, cx| state.set_text(&normalized, cx));
+                self.source = source.to_owned();
+            }
+            return state.clone();
         }
-        self.markdown.update(source);
+        let normalized = crate::streaming_markdown::text_view_source(source);
+        let state = cx.new(|cx| TextViewState::markdown(&normalized, cx));
+        self.markdown = Some(state.clone());
+        self.key = Some(key);
+        self.source = source.to_owned();
+        state
     }
 }
 
@@ -4511,37 +4519,19 @@ impl DesktopApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let generation = self.core.layout_generation;
-        let panel_width = self
-            .trajectory_details_layout
-            .measured_details_width(generation)
-            .unwrap_or_else(|| {
-                self.trajectory_details_layout.details_width(
-                    self.core.layout.trajectory,
-                    generation,
-                    self.core.layout.main_width,
-                )
-            });
-        let mut cache = self.trajectory_details_markdown.borrow_mut();
-        cache.sync(
+        let state = self.trajectory_details_markdown.borrow_mut().sync(
             self.core.session_view.trajectory.projection_lineage(),
             &record.id,
             source_kind,
             source,
-        );
-        let selection = cache
-            .selection
-            .get_or_insert_with(|| crate::platform::gpui::MessageSelection::new(window, cx))
-            .frame(0);
-        selection.clone().wrap(dsh_markdown::render_markdown(
-            record.source_seq,
-            &cache.markdown,
-            false,
-            (panel_width - 32.0).max(1.0),
-            &selection,
-            window,
             cx,
-        ))
+        );
+        let _ = window;
+        div()
+            .text_size(px(16.0))
+            .line_height(px(26.0))
+            .child(dsh_markdown::text_view(&state))
+            .into_any_element()
     }
 
     fn timing_details(
@@ -6481,45 +6471,54 @@ mod tests {
         assert!(!state.reset());
     }
 
-    #[test]
-    fn selected_details_markdown_cache_reparses_only_when_content_identity_changes() {
+    #[gpui_kit::test]
+    fn selected_details_markdown_cache_reuses_only_the_same_content_identity(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         let record = record(9, 0, 100);
         let mut cache = TrajectoryDetailsMarkdownCache::default();
-
-        cache.sync(10, &record.id, TrajectoryMarkdownSource::Preview, "first");
-        assert_eq!(cache.markdown.revision(), 1);
-        cache.sync(10, &record.id, TrajectoryMarkdownSource::Preview, "first");
-        assert_eq!(cache.markdown.revision(), 1);
-
-        let mut layout = TrajectoryDetailsLayoutState::default();
-        layout.observe_details_width(LayoutGeneration(1), 400.0);
-        layout.step(16.0, 400.0, 1_000.0);
-        cache.sync(10, &record.id, TrajectoryMarkdownSource::Preview, "first");
-        assert_eq!(cache.markdown.revision(), 1);
-
-        cache.sync(
-            10,
-            &record.id,
-            TrajectoryMarkdownSource::Preview,
-            "first\n\nsecond",
-        );
-        assert_eq!(cache.markdown.revision(), 2);
-
-        // A tab or session identity switch owns a fresh parser even if the bytes are equal.
-        cache.sync(
-            10,
-            &record.id,
-            TrajectoryMarkdownSource::SystemPrompt,
-            "first\n\nsecond",
-        );
-        assert_eq!(cache.markdown.revision(), 1);
-        cache.sync(
-            11,
-            &record.id,
-            TrajectoryMarkdownSource::SystemPrompt,
-            "first\n\nsecond",
-        );
-        assert_eq!(cache.markdown.revision(), 1);
+        cx.update(|cx| {
+            let first = cache.sync(
+                10,
+                &record.id,
+                TrajectoryMarkdownSource::Preview,
+                "first",
+                cx,
+            );
+            let unchanged = cache.sync(
+                10,
+                &record.id,
+                TrajectoryMarkdownSource::Preview,
+                "first",
+                cx,
+            );
+            assert_eq!(first.entity_id(), unchanged.entity_id());
+            let appended = cache.sync(
+                10,
+                &record.id,
+                TrajectoryMarkdownSource::Preview,
+                "first\n\nsecond",
+                cx,
+            );
+            assert_eq!(first.entity_id(), appended.entity_id());
+            assert_eq!(cache.source, "first\n\nsecond");
+            let tab = cache.sync(
+                10,
+                &record.id,
+                TrajectoryMarkdownSource::SystemPrompt,
+                "first\n\nsecond",
+                cx,
+            );
+            assert_ne!(first.entity_id(), tab.entity_id());
+            let session = cache.sync(
+                11,
+                &record.id,
+                TrajectoryMarkdownSource::SystemPrompt,
+                "first\n\nsecond",
+                cx,
+            );
+            assert_ne!(tab.entity_id(), session.entity_id());
+        });
     }
 
     fn cache_identity(

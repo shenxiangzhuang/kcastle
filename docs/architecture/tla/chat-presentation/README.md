@@ -67,3 +67,9 @@ does not quantify retained grammar/parser memory or cross-window pool contention
 live results and parallel workers; each must violate its invariant. The `flash` fault clears
 ready content on append and must violate `NoIntermediateDowngrade`. A false `NoReady` invariant
 confirms publication is reachable.
+
+GPUI Kit 0.6.4 migration: Trajectory details now use framework TextView parsing and
+selection. They remain outside this Chat-only worker/cache model. Chat publication,
+demand, cancellation and cache transitions are unchanged; the model needs no new action.
+Framework parsing and formula rendering in the separate details panel are covered by
+Rust integration checks, not by `BoundedWorker`.

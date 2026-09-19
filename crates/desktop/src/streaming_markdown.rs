@@ -168,6 +168,31 @@ fn math_parse_options() -> ParseOptions {
     options
 }
 
+/// Adapt LaTeX delimiters to TextView's native math syntax. Code is left literal.
+pub(crate) fn text_view_source(source: &str) -> String {
+    if !source.contains("\\(") && !source.contains("\\[") {
+        return source.to_owned();
+    }
+    let mut protected = Vec::new();
+    if let Ok(root) = markdown::to_mdast(source, &ParseOptions::gfm()) {
+        collect_code_ranges(&root, &mut protected);
+        protected.sort_by_key(|range| range.start);
+    }
+    let replacements = paired_latex_math_delimiters(source, &protected);
+    let mut output = String::with_capacity(source.len());
+    let mut start = 0;
+    for index in replacements {
+        output.push_str(&source[start..index]);
+        output.push_str(match source.as_bytes()[index + 1] {
+            b'[' | b']' => "\n$$\n",
+            _ => "$",
+        });
+        start = index + 2;
+    }
+    output.push_str(&source[start..]);
+    output
+}
+
 fn normalize_latex_math_delimiters(source: &str) -> String {
     let mut protected = Vec::new();
     if let Ok(root) = markdown::to_mdast(source, &ParseOptions::gfm()) {
@@ -379,6 +404,22 @@ mod tests {
         ) || node
             .children()
             .is_some_and(|children| children.iter().any(|child| contains_math(child, display)))
+    }
+
+    #[test]
+    fn text_view_normalizes_only_paired_latex_outside_code() {
+        assert_eq!(
+            super::text_view_source(r"inline \(x\) then \[y\]"),
+            "inline $x$ then \n$$\ny\n$$\n"
+        );
+        for source in [
+            r"`\(x\)`",
+            "```tex\n\\[x\\]\n```",
+            r"unfinished \(x",
+            r"escaped \\(x\)",
+        ] {
+            assert_eq!(super::text_view_source(source), source);
+        }
     }
 
     proptest! {

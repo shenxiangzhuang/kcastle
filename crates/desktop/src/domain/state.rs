@@ -33,7 +33,6 @@ pub(crate) enum ComposerMenu {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ComposerState {
     pub(crate) menu: Option<ComposerMenu>,
-    pub(crate) highlighted_item: usize,
 }
 
 #[derive(Debug)]

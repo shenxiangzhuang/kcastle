@@ -2,13 +2,13 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Textarea;
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable, Icon, IconName};
 use gpui_kit::{
-    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
+    Context, Focusable, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, accesskit::Role, div, prelude::FluentBuilder, px,
-    relative,
 };
 
 use crate::app::{DesktopApp, composer_model_indices};
@@ -16,7 +16,7 @@ use crate::application::{composer_status, empty_conversation_view_model};
 use crate::domain::{Action, ComposerMenu, RunState};
 use crate::platform::gpui::measured_container;
 use crate::ui_automation::ids;
-use crate::ui_theme::{UiPalette, metrics, palette};
+use crate::ui_theme::{metrics, palette};
 
 impl DesktopApp {
     pub(crate) fn empty_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -81,9 +81,13 @@ impl DesktopApp {
                                     .ghost()
                                     .compact()
                                     .tooltip("Choose workspace")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_composer_menu(ComposerMenu::Workspace, window, cx)
-                                    })),
+                                    .map(|button| {
+                                        self.composer_menu_trigger(
+                                            ComposerMenu::Workspace,
+                                            button,
+                                            cx,
+                                        )
+                                    }),
                             ),
                         )
                     })
@@ -209,7 +213,6 @@ impl DesktopApp {
                             .text_base(),
                     ),
             )
-            .children(self.composer_menu_view(cx))
             .child(
                 div()
                     .flex()
@@ -234,9 +237,13 @@ impl DesktopApp {
                                     .on_key_down(cx.listener(|this, event, window, cx| {
                                         this.handle_root_key(event, window, cx)
                                     }))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_composer_menu(ComposerMenu::Commands, window, cx)
-                                    })),
+                                    .map(|button| {
+                                        self.composer_menu_trigger(
+                                            ComposerMenu::Commands,
+                                            button,
+                                            cx,
+                                        )
+                                    }),
                             )
                             .child(
                                 Button::new(if hero {
@@ -266,15 +273,9 @@ impl DesktopApp {
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
                                 }))
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.open_composer_menu(
-                                            ComposerMenu::Permission,
-                                            window,
-                                            cx,
-                                        )
-                                    },
-                                )),
+                                .map(|button| {
+                                    self.composer_menu_trigger(ComposerMenu::Permission, button, cx)
+                                }),
                             ),
                     )
                     .child(
@@ -302,19 +303,9 @@ impl DesktopApp {
                                 .on_key_down(cx.listener(|this, event, window, cx| {
                                     this.handle_root_key(event, window, cx)
                                 }))
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        if this.models[this.selected_model].model.has_api_key() {
-                                            this.open_composer_menu(
-                                                ComposerMenu::Model,
-                                                window,
-                                                cx,
-                                            );
-                                        } else {
-                                            this.open_model_settings_dialog(window, cx);
-                                        }
-                                    },
-                                )),
+                                .map(|button| {
+                                    self.composer_menu_trigger(ComposerMenu::Model, button, cx)
+                                }),
                             )
                             .children(running.then(|| {
                                 div()
@@ -349,269 +340,87 @@ impl DesktopApp {
             )
     }
 
-    pub(crate) fn composer_menu_view(
+    fn composer_menu_trigger(
         &self,
+        kind: ComposerMenu,
+        button: Button,
         cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::AnyElement> {
-        let colors = palette(cx);
-        let menu = self.core.composer.menu?;
-        let body = match menu {
-            ComposerMenu::Commands => div()
-                .flex()
-                .flex_col()
-                .child(menu_title("Commands", cx))
-                .child(menu_item(
-                    "command-export",
-                    IconName::ArrowDown,
-                    "Export session",
-                    "Export the current session as JSONL",
-                    self.core.composer.highlighted_item == 0,
-                    colors,
-                    cx.listener(|this, _, window, cx| {
-                        this.dispatch(Action::SetComposerMenu(None), window, cx);
-                        this.export_session_log(window, cx)
-                    }),
-                ))
-                .child(menu_item(
-                    "command-permission",
-                    IconName::CircleCheck,
-                    "Permission",
-                    "Choose how tool calls are approved",
-                    self.core.composer.highlighted_item == 1,
-                    colors,
-                    cx.listener(|this, _, _, cx| {
-                        this.set_composer_menu(Some(ComposerMenu::Permission), cx)
-                    }),
-                ))
-                .child(menu_item(
-                    "command-model",
-                    IconName::Bot,
-                    "Model",
-                    "Choose model reasoning effort",
-                    self.core.composer.highlighted_item == 2,
-                    colors,
-                    cx.listener(|this, _, window, cx| {
-                        if composer_model_indices(&this.models).next().is_some() {
-                            this.set_composer_menu(Some(ComposerMenu::Model), cx);
-                        } else {
-                            this.open_model_settings_dialog(window, cx);
-                        }
-                    }),
-                ))
-                .into_any_element(),
-            ComposerMenu::Permission => div()
-                .flex()
-                .flex_col()
-                .child(menu_title("Tool permission", cx))
-                .child(menu_choice(
-                    "permission-ask",
-                    "Ask before tools",
-                    "Show an approval card before every shell call",
-                    !self.selected_runtime.read(cx).snapshot().allow_all_tools,
-                    self.core.composer.highlighted_item == 0,
-                    colors,
-                    cx.listener(|this, _, _, cx| this.set_allow_all_tools(false, cx)),
-                ))
-                .child(menu_choice(
-                    "permission-allow",
-                    "Allow all tools",
-                    "Automatically approve tool calls in this app",
-                    self.selected_runtime.read(cx).snapshot().allow_all_tools,
-                    self.core.composer.highlighted_item == 1,
-                    colors,
-                    cx.listener(|this, _, _, cx| this.set_allow_all_tools(true, cx)),
-                ))
-                .into_any_element(),
-            ComposerMenu::Model => {
-                let selected_model = self.models[self.selected_model].label();
-                let effort = self
-                    .selected_reasoning_effort
-                    .as_ref()
-                    .map(effort_label)
-                    .unwrap_or("Default");
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(menu_title("Model and effort", cx))
-                    .child(menu_choice(
-                        "model-root-model",
-                        &selected_model,
-                        "Model",
-                        false,
-                        self.core.composer.highlighted_item == 0,
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.set_composer_menu(Some(ComposerMenu::Models), cx)
-                        }),
-                    ))
-                    .child(menu_choice(
-                        "model-root-effort",
-                        effort,
-                        "Reasoning effort",
-                        false,
-                        self.core.composer.highlighted_item == 1,
-                        colors,
-                        cx.listener(|this, _, _, cx| {
-                            this.set_composer_menu(Some(ComposerMenu::Effort), cx)
-                        }),
-                    ))
-                    .into_any_element()
-            }
-            ComposerMenu::Models => {
-                let models = &self.models;
-                let models = composer_model_indices(models)
-                    .enumerate()
-                    .map(|(position, index)| {
-                        (
-                            position,
-                            index,
-                            models[index].label(),
-                            index == self.selected_model,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(menu_title("Select model", cx))
-                    .children(
-                        models
-                            .into_iter()
-                            .map(|(position, index, label, selected)| {
-                                menu_choice(
-                                    ("composer-model", index),
-                                    &label,
-                                    "Use for future responses",
-                                    selected,
-                                    self.core.composer.highlighted_item == position,
-                                    colors,
-                                    cx.listener(move |this, _, _, cx| this.select_model(index, cx)),
-                                )
-                            }),
-                    )
-                    .into_any_element()
-            }
-            ComposerMenu::Effort => {
-                let efforts = self.models[self.selected_model]
-                    .model
-                    .reasoning_efforts()
-                    .to_vec();
-                let selected = self.selected_reasoning_effort;
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(menu_title("Reasoning effort", cx))
-                    .children(efforts.into_iter().enumerate().map(|(index, effort)| {
-                        let is_selected = selected.as_ref() == Some(&effort);
-                        let label = effort_label(&effort).to_owned();
-                        menu_choice(
-                            ("composer-effort", index),
-                            &label,
-                            "Use for future responses",
-                            is_selected,
-                            self.core.composer.highlighted_item == index,
-                            colors,
-                            cx.listener(move |this, _, _, cx| {
-                                this.set_reasoning_effort(effort, cx);
-                                this.dispatch_local(Action::SetComposerMenu(None), cx);
-                            }),
-                        )
-                    }))
-                    .into_any_element()
-            }
-            ComposerMenu::Workspace => {
-                let projects = self
-                    .project_store
-                    .projects()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, project)| {
-                        (
-                            index,
-                            project.name.clone(),
-                            index == self.core.workspace.active_project,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let mut project_items = Vec::new();
-                for (index, name, selected) in projects {
-                    project_items.push(menu_choice(
-                        ("composer-workspace", index),
-                        &name,
-                        "Switch the active working directory",
-                        selected,
-                        self.core.composer.highlighted_item == index,
-                        colors,
-                        cx.listener(move |this, _, window, cx| {
-                            this.dispatch(Action::SetComposerMenu(None), window, cx);
-                            this.switch_project(index, window, cx)
-                        }),
-                    ));
+    ) -> gpui_kit::AnyElement {
+        let owner = cx.entity().downgrade();
+        Popover::new(("composer-popup", kind as usize))
+            .anchor(if kind == ComposerMenu::Model {
+                gpui_kit::Anchor::BottomRight
+            } else {
+                gpui_kit::Anchor::BottomLeft
+            })
+            .appearance(false)
+            .trigger(button)
+            .open(self.core.composer.menu == Some(kind))
+            .when_some(self.composer_popup.as_ref(), |popover, popup| {
+                popover.track_focus(&popup.focus_handle(cx))
+            })
+            .on_open_change(cx.listener(move |this, open, window, cx| {
+                if *open {
+                    this.open_composer_menu(kind, window, cx);
+                } else if this.core.composer.menu == Some(kind) {
+                    this.dispatch(Action::SetComposerMenu(None), window, cx);
+                    this.composer_popup = None;
                 }
+            }))
+            .content(move |_, _, cx| {
                 div()
-                    .flex()
-                    .flex_col()
-                    .child(menu_title("Workspace", cx))
-                    .children(project_items)
-                    .child(menu_item(
-                        "workspace-add",
-                        IconName::Plus,
-                        "Add workspace…",
-                        "Choose another folder",
-                        self.core.composer.highlighted_item == self.project_store.projects().len(),
-                        colors,
-                        cx.listener(|this, _, window, cx| {
-                            this.dispatch(Action::SetComposerMenu(None), window, cx);
-                            this.add_project(window, cx)
-                        }),
-                    ))
-                    .into_any_element()
+                    .id("composer-menu")
+                    .accessibility_id(ids::COMPOSER_MENU)
+                    .children(
+                        owner
+                            .upgrade()
+                            .and_then(|owner| owner.read(cx).composer_popup.clone()),
+                    )
+            })
+            .into_any_element()
+    }
+
+    pub(crate) fn open_composer_menu(
+        &mut self,
+        kind: ComposerMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if kind == ComposerMenu::Model && !self.models[self.selected_model].model.has_api_key() {
+            self.open_model_settings_dialog(window, cx);
+            return;
+        }
+        self.dispatch(Action::SetComposerMenu(Some(kind)), window, cx);
+        let owner = cx.entity().downgrade();
+        // Menu builders read the app; run after the opening update releases its borrow.
+        window.defer(cx, move |window, cx| {
+            let Some(app) = owner.upgrade() else {
+                return;
+            };
+            if app.read(cx).core.composer.menu != Some(kind) {
+                return;
             }
-        };
-        Some(
-            div()
-                .id("composer-menu")
-                .role(Role::Menu)
-                .accessibility_id(ids::COMPOSER_MENU)
-                .aria_label("Composer menu")
-                .absolute()
-                .track_focus(&self.composer_menu_focus)
-                .capture_key_down(
-                    cx.listener(|this, event, window, cx| this.handle_root_key(event, window, cx)),
+            let popup = PopupMenu::build(window, cx, move |menu, window, cx| {
+                composer_popup_menu(owner, kind, menu, window, cx)
+            });
+            app.update(cx, |this, cx| {
+                cx.subscribe_in(
+                    &popup,
+                    window,
+                    |this, _, _: &gpui_kit::DismissEvent, window, cx| {
+                        this.dispatch(Action::SetComposerMenu(None), window, cx);
+                        // Do not steal focus from an action that just opened a dialog.
+                        if this.modal.is_none() {
+                            this.input.update(cx, |input, cx| input.focus(window, cx));
+                        }
+                    },
                 )
-                .left_0()
-                .right_0()
-                .bottom(relative(1.0))
-                .mb_2()
-                .flex()
-                .occlude()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .flex()
-                        .w_full()
-                        .when(
-                            matches!(
-                                menu,
-                                ComposerMenu::Model | ComposerMenu::Models | ComposerMenu::Effort
-                            ),
-                            |row| row.justify_end(),
-                        )
-                        .child(
-                            div()
-                                .w(px(240.0))
-                                .max_h(px(360.0))
-                                .rounded_xl()
-                                .border_1()
-                                .border_color(colors.border)
-                                .bg(colors.surface)
-                                .shadow_xl()
-                                .overflow_y_scrollbar()
-                                .child(body),
-                        ),
-                )
-                .into_any_element(),
-        )
+                .detach();
+                popup.focus_handle(cx).focus(window, cx);
+                this.composer_popup = Some(popup);
+                cx.notify();
+            });
+        });
     }
 
     pub(crate) fn approval_card(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
@@ -690,97 +499,133 @@ impl DesktopApp {
     }
 }
 
-fn menu_title(title: &'static str, cx: &mut Context<DesktopApp>) -> impl IntoElement {
-    let colors = palette(cx);
-    div()
-        .flex()
-        .items_center()
-        .h(px(metrics::TAB_HEIGHT))
-        .px_3()
-        .border_b_1()
-        .border_color(colors.border)
-        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .child(title)
-}
-
-fn menu_item(
-    id: impl Into<gpui_kit::ElementId>,
-    icon: IconName,
-    title: &'static str,
-    description: &'static str,
-    highlighted: bool,
-    colors: UiPalette,
-    on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
-) -> impl IntoElement {
-    div()
-        .id(id)
-        .role(Role::MenuItem)
-        .aria_label(title)
-        .flex()
-        .items_center()
-        .gap_3()
-        .min_h(px(metrics::DETAILS_HEADER_HEIGHT))
-        .px_3()
-        .cursor_pointer()
-        .when(highlighted, |item| item.bg(colors.selected))
-        .hover(move |item| item.bg(colors.hover))
-        .on_click(on_click)
-        .child(Icon::new(icon).size_4().text_color(colors.muted_text))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(div().text_sm().child(title))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted_text)
-                        .child(description),
-                ),
-        )
-}
-
-fn menu_choice(
-    id: impl Into<gpui_kit::ElementId>,
-    title: &str,
-    description: &'static str,
-    selected: bool,
-    highlighted: bool,
-    colors: UiPalette,
-    on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
-) -> gpui_kit::AnyElement {
-    div()
-        .id(id)
-        .role(Role::MenuItem)
-        .aria_label(title.to_owned())
-        .aria_selected(selected)
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .min_h(px(58.0))
-        .px_3()
-        .cursor_pointer()
-        .when(highlighted, |item| item.bg(colors.selected))
-        .hover(move |item| item.bg(colors.hover))
-        .on_click(on_click)
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .min_w(px(0.0))
-                .gap(px(2.0))
-                .child(div().truncate().text_sm().child(title.to_owned()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(colors.muted_text)
-                        .child(description),
-                ),
-        )
-        .children(selected.then(|| Icon::new(IconName::Check).size_4()))
-        .into_any_element()
+fn composer_popup_menu(
+    owner: gpui_kit::WeakEntity<DesktopApp>,
+    kind: ComposerMenu,
+    mut menu: PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    menu = menu.min_w(px(240.0)).max_h(px(360.0)).scrollable(true);
+    let Some(app) = owner.upgrade() else {
+        return menu;
+    };
+    match kind {
+        ComposerMenu::Commands => {
+            let export = owner.clone();
+            let permission = owner.clone();
+            menu = menu
+                .item(
+                    PopupMenuItem::new("Export session")
+                        .icon(IconName::ArrowDown)
+                        .on_click(move |_, window, cx| {
+                            let _ =
+                                export.update(cx, |this, cx| this.export_session_log(window, cx));
+                        }),
+                )
+                .submenu("Permission", window, cx, move |menu, window, cx| {
+                    composer_popup_menu(
+                        permission.clone(),
+                        ComposerMenu::Permission,
+                        menu,
+                        window,
+                        cx,
+                    )
+                });
+            if composer_model_indices(&app.read(cx).models)
+                .next()
+                .is_some()
+            {
+                menu.submenu("Model", window, cx, move |menu, window, cx| {
+                    composer_popup_menu(owner.clone(), ComposerMenu::Model, menu, window, cx)
+                })
+            } else {
+                menu.item(
+                    PopupMenuItem::new("Configure model").on_click(move |_, window, cx| {
+                        let _ = owner
+                            .update(cx, |this, cx| this.open_model_settings_dialog(window, cx));
+                    }),
+                )
+            }
+        }
+        ComposerMenu::Permission => {
+            let allow = app
+                .read(cx)
+                .selected_runtime
+                .read(cx)
+                .snapshot()
+                .allow_all_tools;
+            for (value, label) in [(false, "Ask before tools"), (true, "Allow all tools")] {
+                let owner = owner.clone();
+                menu = menu.item(PopupMenuItem::new(label).checked(allow == value).on_click(
+                    move |_, _, cx| {
+                        let _ = owner.update(cx, |this, cx| this.set_allow_all_tools(value, cx));
+                    },
+                ));
+            }
+            menu
+        }
+        ComposerMenu::Model => {
+            let models = owner.clone();
+            menu.submenu("Model", window, cx, move |menu, window, cx| {
+                composer_popup_menu(models.clone(), ComposerMenu::Models, menu, window, cx)
+            })
+            .submenu("Reasoning effort", window, cx, move |menu, window, cx| {
+                composer_popup_menu(owner.clone(), ComposerMenu::Effort, menu, window, cx)
+            })
+        }
+        ComposerMenu::Models => {
+            let app = app.read(cx);
+            for index in composer_model_indices(&app.models) {
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(app.models[index].label())
+                        .checked(index == app.selected_model)
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| this.select_model(index, cx));
+                        }),
+                );
+            }
+            menu
+        }
+        ComposerMenu::Effort => {
+            let app = app.read(cx);
+            for effort in app.models[app.selected_model].model.reasoning_efforts() {
+                let owner = owner.clone();
+                let effort = *effort;
+                menu = menu.item(
+                    PopupMenuItem::new(effort_label(&effort))
+                        .checked(app.selected_reasoning_effort == Some(effort))
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                owner.update(cx, |this, cx| this.set_reasoning_effort(effort, cx));
+                        }),
+                );
+            }
+            menu
+        }
+        ComposerMenu::Workspace => {
+            let app = app.read(cx);
+            for (index, project) in app.project_store.projects().iter().enumerate() {
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(project.name.clone())
+                        .checked(index == app.core.workspace.active_project)
+                        .on_click(move |_, window, cx| {
+                            let _ =
+                                owner.update(cx, |this, cx| this.switch_project(index, window, cx));
+                        }),
+                );
+            }
+            menu.separator().item(
+                PopupMenuItem::new("Add workspace")
+                    .icon(IconName::Plus)
+                    .on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |this, cx| this.add_project(window, cx));
+                    }),
+            )
+        }
+    }
 }
 
 fn format_duration(duration: Duration) -> String {

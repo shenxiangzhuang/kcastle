@@ -14,7 +14,7 @@ repository = "https://github.com/shenxiangzhuang/kcastle"
 async-openai = { version = "=0.41.3", default-features = false, features = ["responses", "rustls"] }
 futures-util = "=0.3.34"
 im = "=15.1.0"
-gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
+gpui-kit = { version = "=0.6.4", features = ["tree-sitter-languages"] }
 markdown = "=1.0.0"
 ratex-layout = "=0.1.14"
 ratex-parser = "=0.1.14"

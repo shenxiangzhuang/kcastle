@@ -45,6 +45,31 @@ gap and does not maintain a second lifecycle state machine. Applying a committed
 small patch of changed stable IDs; persistent maps and vectors share untouched structure and
 preserve stable record arcs.
 
+### Framework controls and Trajectory Markdown
+
+GPUI Kit 0.6.4 owns popup positioning, menu keyboard navigation and selection, and
+modal focus trapping, Escape/Enter routing, and backdrop dismissal. The application
+retains only the current composer menu identity and the modal's business data.
+`PopupMenu` submenus replace the former highlighted-item reducer and keyboard dispatcher.
+The root key handler leaves dialog/menu keys to the framework. Menu actions still use
+existing session/configuration guards. The open-state projection continues hiding native
+HTML previews while either kind of overlay covers them.
+
+Trajectory details use one framework `TextViewState` per selected record, source field,
+and projection lineage. Updates reuse that entity and call `set_text`; replacing identity
+drops its selection and parser state. TextView owns Markdown parsing, layout, tables,
+code highlighting and selection. Two math plugins adapt inline and display formulas to
+the existing RaTeX resource cache, including color emoji. Inline formulas supply their
+alphabetic baseline to the framework and inherit surrounding typography. Paired LaTeX
+`\(...\)` and `\[...\]` delimiters normalize outside code; incomplete delimiters remain
+literal until the closing delimiter arrives.
+
+Chat retains its existing bounded preparation pipeline. TextView's scrollable mode is
+an independently scrolling fixed-height document, not the transcript's source-anchored
+working set. The Trajectory migration does not change Chat demand, cancellation, cache
+admission, or atomic streaming publication. The existing shared formula cache remains
+outside Chat's preparation budget, as before; this migration adds no worker pool.
+
 ### Chat viewport
 
 The native GPUI `ListState` owns variable-height row layout and scroll anchoring. On session
