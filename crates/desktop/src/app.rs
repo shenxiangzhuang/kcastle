@@ -2763,6 +2763,13 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("tab");
         cx.update(|window, cx| assert!(view.read(cx).modal_focus.contains_focused(window, cx)));
+        cx.simulate_resize(gpui_kit::size(px(720.0), px(720.0)));
+        cx.run_until_parked();
+        let bounds = cx.debug_bounds("settings-dialog").unwrap();
+        assert!(
+            bounds.left() >= px(0.0) && bounds.right() <= px(720.0),
+            "settings and its close button must fit the narrow window: {bounds:?}"
+        );
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         view.read_with(cx, |app, _| assert!(app.modal.is_none()));

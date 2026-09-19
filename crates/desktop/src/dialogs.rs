@@ -203,9 +203,13 @@ fn settings_dialog_view(
             ),
     );
     div()
+        .when(cfg!(test), |element| {
+            element.debug_selector(|| "settings-dialog".to_owned())
+        })
         .flex()
         .relative()
         .w(px(800.0))
+        .max_w_full()
         .h(px(570.0))
         .rounded(px(24.0))
         .bg(colors.surface)

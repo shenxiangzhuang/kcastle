@@ -45,7 +45,7 @@ gap and does not maintain a second lifecycle state machine. Applying a committed
 small patch of changed stable IDs; persistent maps and vectors share untouched structure and
 preserve stable record arcs.
 
-### Framework controls and Trajectory Markdown
+### Framework controls
 
 GPUI Kit 0.6.4 owns popup positioning, menu keyboard navigation and selection, and
 modal focus trapping, Escape/Enter routing, and backdrop dismissal. The application
@@ -55,20 +55,11 @@ The root key handler leaves dialog/menu keys to the framework. Menu actions stil
 existing session/configuration guards. The open-state projection continues hiding native
 HTML previews while either kind of overlay covers them.
 
-Trajectory details use one framework `TextViewState` per selected record, source field,
-and projection lineage. Updates reuse that entity and call `set_text`; replacing identity
-drops its selection and parser state. TextView owns Markdown parsing, layout, tables,
-code highlighting and selection. Two math plugins adapt inline and display formulas to
-the existing RaTeX resource cache, including color emoji. Inline formulas supply their
-alphabetic baseline to the framework and inherit surrounding typography. Paired LaTeX
-`\(...\)` and `\[...\]` delimiters normalize outside code; incomplete delimiters remain
-literal until the closing delimiter arrives.
-
-Chat retains its existing bounded preparation pipeline. TextView's scrollable mode is
-an independently scrolling fixed-height document, not the transcript's source-anchored
-working set. The Trajectory migration does not change Chat demand, cancellation, cache
-admission, or atomic streaming publication. The existing shared formula cache remains
-outside Chat's preparation budget, as before; this migration adds no worker pool.
+Chat and Trajectory keep their shared Markdown renderer. A native 0.6.4 TextView
+comparison found lost ordered-list start numbers and list/task markers in plain-text
+copy, so the Trajectory pilot was withdrawn rather than retaining two renderers.
+See [the acceptance record](../development/gpui-kit-0.6.4-validation.md).
+Chat demand, cancellation, cache admission and atomic streaming publication are unchanged.
 
 ### Chat viewport
 

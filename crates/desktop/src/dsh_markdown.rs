@@ -24,121 +24,6 @@ use crate::streaming_markdown::{MarkdownBlock, StreamingMarkdownState};
 use crate::ui_theme::{UiPalette, markdown_highlight_theme, metrics, palette};
 use gpui_kit::component::highlighter::HighlightTheme;
 
-/// Use the framework's Markdown layout and selection, extending only formula rendering.
-pub(crate) fn text_view(
-    state: &gpui_kit::Entity<gpui_kit::base::TextViewState>,
-) -> gpui_kit::base::TextView {
-    gpui_kit::base::TextView::new(state)
-        .selectable(true)
-        .plugin(MathPlugin { display: false })
-        .plugin(MathPlugin { display: true })
-}
-
-struct MathPlugin {
-    display: bool,
-}
-
-impl gpui_kit::base::MarkdownPlugin for MathPlugin {
-    fn name(&self) -> &str {
-        if self.display {
-            "kcastle-display-math"
-        } else {
-            "kcastle-inline-math"
-        }
-    }
-
-    fn is_block(&self) -> bool {
-        self.display
-    }
-
-    fn parse(
-        &self,
-        node: &Node,
-        context: &gpui_kit::base::MarkdownParseContext<'_>,
-    ) -> Option<gpui_kit::base::MarkdownNode> {
-        let source = context.node_source(node)?;
-        let value = match node {
-            Node::Math(math) if self.display => &math.value,
-            Node::InlineMath(math) if !self.display => &math.value,
-            Node::Paragraph(paragraph) if self.display && source.starts_with("$$") => {
-                let [Node::InlineMath(math)] = paragraph.children.as_slice() else {
-                    return None;
-                };
-                &math.value
-            }
-            _ => return None,
-        };
-        Some(
-            gpui_kit::base::MarkdownNode::new(self.name(), value.clone())
-                .text(source.to_owned())
-                .markdown(source.to_owned()),
-        )
-    }
-
-    fn render(
-        &self,
-        node: &gpui_kit::base::MarkdownNode,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let colors = palette(cx);
-        let Some((formula, _)) = plugin_formula(node, true, 20.0, colors.markdown_text, window, cx)
-        else {
-            return div().child(node.as_text().to_owned()).into_any_element();
-        };
-        div()
-            .w_full()
-            .overflow_x_scrollbar()
-            .child(div().flex().justify_center().min_w_full().child(formula))
-            .into_any_element()
-    }
-
-    fn render_inline(
-        &self,
-        node: &gpui_kit::base::MarkdownNode,
-        context: &gpui_kit::base::InlineRenderContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<gpui_kit::base::InlineElement> {
-        let (formula, baseline) = plugin_formula(
-            node,
-            false,
-            f32::from(context.font_size()),
-            context.text_style().color,
-            window,
-            cx,
-        )?;
-        Some(gpui_kit::base::InlineElement::new(formula).with_baseline(px(baseline)))
-    }
-}
-
-fn plugin_formula(
-    node: &gpui_kit::base::MarkdownNode,
-    display: bool,
-    font_size: f32,
-    color: Hsla,
-    window: &Window,
-    cx: &mut App,
-) -> Option<(AnyElement, f32)> {
-    let requested = cached_math(node.data::<String>()?, display, font_size, window, cx).ok()?;
-    let metrics = match &requested {
-        MathRequest::Pending(metrics) => metrics.clone(),
-        MathRequest::Ready(rendered) => rendered.metrics(),
-    };
-    let colors = palette(cx);
-    Some((
-        math_visual(
-            requested,
-            color,
-            colors.subtle,
-            0.0,
-            0.0,
-            node.data::<String>()?,
-        ),
-        metrics.baseline,
-    ))
-}
-
 const TABLE_FONT_SIZE: f32 = 15.0;
 
 type CodeStyles = HashMap<(String, String), Vec<(Range<usize>, HighlightStyle)>>;
@@ -272,7 +157,6 @@ pub(crate) fn render_prepared_markdown(
     )
 }
 
-#[cfg(test)]
 pub(crate) fn render_markdown(
     message_key: u64,
     state: &StreamingMarkdownState,
@@ -1027,14 +911,45 @@ fn render_math(
     // GPUI exposes no baseline for these flex items; asymmetric margins move the
     // centered SVG by half their difference while preserving the line's bounds.
     let (margin_top, margin_bottom) = inline_offset.map(inline_math_margins).unwrap_or_default();
-    let formula = math_visual(
-        requested,
-        context.colors.markdown_text,
-        context.colors.subtle,
-        margin_top,
-        margin_bottom,
-        source,
-    );
+    let formula = match requested {
+        MathRequest::Ready(rendered) => div()
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h(px(rendered.height))
+            .mt(px(margin_top))
+            .mb(px(margin_bottom))
+            .child(
+                svg()
+                    .path(rendered.asset.path.clone())
+                    .absolute()
+                    .size_full()
+                    .text_color(context.colors.markdown_text),
+            )
+            .children(
+                rendered
+                    .color
+                    .map(|image| img(image).absolute().size_full()),
+            )
+            .when(cfg!(test), |element| {
+                let source = source.to_owned();
+                element.debug_selector(move || format!("math:{source}"))
+            })
+            .into_any_element(),
+        MathRequest::Pending(metrics) => div()
+            .flex_none()
+            .w(px(width))
+            .h(px(metrics.height))
+            .mt(px(margin_top))
+            .mb(px(margin_bottom))
+            .rounded(px(3.0))
+            .bg(context.colors.subtle)
+            .when(cfg!(test), |element| {
+                let source = source.to_owned();
+                element.debug_selector(move || format!("math-pending:{source}"))
+            })
+            .into_any_element(),
+    };
     let formula = if let Some(selection) = context.selection {
         let delimiters = if display { "$$" } else { "$" };
         selection.atom(format!("{delimiters}{source}{delimiters}"), formula)
@@ -1058,55 +973,6 @@ fn render_math(
         )
     } else {
         Some(formula.into_any_element())
-    }
-}
-
-fn math_visual(
-    requested: MathRequest,
-    color: Hsla,
-    placeholder_color: Hsla,
-    margin_top: f32,
-    margin_bottom: f32,
-    source: &str,
-) -> AnyElement {
-    match requested {
-        MathRequest::Ready(rendered) => div()
-            .relative()
-            .flex_none()
-            .w(px(rendered.width))
-            .h(px(rendered.height))
-            .mt(px(margin_top))
-            .mb(px(margin_bottom))
-            .child(
-                svg()
-                    .path(rendered.asset.path.clone())
-                    .absolute()
-                    .size_full()
-                    .text_color(color),
-            )
-            .children(
-                rendered
-                    .color
-                    .map(|image| img(image).absolute().size_full()),
-            )
-            .when(cfg!(test), |element| {
-                let source = source.to_owned();
-                element.debug_selector(move || format!("math:{source}"))
-            })
-            .into_any_element(),
-        MathRequest::Pending(metrics) => div()
-            .flex_none()
-            .w(px(metrics.width))
-            .h(px(metrics.height))
-            .mt(px(margin_top))
-            .mb(px(margin_bottom))
-            .rounded(px(3.0))
-            .bg(placeholder_color)
-            .when(cfg!(test), |element| {
-                let source = source.to_owned();
-                element.debug_selector(move || format!("math-pending:{source}"))
-            })
-            .into_any_element(),
     }
 }
 
@@ -2183,59 +2049,6 @@ mod tests {
         assert_eq!(code_language_label(""), "Text");
     }
 
-    #[gpui_kit::test]
-    fn framework_markdown_renders_and_copies_math_across_updates(cx: &mut TestAppContext) {
-        use gpui_kit::AppContext as _;
-        struct Harness(gpui_kit::Entity<gpui_kit::base::TextViewState>);
-        impl Render for Harness {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div()
-                    .w(px(300.0))
-                    .text_size(px(16.0))
-                    .line_height(px(26.0))
-                    .child(gpui_kit::base::TextSelectionLayer)
-                    .child(super::text_view(&self.0))
-            }
-        }
-        cx.update(crate::init_ui);
-        let source =
-            "Before **$x^2$** after.\n\n$$\ny=2\n$$\n\n$$r=4$$\n\n| Value |\n| --- |\n| $z$ |";
-        let (view, cx) = cx.add_window_view(|_, cx| {
-            Harness(cx.new(|cx| gpui_kit::base::TextViewState::markdown(source, cx)))
-        });
-        cx.run_until_parked();
-        for formula in ["math:x^2", "math:y=2", "math:r=4", "math:z"] {
-            assert!(
-                cx.debug_bounds(formula).is_some(),
-                "missing formula {formula}"
-            );
-        }
-        let state = view.read_with(cx, |view, _| view.0.clone());
-        state.update(cx, |state, cx| state.select_all(cx));
-        let copied = state.read_with(cx, |state, _| state.selected_text());
-        assert!(
-            copied.contains("$x^2$") && copied.contains("y=2") && copied.contains("$z$"),
-            "{copied}"
-        );
-        state.update(cx, |state, cx| state.push_str("\n\nstreamed $w$", cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("math:w").is_some());
-        let rewritten = crate::streaming_markdown::text_view_source(
-            "Replacement \\(a\\) and `\\(literal\\)`.\n\n\\[b=1\\]",
-        );
-        state.update(cx, |state, cx| state.set_text(&rewritten, cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("math:a").is_some());
-        assert!(cx.debug_bounds("math:b=1").is_some());
-        assert!(cx.debug_bounds("math:x^2").is_none());
-        state.update(cx, |state, cx| state.select_all(cx));
-        let copied = state.read_with(cx, |state, _| state.selected_text());
-        assert!(
-            copied.contains("$a$") && copied.contains(r"\(literal\)"),
-            "{copied}"
-        );
-    }
-
     fn math_blocks(source: &str) -> Vec<Node> {
         let mut options = ParseOptions::gfm();
         options.constructs.math_text = true;
@@ -2399,6 +2212,31 @@ mod tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui_kit::test]
+    fn long_code_can_scroll_horizontally(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            &format!("```rust\n{} END\n```", "let value = 123; ".repeat(12)),
+            cx,
+        );
+        let position = |cx: &mut gpui_kit::VisualTestContext| {
+            view.read_with(cx, |view, _| {
+                view.frame.as_ref().unwrap().text_position("END", false)
+            })
+        };
+        let before = position(cx);
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: gpui_kit::point(px(300.0), before.y),
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(-400.0), px(0.0))),
+            ..Default::default()
+        });
+        cx.run_until_parked();
+        let after = position(cx);
+        assert!(
+            after.x < before.x,
+            "horizontal scroll must expose clipped code: {before:?} -> {after:?}"
+        );
     }
 
     #[gpui_kit::test]
@@ -2624,6 +2462,42 @@ mod tests {
             select_markdown(&view, "开始", "结束", cx),
             "开始\n\n• first\n• second\n\nName\tValue\n中文\t42\n\n$$x^2$$\n\n结束"
         );
+    }
+
+    #[gpui_kit::test]
+    fn ordered_and_task_lists_preserve_markers_when_copied(cx: &mut TestAppContext) {
+        let (view, cx) = markdown_selection_harness(
+            "Start\n\n98. first\n99. second\n100. third\n\n- [x] done\n- [ ] pending\n\nEnd",
+            cx,
+        );
+        assert_eq!(
+            select_markdown(&view, "Start", "End", cx),
+            "Start\n\n98. first\n99. second\n100. third\n\n☑ done\n☐ pending\n\nEnd"
+        );
+    }
+
+    // Upgrade acceptance probe: do not replace the shared renderer until this
+    // and the native visual checklist in gpui-kit-0.6.4-validation.md pass.
+    #[gpui_kit::test]
+    #[ignore = "gpui-kit 0.6.4 drops list/task markers in plain-text copy"]
+    fn framework_markdown_list_copy_acceptance(cx: &mut TestAppContext) {
+        use gpui_kit::AppContext as _;
+        cx.update(crate::init_ui);
+        let state = cx.new(|cx| {
+            gpui_kit::base::TextViewState::markdown(
+                "98. first\n99. second\n\n- [x] done\n- [ ] pending",
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.select_all(cx));
+        let selected = state.read_with(cx, |state, _| state.selected_text());
+        for marker in ["98. first", "99. second", "☑ done", "☐ pending"] {
+            assert!(
+                selected.contains(marker),
+                "missing {marker:?} in {selected:?}"
+            );
+        }
     }
 
     #[gpui_kit::test]

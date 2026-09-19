@@ -68,8 +68,7 @@ live results and parallel workers; each must violate its invariant. The `flash` 
 ready content on append and must violate `NoIntermediateDowngrade`. A false `NoReady` invariant
 confirms publication is reachable.
 
-GPUI Kit 0.6.4 migration: Trajectory details now use framework TextView parsing and
-selection. They remain outside this Chat-only worker/cache model. Chat publication,
-demand, cancellation and cache transitions are unchanged; the model needs no new action.
-Framework parsing and formula rendering in the separate details panel are covered by
-Rust integration checks, not by `BoundedWorker`.
+GPUI Kit 0.6.4 acceptance retained the shared Chat/Trajectory Markdown renderer:
+TextView did not preserve list numbering and copy semantics in the migration probe.
+Chat publication, demand, cancellation and cache transitions are unchanged; this
+upgrade requires no model action. See the [acceptance record](../../../development/gpui-kit-0.6.4-validation.md).
