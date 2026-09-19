@@ -1535,8 +1535,6 @@ fn invalid_error(message: impl Into<String>) -> SessionMachineError {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use async_openai::types::responses::{EasyInputMessage, FunctionToolCall, InputItem};
     use proptest::prelude::*;
 
@@ -1926,41 +1924,68 @@ mod tests {
     }
 
     #[test]
-    fn planning_cost_does_not_grow_linearly_with_history() {
+    fn planning_shares_history_instead_of_deep_cloning_it() {
         const TRANSACTIONS: usize = 10_000;
-        const QUARTER: usize = TRANSACTIONS / 4;
 
         let mut machine = SessionMachine::default();
         let lifecycle = machine.plan_batch(lifecycle("tx-lifecycle")).unwrap();
         machine.apply_batch(lifecycle).unwrap();
-        let mut middle = Duration::ZERO;
-        let mut late = Duration::ZERO;
 
         for transaction in 0..TRANSACTIONS {
             let tx = format!("tx-perf-{transaction}");
             let first_input = transaction * 2;
             let mut drafts = input_pair(&tx, first_input, transaction as u64 + 10);
             drafts.extend(input_pair(&tx, first_input + 1, transaction as u64 + 10));
-            let started = Instant::now();
             let batch = machine.plan_batch(drafts).unwrap();
             machine.apply_batch(batch).unwrap();
-            let elapsed = started.elapsed();
-            if (QUARTER..QUARTER * 2).contains(&transaction) {
-                middle += elapsed;
-            } else if (QUARTER * 3..TRANSACTIONS).contains(&transaction) {
-                late += elapsed;
-            }
         }
 
-        // A deep clone per plan makes the final quarter roughly 2.3x the second quarter for this
-        // monotonically growing history. Persistent collections should stay close to logarithmic;
-        // a 2x ceiling leaves ample room for shared-CI scheduling noise while catching O(T²).
-        eprintln!("10k transaction planning: middle-quarter={middle:?}, late-quarter={late:?}");
-        assert!(
-            late <= middle.saturating_mul(2),
-            "planning regressed toward linear-per-history cost: middle={middle:?}, late={late:?}"
-        );
+        let batch = machine
+            .plan_batch(input_pair("tx-shared-history", TRANSACTIONS * 2, 20_000))
+            .unwrap();
+        let candidate = &batch.candidate;
+        let shared_inputs = machine
+            .inputs
+            .iter()
+            .filter(|(id, record)| std::ptr::eq(*record, &candidate.inputs[*id]))
+            .count();
+        let shared_entries = machine
+            .state
+            .entries()
+            .iter()
+            .zip(candidate.state.entries())
+            .filter(|(before, after)| std::ptr::eq(*before, *after))
+            .count();
+        let tx_addresses = machine
+            .seen_txs
+            .iter()
+            .map(std::ptr::from_ref)
+            .collect::<std::collections::HashSet<_>>();
+        let shared_txs = candidate
+            .seen_txs
+            .iter()
+            .filter(|tx| tx_addresses.contains(&std::ptr::from_ref(*tx)))
+            .count();
+
+        // Check sharing directly: elapsed-time ratios also measure CI scheduling pauses.
+        // Updating persistent collections may copy a trie path, but must retain most history.
+        for (name, shared, total) in [
+            ("inputs", shared_inputs, machine.inputs.len()),
+            (
+                "context entries",
+                shared_entries,
+                machine.state.entries().len(),
+            ),
+            ("transactions", shared_txs, machine.seen_txs.len()),
+        ] {
+            assert!(
+                shared > total / 2,
+                "{name}: only {shared}/{total} entries shared"
+            );
+        }
         assert_eq!(machine.next_seq(), 3 + TRANSACTIONS as u64 * 4);
+        machine.apply_batch(batch).unwrap();
+        assert_eq!(machine.next_seq(), 3 + TRANSACTIONS as u64 * 4 + 2);
     }
 
     #[test]

@@ -1,0 +1,113 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src about:; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:none;color:#334155;background:transparent}
+iframe{position:absolute;border:0;display:block;width:640px;height:240px}
+#source{display:none;position:absolute;inset:0;box-sizing:border-box;margin:0;padding:48px 20px 20px;overflow:auto;white-space:pre;font:12px/1.65 ui-monospace,monospace;background:#f8fafc;color:#334155;tab-size:2}
+body.source #source{display:block}body.source iframe{visibility:hidden}
+#tools{position:absolute;z-index:2;top:28px;right:28px;display:flex;gap:2px;padding:3px;border:1px solid #64748b1f;border-radius:8px;background:#fffffff5;box-shadow:0 1px 4px #0f172a0d;user-select:none;-webkit-user-select:none;cursor:default;opacity:0;transition:opacity .12s}
+body:hover #tools,#tools:focus-within,body.source #tools{opacity:1}
+button{display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer}
+button:hover,button[data-active=true]{background:#64748b18}button:focus-visible{outline:2px solid #7187a0;outline-offset:1px}button:disabled{opacity:.35;cursor:wait}
+svg{width:15px;height:15px;pointer-events:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+body.capturing #tools,body.capturing #source{display:none!important}body.capturing iframe{visibility:visible!important}
+@media(hover:none){#tools{opacity:1}}
+@media(prefers-reduced-motion:reduce){#tools{transition:none}}
+html.dark{color:#cbd5e1}html.dark #tools{background:#202630ed;border-color:#94a3b833}html.dark #source{background:#171d26;color:#d4deeb}
+</style>
+<iframe sandbox="allow-scripts" title="Interactive HTML preview" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'; clipboard-read 'none'; clipboard-write 'none'; fullscreen 'none'"></iframe>
+<pre id="source" tabindex="0" aria-label="HTML source"></pre>
+<div id="tools" role="toolbar" aria-label="Preview actions">
+<button id="download" title="保存为图片" aria-label="保存为图片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/></svg></button>
+<button id="expand" title="在右侧栏打开" aria-label="在右侧栏打开"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M14 3v18"/></svg></button>
+<button id="code" title="查看源码" aria-label="查看源码" aria-controls="source" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 7-5 5 5 5m8-10 5 5-5 5M14 4l-4 16"/></svg></button>
+</div>
+<script>
+(() => {
+  const frame = document.querySelector('iframe');
+  const send = data => window.ipc.postMessage(JSON.stringify({...data, generation:__GENERATION__, token:__TOKEN__}));
+  const source = document.querySelector('#source');
+  const tools = document.querySelector('#tools');
+  const download = document.querySelector('#download');
+  const expand = document.querySelector('#expand');
+  const code = document.querySelector('#code');
+  source.textContent = __SOURCE__;
+  let dark = __DARK__, expanded = false, sourceMode = false;
+  window.previewLayout = (width, height, x, y, top = 0, bottom = 0) => {
+    Object.assign(frame.style, {width:width+'px', height:height+'px', left:x+'px', top:y+'px'});
+    // Anchor to the whole document, including on backends that translate a clipped iframe.
+    tools.style.top = (y+28)+'px';
+    tools.style.right = 'calc(100% - '+(x+width)+'px + 28px)';
+    source.style.top = top+'px'; source.style.bottom = bottom+'px';
+  };
+  // AppKit forwards wheels here before WebKit's gesture latching can lose them.
+  window.previewWheel = (x, y, dx, dy) => {
+    if (sourceMode) {
+      const vertical = Math.abs(dy) >= Math.abs(dx);
+      const before = vertical ? source.scrollTop : source.scrollLeft;
+      source.scrollBy({top:vertical ? dy : 0, left:vertical ? 0 : dx, behavior:'instant'});
+      if (!expanded && (vertical ? source.scrollTop : source.scrollLeft) === before) send({kind:'wheel', x, y, dx, dy});
+    } else {
+      const rect = frame.getBoundingClientRect();
+      frame.contentWindow.postMessage({kind:'nativeWheel', x:x-rect.left, y:y-rect.top, dx, dy}, '*');
+    }
+  };
+  // Host wheels (source and toolbar) do not bubble through the iframe listener.
+  // On macOS the native monitor consumes the original event before DOM dispatch.
+  window.addEventListener('wheel', event => {
+    if (event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+    const factor = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? innerHeight : 1;
+    event.preventDefault();
+    window.previewWheel(event.clientX, event.clientY, event.deltaX * factor, event.deltaY * factor);
+  }, {passive:false});
+  window.previewTheme = value => {
+    dark = value;
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    document.documentElement.classList.toggle('dark', dark);
+    frame.contentWindow.postMessage({kind:'theme', dark}, '*');
+  };
+  window.previewMode = (large, showSource) => {
+    expanded = large; sourceMode = showSource;
+    document.body.classList.toggle('source', showSource);
+    expand.setAttribute('data-active', String(large));
+    expand.title = large ? '返回对话 (Esc)' : '在右侧栏打开';
+    expand.setAttribute('aria-label', expand.title);
+    code.setAttribute('data-active', String(showSource));
+    code.setAttribute('aria-expanded', String(showSource));
+    code.title = showSource ? '返回预览' : '查看源码';
+    code.setAttribute('aria-label', code.title);
+    frame.contentWindow.postMessage({kind:'expanded', value:large}, '*');
+    if (showSource) source.focus();
+  };
+  window.previewCaptureFinished = () => {
+    document.body.classList.remove('capturing'); download.disabled = false;
+  };
+  download.onclick = () => {
+    if (download.disabled) return;
+    download.disabled = true;
+    document.body.classList.add('capturing');
+    send({kind:'action', action:'download'});
+  };
+  expand.onclick = () => send({kind:'action', action:'expand'});
+  code.onclick = () => send({kind:'action', action:'source'});
+  const escape = () => {
+    if (sourceMode) send({kind:'action', action:'source'});
+    else if (expanded) send({kind:'action', action:'dismiss'});
+  };
+  window.addEventListener('keydown', event => { if (event.key === 'Escape') escape(); });
+  window.addEventListener('message', event => {
+    if (event.source !== frame.contentWindow || !event.data || typeof event.data !== 'object') return;
+    const data = event.data;
+    if (['height','error'].includes(data.kind) || (data.kind === 'wheel' && !expanded)) send(data);
+    if (data.kind === 'escape') escape();
+  });
+  frame.addEventListener('load', () => {
+    window.previewTheme(dark);
+    window.previewMode(expanded, sourceMode);
+  });
+  frame.srcdoc = __DOCUMENT__;
+  window.previewTheme(dark);
+  send({kind:'ready'});
+})();
+</script>

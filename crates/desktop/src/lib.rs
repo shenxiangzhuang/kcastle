@@ -34,6 +34,7 @@ mod crash;
 mod dialogs;
 mod domain;
 mod dsh_markdown;
+mod html_preview;
 mod layout;
 mod platform;
 mod project;
@@ -178,7 +179,12 @@ fn open_desktop_window(
         Appearance::Dark => Theme::change(ThemeMode::Dark, None, cx),
     }
     cx.open_window(desktop_window_options(cx), move |window, cx| {
-        let view = cx.new(|cx| DesktopApp::new(startup, window, cx));
+        let view = cx.new(|cx| {
+            let app = DesktopApp::new(startup, window, cx);
+            #[cfg(debug_assertions)]
+            let app = html_preview::native_fixture(app);
+            app
+        });
         cx.new(|cx| Root::new(view, window, cx))
     })?;
     Ok(())

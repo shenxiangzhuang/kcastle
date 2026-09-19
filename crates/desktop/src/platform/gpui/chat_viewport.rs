@@ -31,8 +31,8 @@ const MAX_PROSE_BYTES: usize = 16 * 1024;
 const PRESENTATION_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNK_PRESENTATION_BYTES: usize = 1024 * 1024;
 const OVERSCAN: f32 = 600.0;
-const MAX_INDEX_SOURCE_BYTES: usize = 1024 * 1024;
-const MAX_CODE_SOURCE_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_INDEX_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CODE_SOURCE_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct RowKey {
@@ -248,6 +248,21 @@ fn semantic_chunks(source: &str, cancel: &AtomicBool) -> Option<Vec<SourceChunk>
             .map_or(source.len(), |b| block_start(b));
         if let markdown::mdast::Node::Code(code) = &block.node {
             let code_start = block_start(block);
+            // A browser consumes a document, not independently highlighted line slices.
+            if crate::html_preview::is_html(code.lang.as_deref().unwrap_or_default()) {
+                chunks.push(SourceChunk {
+                    range: if index == 0 { 0 } else { code_start }..end,
+                    body: code_start..block.key + block.source.len(),
+                    fence: None,
+                    literal: false,
+                    gap_before: Some(gap),
+                    code: Some(CodeSlice {
+                        source: code_start..block.key + block.source.len(),
+                        visible: 0..code.value.len(),
+                    }),
+                });
+                continue;
+            }
             let mut start = 0;
             let mut pieces = Vec::new();
             let mut offset = 0;
@@ -451,7 +466,7 @@ impl ChatRow {
             .as_ref()
             .map(|code| code.visible.clone())
     }
-    fn preparation_range(&self) -> Option<Range<usize>> {
+    pub(crate) fn preparation_range(&self) -> Option<Range<usize>> {
         self.chunk.as_ref().map(|c| {
             c.code
                 .as_ref()
@@ -543,6 +558,10 @@ impl Default for ChatViewport {
     }
 }
 impl ChatViewport {
+    pub(crate) fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
     pub(crate) fn activate(&mut self, namespace: String) {
         if self.namespace != namespace {
             self.namespace = namespace;
@@ -1537,6 +1556,37 @@ mod tests {
             message_index: 0,
             revision: 1,
             chunk: Some(chunk),
+        }
+    }
+
+    #[test]
+    fn html_documents_are_atomic_and_keep_distinct_row_identities() {
+        let html = format!(
+            "<style>body {{ color: blue }}</style>\n{}<script>let x = 1;</script>",
+            "<p>中文</p>\n".repeat(300)
+        );
+        let source =
+            format!("Before\n\n```html\n{html}\n```\n\nBetween\n\n```HTML\n{html}\n```\n\nAfter");
+        let chunks = semantic_chunks(&source, &AtomicBool::new(false)).unwrap();
+        let rows = chunks
+            .into_iter()
+            .map(|c| indexed_row(&source, c))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.iter().map(ChatRow::plain).collect::<String>(), source);
+        let documents = rows
+            .iter()
+            .filter(|r| r.code_visible().is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(documents.len(), 2);
+        assert_ne!(documents[0].key, documents[1].key);
+        for row in documents {
+            let prepared = dsh_markdown::prepare_markdown(
+                &row.markdown_source(),
+                markdown_highlight_theme(false),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(prepared.html_document(), Some(html.as_str()));
         }
     }
 

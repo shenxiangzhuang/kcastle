@@ -172,21 +172,33 @@ impl DesktopApp {
                     .flex()
                     .justify_center()
                     .child(
-                        Button::new("back-to-bottom")
-                            .accessibility_id(ids::BACK_TO_BOTTOM)
-                            .icon(IconName::ArrowDown)
-                            .when(self.core.unread_stream_updates > 0, |button| {
-                                button.label(format!("{} new", self.core.unread_stream_updates))
+                        div()
+                            .relative()
+                            .when(cfg!(test), |element| {
+                                element.debug_selector(|| "back-to-bottom".to_owned())
                             })
-                            .outline()
-                            .compact()
-                            .rounded(px(999.0))
-                            .bg(colors.surface)
-                            .shadow_lg()
-                            .tooltip("Back to bottom")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.scroll_chat_to_bottom(window, cx)
-                            })),
+                            .flex()
+                            .child(
+                                Button::new("back-to-bottom")
+                                    .accessibility_id(ids::BACK_TO_BOTTOM)
+                                    .icon(IconName::ArrowDown)
+                                    .when(self.core.unread_stream_updates > 0, |button| {
+                                        button.label(format!(
+                                            "{} new",
+                                            self.core.unread_stream_updates
+                                        ))
+                                    })
+                                    .outline()
+                                    .compact()
+                                    .rounded(px(999.0))
+                                    .bg(colors.surface)
+                                    .shadow_lg()
+                                    .tooltip("Back to bottom")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.scroll_chat_to_bottom(window, cx)
+                                    })),
+                            )
+                            .child(self.html_previews.button_occlusion()),
                     )
             }))
     }
@@ -210,11 +222,32 @@ impl DesktopApp {
         };
         let colors = palette(cx);
         let body = if let Some(selection) = selection {
+            // Retained browsers bridge cache eviction, not rejection of oversized source.
+            let html = if row.message.role == Role::Assistant
+                && row.preparation_range().is_some_and(|range| {
+                    range.len() <= crate::platform::gpui::MAX_CODE_SOURCE_BYTES
+                }) {
+                prepared
+                    .as_ref()
+                    .and_then(|prepared| prepared.html_document())
+                    .map(std::borrow::Cow::Borrowed)
+                    .or_else(|| {
+                        row.code_visible().and_then(|_| {
+                            self.html_previews
+                                .retained_source(row.key)
+                                .map(std::borrow::Cow::Owned)
+                        })
+                    })
+            } else {
+                None
+            };
             #[cfg(test)]
-            let plain_selector = prepared
-                .is_none()
+            let plain_selector = (prepared.is_none() && html.is_none())
                 .then(|| format!("chat-plain:{}", row.message.key.0));
-            let content = if let Some(prepared) = prepared {
+            let content = if let Some(html) = html {
+                self.html_previews
+                    .render(row.key, &html, row.plain(), &selection, cx)
+            } else if let Some(prepared) = prepared {
                 dsh_markdown::render_prepared_markdown(
                     row.message.key.0,
                     &prepared,

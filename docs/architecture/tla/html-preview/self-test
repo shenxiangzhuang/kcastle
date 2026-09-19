@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+for case in stale:CurrentOnly exclusive:MountedDocumentsVisible sidebar-source:CurrentOnly none:MultiplePreviewsReachable none:SidebarAndInlineReachable none:UpdatedSidebarAloneReachable; do
+    fault=${case%:*}
+    invariant=${case#*:}
+    name="probe-$fault"
+    cat > "$name.cfg" <<CFG
+CONSTANT Fault = "$fault"
+SPECIFICATION Spec
+INVARIANT $invariant
+CFG
+    result=0
+    run_tlc "$name" > "$name.log" 2>&1 || result=$?
+    if [[ $result -ne 12 ]] || ! grep -Fq "Invariant $invariant is violated." "$name.log"; then
+        cat "$name.log"
+        echo "FAIL: expected $invariant counterexample" >&2
+        exit 1
+    fi
+    echo "PASS: $fault produces $invariant counterexample"
+done

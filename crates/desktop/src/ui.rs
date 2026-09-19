@@ -16,6 +16,16 @@ use crate::ui_theme::palette;
 impl Render for DesktopApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.apply_pending_trajectory_query_restore(window, cx);
+        self.html_previews.sync(
+            self.chat.borrow().namespace(),
+            self.core.session_view.trajectory.projection_lineage(),
+            self.core
+                .session_view
+                .conversation
+                .messages
+                .iter()
+                .map(|message| message.as_ref()),
+        );
         let empty = conversation_view_model(&self.core).empty;
         let sidebar_mode = self.core.layout.sidebar;
         let colors = palette(cx);
@@ -82,6 +92,34 @@ impl Render for DesktopApp {
                     .children(self.approval_card(cx))
                     .child(self.docked_composer(window, cx))
             });
+        let main = if let Some(preview) = self
+            .html_previews
+            .sidebar(&self.core.session_view.conversation.messages, cx)
+        {
+            // Reserve chat space even when the left sidebar is at its widest.
+            let available = f32::from(window.viewport_size().width)
+                - if sidebar_mode == SidebarMode::Expanded {
+                    sidebar_max_width
+                } else {
+                    0.0
+                };
+            h_resizable("chat-preview-layout")
+                .child(
+                    resizable_panel()
+                        .size_range(px(320.0)..gpui_kit::Pixels::MAX)
+                        .child(main),
+                )
+                .child(
+                    resizable_panel()
+                        .size(px((available * 0.5).min(640.0)))
+                        .size_range(px(280.0)..px((available - 320.0).max(280.0)))
+                        .flex_none()
+                        .child(preview),
+                )
+                .into_any_element()
+        } else {
+            main.into_any_element()
+        };
         let content = match sidebar_mode {
             SidebarMode::Expanded => h_resizable("app-layout")
                 .child(
@@ -97,7 +135,7 @@ impl Render for DesktopApp {
                 .into_any_element(),
             SidebarMode::Rail => main.into_any_element(),
         };
-        div()
+        let root = div()
             .id("app-main")
             .role(Role::Main)
             .accessibility_id(ids::APP_MAIN)
@@ -127,6 +165,12 @@ impl Render for DesktopApp {
             .when(sidebar_mode == SidebarMode::Rail, |root| {
                 root.child(self.sidebar(window, cx))
             })
-            .children(self.modal_view(window, cx))
+            .children(self.modal_view(window, cx));
+        self.html_previews.frame(
+            root,
+            self.modal.is_some()
+                || self.core.composer.menu.is_some()
+                || self.core.sidebar.options_open,
+        )
     }
 }

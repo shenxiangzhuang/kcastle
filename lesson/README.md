@@ -7,5 +7,6 @@
 
 ## Bug
 
+- [为什么滚动处理函数正确，HTML 和正文仍会轮流卡住？](2026-09-18-bug-native-html-wheel-routing.md)：从原生到 DOM 的投递断点和错误 GPUI 接收视图出发，解释滚动归属、模型假设与 release 实机验收的边界。
 - [为什么 SVG 有彩色 Emoji，App 却显示黑色且被裁切？](2026-09-16-bug-formula-emoji.md)：覆盖绘制边界、位图边界、实际 App 的浅深主题验收，以及 Computer Use 跨应用故障对照。
 - [为什么一条中文公式会让桌面应用多占约 228 MB？](2026-09-15-bug-math-font-memory.md)：从进程分类与独立分配计量定位字体常驻，解释可选回退的加载语义、默认字体共享，以及 GPU 统一内存的测量边界。

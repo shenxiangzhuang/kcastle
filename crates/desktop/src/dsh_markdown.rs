@@ -37,6 +37,22 @@ pub(crate) struct PreparedMarkdown {
 }
 
 impl PreparedMarkdown {
+    pub(crate) fn html_document(&self) -> Option<&str> {
+        let mut blocks = self.state.frozen().iter().chain(self.state.tail_blocks());
+        let block = blocks.next()?;
+        if blocks.next().is_some() {
+            return None;
+        }
+        match &block.node {
+            Node::Code(code)
+                if crate::html_preview::is_html(code.lang.as_deref().unwrap_or_default()) =>
+            {
+                Some(&code.value)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn bytes(&self) -> usize {
         self.state.source().len() * 8
             + self
@@ -75,6 +91,12 @@ pub(crate) fn prepare_markdown(
         .chain(state.tail_blocks())
         .map(|block| (&block.node, 16.0_f32))
         .collect::<Vec<_>>();
+    // Standalone HTML is rendered by the browser; its source view is plain text.
+    if nodes.len() == 1
+        && matches!(nodes[0].0, Node::Code(block) if crate::html_preview::is_html(block.lang.as_deref().unwrap_or_default()))
+    {
+        return Some(PreparedMarkdown { state, code, math });
+    }
     while let Some((node, font_size)) = nodes.pop() {
         if cancelled.load(Ordering::Relaxed) {
             return None;
@@ -2278,6 +2300,22 @@ mod tests {
         assert!(
             cx.debug_bounds(r"math-fallback:\sum_t O(t^2) = O(T^3)")
                 .is_none()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn standalone_html_preview_does_not_prepare_unused_highlights(cx: &mut TestAppContext) {
+        cx.update(crate::init_ui);
+        let prepared = super::prepare_markdown(
+            "```html\n<style>body { color: red }</style><button>Run</button>\n```",
+            crate::ui_theme::markdown_highlight_theme(false),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(prepared.html_document().is_some());
+        assert!(
+            prepared.code.is_empty(),
+            "native HTML previews never use syntax highlights"
         );
     }
 
