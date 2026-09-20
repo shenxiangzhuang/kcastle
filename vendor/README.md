@@ -1,5 +1,35 @@
 # Dependency patches
 
+## IME candidate positioning
+
+`gpui-base` is copied from crates.io 0.6.4 (upstream commit
+`3c387ae0a3e9b14ee39fe98be2b51a882800aa16` in
+https://github.com/longbridge/gpui-kit), retaining its Apache-2.0 license.
+Only sources, the manifest, README and license are vendored; unused test/bench
+targets are removed from the manifest.
+
+An IME can request the newly inserted caret's bounds before the next paint.
+The old shaped lines cannot resolve that offset, and upstream substitutes the
+input's origin, making the candidate panel jump left and back after repaint.
+The shared input handler now falls back to the last laid-out caret; if only the
+range end is unavailable, it uses the resolved start. Input, Textarea and Editor
+all use this handler. No composition or undo state changes.
+
+The application regression queries actual composer geometry before repaint,
+including CJK/emoji text, wrapped lines and a scrolled multi-line input:
+
+```sh
+cargo test --locked -p kcastle-desktop composer_ime_bounds_do_not_jump_before_repaint
+```
+
+For native acceptance, type a Chinese sentence, then continue entering pinyin
+without committing it. Repeat on a wrapped/scrolled line and in a search field;
+the candidate panel should stay by the composition rather than jump to the left
+edge. Also check candidate selection and Escape cancellation. Native candidate
+panel behavior still requires the affected OS/input method.
+
+Remove this patch when an upstream release passes the regression and native check.
+
 ## XIM compound-text decoding
 
 `xim-ctext` is a compatibility bridge: `zed-xim 0.4.0-zed` requires the 0.3 API,
