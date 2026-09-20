@@ -2715,6 +2715,69 @@ fn presentation_namespace(project_id: &ProjectId, session_id: &SessionId) -> Str
 mod tests {
     use super::*;
 
+    #[gpui_kit::test]
+    fn composer_ime_bounds_do_not_jump_before_repaint(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::EntityInputHandler;
+
+        let root = std::env::temp_dir().join(format!("kcastle-ime-{}", SessionId::new()));
+        let (startup, _) = crate::desktop_startup(root.clone()).unwrap();
+        cx.update(crate::init_ui);
+        let (view, cx) = cx.add_window_view(|window, cx| DesktopApp::new(startup, window, cx));
+        cx.simulate_resize(gpui_kit::size(px(1180.0), px(720.0)));
+        let input = view.read_with(cx, |app, _| app.input.clone());
+        for prefix in [
+            "这是一段已经输入的中文文字".to_owned(),
+            "中文😀 mixed text ".repeat(8),
+            format!("{}这是一段已经输入的中文文字", "前面的行\n".repeat(20)),
+        ] {
+            cx.update(|window, cx| {
+                input.update(cx, |input, cx| {
+                    input.set_value("", window, cx);
+                    input.replace_text_in_range(None, &prefix, window, cx);
+                    input.focus(window, cx);
+                });
+            });
+            cx.run_until_parked();
+
+            if prefix.contains('\n') {
+                cx.update(|_, cx| {
+                    input.update(cx, |input, cx| {
+                        input.set_scroll_offset(point(px(0.0), px(-200.0)), cx);
+                    });
+                });
+                cx.run_until_parked();
+            }
+
+            for composing in ["n", "ni", "nihao", "你好"] {
+                cx.update(|window, cx| {
+                    input.update(cx, |input, cx| {
+                        let bounds = input.text_bounds().unwrap();
+                        let before = input.selected_text_range(false, window, cx).unwrap().range;
+                        let previous = input
+                            .bounds_for_range(before.end..before.end, bounds, window, cx)
+                            .unwrap();
+                        input.replace_and_mark_text_in_range(None, composing, None, window, cx);
+                        let range = input.selected_text_range(false, window, cx).unwrap().range;
+                        let pending = input
+                            .bounds_for_range(range.end..range.end, bounds, window, cx)
+                            .unwrap();
+                        assert!(
+                            (pending.origin.x - previous.origin.x).abs() < px(40.0),
+                            "IME caret jumped before repaint for {composing:?}: {previous:?} -> {pending:?}"
+                        );
+                        assert_eq!(pending.origin.y, previous.origin.y);
+                        let marked = input.marked_text_range(window, cx).unwrap();
+                        let marked_bounds = input.bounds_for_range(marked, bounds, window, cx).unwrap();
+                        assert!(marked_bounds.size.width >= px(0.0));
+                    });
+                });
+                cx.run_until_parked();
+            }
+        }
+        close_test_window(view, cx);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn close_test_window(view: Entity<DesktopApp>, cx: &mut gpui_kit::VisualTestContext) {
         let weak_view = view.downgrade();
         drop(view);
