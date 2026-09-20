@@ -1,0 +1,14 @@
+[package]
+name = "xim-ctext"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Compatibility bridge to the upstream XIM compound-text decoder"
+
+[dependencies]
+xim-ctext-upstream = { package = "xim-ctext", version = "=0.4.1", default-features = false }
+
+[features]
+default = ["std"]
+std = ["xim-ctext-upstream/std"]

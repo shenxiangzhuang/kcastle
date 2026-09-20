@@ -10974,8 +10974,15 @@ checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
 [[package]]
 name = "xim-ctext"
 version = "0.3.0"
+dependencies = [
+ "xim-ctext 0.4.1",
+]
+
+[[package]]
+name = "xim-ctext"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ac61a7062c40f3c37b6e82eeeef835d5cc7824b632a72784a89b3963c33284c"
+checksum = "a4cba0737ee5a6aa47324217b1780e5218fb2c3eab1d960346de56d91f8ca585"
 dependencies = [
  "encoding_rs",
 ]
@@ -11245,7 +11252,7 @@ dependencies = [
  "hashbrown 0.14.5",
  "log",
  "x11rb",
- "xim-ctext",
+ "xim-ctext 0.3.0",
  "xim-parser",
 ]
 
