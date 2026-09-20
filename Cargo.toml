@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/agent", "crates/desktop"]
+members = ["crates/agent", "crates/desktop", "vendor/xim-ctext"]
 exclude = ["fuzz"]
 resolver = "3"
 
@@ -43,7 +43,8 @@ lto = "thin"
 opt-level = 3
 strip = "symbols"
 
-# Local RaTeX 0.1.14 font-memory fixes; see vendor/README.md.
+# Local compatibility and font-memory fixes; see vendor/README.md.
 [patch.crates-io]
+xim-ctext = { path = "vendor/xim-ctext" }
 ratex-font-loader = { path = "vendor/ratex-font-loader" }
 ratex-unicode-font = { path = "vendor/ratex-unicode-font" }

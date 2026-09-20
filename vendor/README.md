@@ -1,4 +1,30 @@
-# RaTeX font-memory patches
+# Dependency patches
+
+## XIM compound-text decoding
+
+`xim-ctext` is a compatibility bridge: `zed-xim 0.4.0-zed` requires the 0.3 API,
+but its decoder rejects GB2312 and panics when IBus commits Chinese on X11.
+The bridge re-exports the API-compatible upstream `xim-ctext 0.4.1`, which supports
+CJK encodings and charset switches within a commit. No decoder is copied or
+maintained locally. Upstream: https://github.com/Riey/xim-rs.
+
+The regression fixtures were generated on Ubuntu 24.04 using libX11's
+`Xutf8TextListToTextProperty` with `XCompoundTextStyle`, the conversion used by
+`ibus-x11`. They cover Chinese, ASCII transitions, mixed charsets, and emoji;
+the old decoder fails the first fixture with `UnsupportedEncoding`.
+
+```sh
+cargo test --locked -p xim-ctext@0.3.0
+```
+
+For native acceptance, launch a rebuilt app on Ubuntu with X11 and IBus/Rime,
+select Chinese candidates in the composer and search inputs, and verify that
+the committed text stays intact and no new panic is logged. Also commit a
+mixed phrase such as `今天是2026年9月20日`.
+
+Remove the bridge when GPUI's XIM dependency uses the corrected decoder directly.
+
+## RaTeX font-memory patches
 
 These two crates are copied from crates.io RaTeX 0.1.14, upstream commit
 `08cae05377938391117913ca4f278e6a3ffb6a8a` in
