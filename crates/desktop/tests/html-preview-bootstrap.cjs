@@ -4,11 +4,14 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const { runInNewContext } = require('node:vm');
 
-const events = {}, messages = [], microtasks = [];
+const events = {}, captures = {}, messages = [], microtasks = [];
 let mutation, height = 198, pageWindowWheel;
 class WheelEvent {
-  constructor(type, properties) { Object.assign(this, {type, defaultPrevented:false}, properties); }
+  constructor(type, properties) {
+    Object.assign(this, {deltaMode:0}, properties, {type, defaultPrevented:false, stopped:false});
+  }
   preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+  stopImmediatePropagation() { this.stopped = true; }
 }
 const parentWindow = { postMessage: message => messages.push(message) };
 const style = () => ({ setProperty(name, value) { this[name] = value; } });
@@ -19,6 +22,8 @@ class Element {
   }
   dispatchEvent(event) {
     event.target = this;
+    captures[event.type]?.(event);
+    if (event.stopped) return !event.defaultPrevented;
     this.onwheel?.(event);
     events[event.type]?.(event);
     pageWindowWheel?.(event); // Page listeners registered after the bootstrap also get a say.
@@ -41,7 +46,7 @@ runInNewContext(readFileSync(`${__dirname}/../src/html_preview/document.js`, 'ut
   parent: parentWindow,
   document: { body, elementFromPoint: () => root, documentElement: root, scrollingElement: root, fonts: { ready: { then() {} } } },
   Element, WheelEvent,
-  addEventListener: (name, callback) => { events[name] = callback; },
+  addEventListener: (name, callback, options) => { (options?.capture ? captures : events)[name] = callback; },
   getComputedStyle: node => ({ marginBottom: '0', overflowX: 'visible', overflowY: node.style['overflow-y'] || 'visible', ...node.style }),
   innerHeight: 240,
   scrollY: 0,
@@ -112,14 +117,53 @@ nativeWheel();
 assert.equal(messages.length, beforeNative + 1, 'an unhandled short document hands off exactly once');
 console.log('HTML preview native wheel: page cancellation and single fallback passed');
 
+// Real DOM delivery must also wait for page window listeners registered after bootstrap.
+const domWheel = (target, options = {}) => {
+  const event = new WheelEvent('wheel', {bubbles:true, cancelable:true,
+    clientX:12, clientY:34, deltaX:0, deltaY:40, ...options});
+  target.dispatchEvent(event);
+  return event;
+};
+for (const scrollHeight of [100, 400]) {
+  root.scrollHeight = scrollHeight;
+  root.scrollTop = 0;
+  const before = messages.length;
+  let delivered = 0;
+  pageWindowWheel = event => { delivered++; event.preventDefault(); };
+  domWheel(root);
+  assert.equal(delivered, 1, 'page window listener receives one wheel');
+  assert.equal(root.scrollTop, 0, 'page cancellation prevents inner scrolling');
+  assert.equal(messages.length, before, 'page cancellation prevents transcript handoff');
+}
+pageWindowWheel = undefined;
+root.scrollHeight = root.clientHeight;
+let domDeliveries = 0;
+pageWindowWheel = () => domDeliveries++;
+let beforeDom = messages.length;
+assert(domWheel(root).defaultPrevented, 'the original browser default is cancelled');
+assert.equal(domDeliveries, 1, 'unhandled DOM input is delivered to the page once');
+assert.equal(messages.length, beforeDom + 1, 'unhandled DOM input hands off once');
+root.scrollHeight = 1000;
+root.scrollTop = 0;
+beforeDom = messages.length;
+domWheel(root, {deltaY:2, deltaMode:1});
+assert.equal(root.scrollTop, 40, 'line deltas are converted once');
+domWheel(root, {deltaY:1, deltaMode:2});
+assert.equal(root.scrollTop, 280, 'page deltas are converted once');
+assert.equal(messages.length, beforeDom);
+assert(!domWheel(root, {cancelable:false}).defaultPrevented);
+assert.equal(root.scrollTop, 280, 'noncancelable input keeps the browser default without a second scroll');
+pageWindowWheel = undefined;
+root.scrollHeight = root.clientHeight;
+root.scrollTop = 0;
+console.log('HTML preview DOM wheel: late window cancellation passed');
+
 // A horizontal table must not consume a vertical gesture (including trackpad drift).
 const table = new Element({style: {overflowX:'auto'}, scrollWidth:400});
 const wheel = (target, dx, dy, options = {}) => {
   const before = messages.length;
-  const event = {target, deltaX:dx, deltaY:dy, deltaMode:0, clientX:12, clientY:34,
-    preventDefault() { this.prevented = true; }, ...options};
-  events.wheel(event);
-  return {forwarded: messages.length > before, prevented: !!event.prevented};
+  const event = domWheel(target, {deltaX:dx, deltaY:dy, ...options});
+  return {forwarded: messages.length > before, prevented: event.defaultPrevented};
 };
 const shortContent = new Element({parentElement:root});
 for (const dy of [-40, 40]) {
@@ -142,7 +186,9 @@ assert(wheel(widget, 40, 0).forwarded, 'vertical widgets must not trap horizonta
 widget.scrollTop = 300;
 assert(wheel(widget, 0, 40).forwarded, 'forward at the widget boundary');
 assert(!wheel(table, 0, 40, {ctrlKey:true}).forwarded, 'preserve browser zoom');
-assert(!wheel(table, 0, 40, {defaultPrevented:true}).forwarded, 'respect document event handlers');
+table.onwheel = event => event.preventDefault();
+assert(!wheel(table, 0, 40).forwarded, 'respect document event handlers');
+table.onwheel = undefined;
 events.message({source:parentWindow, data:{kind:'expanded', value:true}});
 assert.equal(root.style['overflow-y'], 'scroll', 'the sidebar has its own scrollbar');
 root.scrollTop = 500;

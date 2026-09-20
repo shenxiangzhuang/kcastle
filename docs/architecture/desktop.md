@@ -254,8 +254,14 @@ after dispatch. The bootstrap DOM listener skips these marked events to avoid do
 Synthetic events have `isTrusted = false` and do not grant browser user activation. Outside input goes directly to the GPUI view that owns the native clips (the view from the raw
 window handle), bypassing any old WebKit gesture target. `NSWindow.contentView` is an AppKit
 wrapper around that GPUI view and must never be used as the scroll receiver. Coordinates are converted from the native
-window to the full browser viewport before forwarding. Other backends use the DOM wheel handler
-with default handling cancelled. Both entries share the same synchronous ownership policy.
+window to the full browser viewport before forwarding. Other backends intercept cancelable,
+unmodified DOM wheels in window capture, cancel browser scrolling, and stop original propagation.
+They dispatch one synthetic copy to the original target through the same helper as macOS;
+page listeners therefore receive one event and can cancel it even from a later window listener.
+Only after dispatch completes without cancellation does the helper apply the scrolling policy.
+Wheel coordinates, modifiers and delta units are preserved; units are converted once for default
+scrolling. Noncancelable wheels remain with the browser to avoid double scrolling. Both entries
+are synchronous, so there is no queued default scroll that can overtake a later wheel.
 The trusted host also handles DOM wheels over its source view and toolbar through `previewWheel`;
 iframe wheel events do not bubble into the host. macOS consumes the original native wheel before
 DOM dispatch, so the added host listener does not consume a second copy. Source views use the same
@@ -266,7 +272,7 @@ than hit-testing coordinates made stale by asynchronous layout. Sidebar input st
 sidebar at both boundaries; document, trusted host and native callback all enforce this isolation.
 Sidebar roots have their own vertical scrollbar, including while the original inline view is visible. Reversing direction immediately returns
 ownership to an inner scroller with room in that direction. Horizontal tables cannot trap vertical
-gestures; modifier zoom is preserved. The DOM fallback respects events already handled by the document. Mode switches and
+gestures; modifier zoom is preserved. Both paths respect page cancellation before scrolling. Mode switches and
 height reports do not reset the document's scroll offset.
 
 Modal/composer/sidebar menus temporarily hide native previews to keep their windows from covering

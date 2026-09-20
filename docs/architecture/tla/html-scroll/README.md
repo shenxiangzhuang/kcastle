@@ -58,8 +58,11 @@ from an event loop that indefinitely stops servicing a pending event.
   cancelable synthetic wheel before entering the modeled default scrolling policy. The monitor
   selects the current clip for every event and consumes native delivery; `previewWheel`
   reaches the iframe through a trusted host message without requiring WebKit to deliver a native
-  DOM wheel. The bootstrap skips its own synthetic event during DOM propagation and only calls
-  the default scroll handler once dispatch finishes without cancellation.
+  DOM wheel. On other backends the window capture listener cancels the original browser
+  default and propagation, then dispatches one synthetic copy to the original target through
+  the same helper. The bootstrap skips its own synthetic event during DOM propagation and
+  only calls the default scroll handler once dispatch finishes without cancellation,
+  including cancellation by a page window listener registered after the bootstrap.
   A point in the floating Back to bottom pill's native cutout is outside the preview
   (`inside = FALSE`); the macOS monitor and native mouse hit testing share that exclusion.
   Exact rounded-mask geometry and X11/Windows input-region enforcement are implementation
@@ -79,7 +82,11 @@ coordinates. Native hit testing before acceptance and JavaScript execution remai
 Browser/default wheel movement is cancelled, and an inner scroll is synchronous.
 Page-consumed events (for example, canvas zoom via `preventDefault()`) do not enter `Begin`;
 arbitrary page behavior is outside this scrolling model. JS regressions check element and
-window-listener cancellation and exactly one fallback for unhandled native input.
+window-listener cancellation and exactly one fallback for both native and DOM input.
+Modifier and noncancelable DOM wheels bypass this policy. The latter keep their browser
+default, since it cannot be suppressed safely. Event cloning and capture/propagation order
+are implementation assumptions checked by JS/browser tests; the model's `Begin` boundary
+and ownership transitions are unchanged.
 Source replacement, session switching, hidden windows, lost IPC, event coalescing,
 momentum phases, smooth scrolling, zoom, horizontal/vertical coupling and RTL offsets
 are outside this model. The lifecycle model covers retired document tokens; JS tests

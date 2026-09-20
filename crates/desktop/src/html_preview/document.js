@@ -1,6 +1,6 @@
 (() => {
   const send = data => parent.postMessage(data, '*');
-  const nativeWheels = new WeakSet();
+  const forwardedWheels = new WeakSet();
   let scheduled = false, lastHeight = 0, expanded = false;
   const measure = () => {
     scheduled = false;
@@ -43,11 +43,8 @@
     if (event.source === parent && event.data?.kind === 'nativeWheel') {
       const {x, y, dx, dy} = event.data;
       const target = document.elementFromPoint(x, y);
-      const wheel = new WheelEvent('wheel', {bubbles:true, cancelable:true,
+      dispatchWheel(target || document.documentElement, {bubbles:true, cancelable:true,
         clientX:x, clientY:y, deltaX:dx, deltaY:dy});
-      nativeWheels.add(wheel);
-      // Let all page listeners run before applying our default, including window listeners.
-      if ((target || document.documentElement).dispatchEvent(wheel)) scroll(target, x, y, dx, dy);
     }
     if (event.source === parent && event.data?.kind === 'theme') {
       document.documentElement.style.colorScheme = event.data.dark ? 'dark' : 'light';
@@ -75,12 +72,22 @@
     }
     if (!expanded) send({kind:'wheel', x, y, dx, dy});
   };
+  const dispatchWheel = (target, properties) => {
+    const wheel = new WheelEvent('wheel', properties);
+    forwardedWheels.add(wheel);
+    // Both entry points wait for every page listener, including later window listeners.
+    if (target.dispatchEvent(wheel)) {
+      const factor = wheel.deltaMode === 1 ? 20 : wheel.deltaMode === 2 ? innerHeight : 1;
+      scroll(target, wheel.clientX, wheel.clientY, wheel.deltaX * factor, wheel.deltaY * factor);
+    }
+  };
   addEventListener('wheel', event => {
-    if (nativeWheels.has(event) || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
-    const factor = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? innerHeight : 1;
+    if (forwardedWheels.has(event) || event.ctrlKey || event.metaKey || event.defaultPrevented || !event.cancelable) return;
+    // Suppress browser scrolling and duplicate page delivery before redispatching once.
     event.preventDefault();
-    scroll(event.target, event.clientX, event.clientY, event.deltaX * factor, event.deltaY * factor);
-  }, {passive:false});
+    event.stopImmediatePropagation();
+    dispatchWheel(event.target, event);
+  }, {capture:true, passive:false});
   addEventListener('keydown', event => {
     if (event.key === 'Escape') send({kind:'escape'});
   });
